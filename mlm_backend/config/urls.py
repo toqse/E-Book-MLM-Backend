@@ -1,0 +1,103 @@
+from django.contrib import admin
+from django.urls import path
+from rest_framework_simplejwt.views import TokenRefreshView
+
+from apps.admin_panel import views as adminv
+from apps.authentication import views as auth_views
+from apps.commissions import user_views as comm_views
+from apps.courses import views as course_views
+from apps.payments import views as pay_views
+from apps.sponsor_slots import views as slot_views
+from apps.users import member_views as user_views
+from apps.wallet import views as wallet_views
+
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    # Auth
+    path("api/v1/auth/send-otp/", auth_views.send_otp),
+    path("api/v1/auth/verify-otp-register/", auth_views.verify_otp_register),
+    path("api/v1/auth/verify-otp-login/", auth_views.verify_otp_login),
+    path("api/v1/auth/logout/", auth_views.logout),
+    path("api/v1/auth/me/", auth_views.me),
+    path("api/v1/auth/kyc/submit/", auth_views.kyc_submit),
+    path("api/v1/auth/kyc/status/", auth_views.kyc_status),
+    path("api/v1/auth/bank/", auth_views.bank_update),
+    path("api/v1/auth/validate-referral/", auth_views.validate_referral),
+    path("api/v1/auth/token/refresh/", TokenRefreshView.as_view()),
+    # Admin auth
+    path("api/v1/admin/auth/login/", auth_views.admin_password_login),
+    path("api/v1/admin/auth/send-otp/", auth_views.admin_send_otp),
+    path("api/v1/admin/auth/verify-otp/", auth_views.admin_verify_otp),
+    # User — referral & tree
+    path("api/v1/user/referral/", user_views.referral_me),
+    path("api/v1/user/referral/stats/", user_views.referral_stats),
+    path("api/v1/user/referral/list/", user_views.referral_list),
+    path("api/v1/user/tree/", user_views.tree_me),
+    path("api/v1/user/tree/uplines/", user_views.tree_uplines),
+    path("api/v1/user/tree/downlines/", user_views.tree_downlines),
+    path("api/v1/user/tree/level/<int:n>/", user_views.tree_level_n),
+    path("api/v1/admin/tree/user/<int:user_id>/", user_views.admin_tree_user),
+    path("api/v1/admin/tree/platform/", user_views.admin_tree_platform),
+    # Commissions
+    path("api/v1/user/commissions/", comm_views.user_commissions),
+    path("api/v1/user/commissions/summary/", comm_views.user_commissions_summary),
+    path("api/v1/user/commissions/milestones/", comm_views.user_milestones),
+    path("api/v1/user/commissions/tds/", comm_views.user_tds),
+    path("api/v1/admin/commissions/", comm_views.admin_commissions),
+    path("api/v1/admin/commissions/pending/", comm_views.admin_commissions_pending),
+    path("api/v1/admin/commissions/force-credit/", comm_views.admin_force_credit),
+    path("api/v1/admin/commissions/tds-report/", comm_views.admin_tds_report),
+    path("api/v1/admin/commissions/export/", comm_views.admin_commissions_export),
+    # Wallet
+    path("api/v1/user/wallet/", wallet_views.wallet_me),
+    path("api/v1/user/wallet/transactions/", wallet_views.wallet_transactions),
+    path("api/v1/user/wallet/bands/", wallet_views.wallet_bands),
+    path("api/v1/user/wallet/withdraw/", wallet_views.wallet_withdraw),
+    path("api/v1/user/wallet/withdrawals/", wallet_views.wallet_withdrawals_history),
+    path("api/v1/admin/withdrawals/", wallet_views.admin_withdrawals),
+    path("api/v1/admin/withdrawals/pending/", wallet_views.admin_withdrawals_pending),
+    path("api/v1/admin/withdrawals/<int:pk>/approve/", wallet_views.admin_withdrawal_approve),
+    path("api/v1/admin/withdrawals/<int:pk>/reject/", wallet_views.admin_withdrawal_reject),
+    path("api/v1/admin/withdrawals/batch-process/", wallet_views.admin_withdrawals_batch),
+    path("api/v1/admin/withdrawals/export/", wallet_views.admin_withdrawals_export),
+    # Sponsor slots
+    path("api/v1/user/sponsor-slots/", slot_views.my_slots),
+    path("api/v1/user/sponsor-slots/<str:code>/share/", slot_views.share_code),
+    path("api/v1/sponsor-slots/validate/", slot_views.validate_public),
+    path("api/v1/admin/sponsor-slots/", slot_views.admin_slots),
+    path("api/v1/admin/sponsor-slots/flagged/", slot_views.admin_slots_flagged),
+    path("api/v1/admin/sponsor-slots/<str:code>/expire/", slot_views.admin_expire_code),
+    # Courses
+    path("api/v1/courses/", course_views.list_ebooks),
+    path("api/v1/courses/<slug:slug>/", course_views.ebook_detail),
+    path("api/v1/user/courses/enrolled/", course_views.my_enrollments),
+    path("api/v1/user/courses/<slug:slug>/download/", course_views.download_signed),
+    path("api/v1/admin/courses/", course_views.admin_course_list),
+    path("api/v1/admin/courses/<int:pk>/", course_views.admin_course_detail),
+    path("api/v1/admin/courses/enrollments/", course_views.admin_enrollments),
+    # Payments
+    path("api/v1/payments/create-order/", pay_views.create_order),
+    path("api/v1/payments/verify/", pay_views.verify),
+    path("api/v1/payments/webhook/", pay_views.webhook),
+    path("api/v1/user/orders/", pay_views.my_orders),
+    path("api/v1/user/orders/<int:pk>/invoice/", pay_views.order_invoice),
+    path("api/v1/user/orders/<int:pk>/refund/", pay_views.order_refund),
+    path("api/v1/admin/orders/", pay_views.admin_orders),
+    path("api/v1/admin/revenue/", pay_views.admin_revenue),
+    path("api/v1/admin/gst-report/", pay_views.admin_gst_report),
+    # Admin panel
+    path("api/v1/admin/dashboard/", adminv.dashboard),
+    path("api/v1/admin/users/", adminv.admin_users_list),
+    path("api/v1/admin/users/<int:pk>/", adminv.admin_users_detail),
+    path("api/v1/admin/users/<int:pk>/suspend/", adminv.admin_user_suspend),
+    path("api/v1/admin/users/kyc-queue/", adminv.kyc_queue),
+    path("api/v1/admin/users/<int:pk>/kyc/verify/", adminv.kyc_verify),
+    path("api/v1/admin/users/delisted/", adminv.users_delisted),
+    path("api/v1/admin/config/", adminv.system_config_view),
+    path("api/v1/admin/reports/tds/", adminv.report_tds),
+    path("api/v1/admin/reports/gst/", adminv.report_gst),
+    path("api/v1/admin/reports/retail-ratio/", adminv.report_retail_ratio),
+    path("api/v1/admin/reports/compliance/", adminv.report_compliance),
+    path("api/v1/admin/grievances/", adminv.grievances_list),
+    path("api/v1/admin/grievances/<int:pk>/respond/", adminv.grievance_respond),
+]

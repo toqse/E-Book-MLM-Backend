@@ -1,0 +1,280 @@
+MLM Platform — API Documentation
+==================================
+Base URL (local): http://localhost:8000
+API prefix: /api/v1/
+Timezone: Asia/Kolkata (IST); timestamps ISO 8601 in responses where applicable.
+
+CONVENTIONS
+-----------
+Authentication: Bearer JWT in header:
+  Authorization: Bearer <access_token>
+
+Standard JSON envelope (most endpoints):
+  Success:
+    { "success": true, "data": { ... }, "message": "<string>", "errors": null }
+  Error:
+    { "success": false, "data": null, "message": "<string>", "errors": { ... } }
+
+Pagination (list endpoints returning results):
+  { "success": true, "data": { "count": N, "next": null, "previous": null, "results": [ ... ] }, ... }
+  (Some list endpoints return a custom { "results": [...], "count": ... } inside data.)
+
+Monetary amounts: returned as strings with two decimals where applicable (e.g. "30.00").
+
+Roles (admin staff users): SUPER_ADMIN, FINANCE, SUPPORT, MEMBER.
+Admin APIs require is_staff=True and appropriate role (see each endpoint).
+
+Throttling: default DRF throttles — authenticated users ~100/min (see REST_FRAMEWORK in settings).
+
+------------------------------------------------------------------------------
+FLOWS (high level)
+------------------------------------------------------------------------------
+
+1) Member registration (OTP + JWT)
+   - POST /api/v1/auth/send-otp/  purpose=REGISTER, phone or email
+   - POST /api/v1/auth/verify-otp-register/  otp_code, full_name, optional referral_code
+   - Response includes access + refresh JWT and profile stub.
+   - Referral: optional ?ref= on marketing site is sent as referral_code; sponsor FK is immutable after registration.
+
+2) Member login
+   - POST /api/v1/auth/send-otp/  purpose=LOGIN
+   - POST /api/v1/auth/verify-otp-login/
+
+3) Token refresh / logout
+   - POST /api/v1/auth/token/refresh/  (SimpleJWT; body: { "refresh": "<token>" })
+   - POST /api/v1/auth/logout/  body: { "refresh": "<token>" }  (blacklists refresh token)
+
+4) KYC and payout details
+   - POST /api/v1/auth/kyc/submit/  PAN + Aadhaar (Aadhaar stored masked server-side)
+   - GET  /api/v1/auth/kyc/status/
+   - POST /api/v1/auth/bank/  bank account / UPI / preference
+
+5) Course catalog and enrollment
+   - GET /api/v1/courses/  (public) — active e-books
+   - GET /api/v1/courses/<slug>/  (public) — detail
+   - Purchase:
+     - POST /api/v1/payments/create-order/
+       Fields: ebook_slug (optional), sponsor_code (optional sponsor-slot code), is_retail (optional bool)
+     - If valid sponsor slot: amount due 0; GST invoice still generated server-side.
+     - Else Razorpay order created; client pays via Razorpay Checkout.
+     - POST /api/v1/payments/verify/  razorpay_payment_id, razorpay_signature, order_id
+   - GET /api/v1/user/courses/enrolled/
+   - GET /api/v1/user/courses/<slug>/download/ — returns URL + expiry metadata (integrate Azure SAS in production)
+
+6) Binary tree placement (after first qualifying MLM purchase)
+   - On successful PAID order (non-retail): user becomes member, BinaryTreeService places node under sponsor subtree (BFS, left-first).
+   - GET /api/v1/user/tree/ — own subtree snapshot (limited depth)
+   - GET /api/v1/user/tree/uplines/ — ancestor chain
+   - GET /api/v1/user/tree/downlines/ — downline list (simplified listing)
+
+7) Commission engine (async via Celery in production; eager in tests)
+   - On PAID MLM order: direct ₹30 to sponsor; up to three binary uplines × ₹10 each, skipping sponsor duplicate (one-credit rule).
+   - Earning cap from SystemConfig (default ₹22,200) enforced per recipient.
+   - Milestone bonuses on sponsor direct-referral milestones (simplified table in engine).
+   - Refund within window: commissions reversed; enrollment removed.
+
+8) Wallet, bands, withdrawals
+   - Wallet balances updated on commission credit/debit.
+   - Crossing configured band thresholds may auto-issue sponsor-slot batches (see wallet/bands.py).
+   - Member requests withdrawal per band; finance admin approves (Razorpay Payout integration to be wired with env keys).
+
+9) Sponsor slots
+   - Slot codes issued on slot-type bands; validate publicly at checkout.
+   - Member lists batches/codes; share channel logged.
+
+10) Admin / back-office
+   - Admin login: password + OTP 2FA pattern (endpoints provided).
+   - Dashboards, user/KYC management, commissions, withdrawals, reports (stubs where noted in code).
+
+------------------------------------------------------------------------------
+ENDPOINT CATALOG
+------------------------------------------------------------------------------
+
+MODULE: Authentication (/api/v1/auth/)
+POST   /api/v1/auth/send-otp/
+       Body: { "phone": "<optional>", "email": "<optional>", "purpose": "REGISTER"|"LOGIN"|"KYC"|"ADMIN_LOGIN" }
+       Public. Rate limit: max 3 OTP sends / 10 minutes per identifier (cache counter).
+
+POST   /api/v1/auth/verify-otp-register/
+       Body: { "phone"|"email", "otp_code", "full_name", "referral_code"?: str }
+       Public. Creates User with member_id / referral_code / referral_link.
+
+POST   /api/v1/auth/verify-otp-login/
+       Body: { "phone"|"email", "otp_code" }
+       Public.
+
+POST   /api/v1/auth/token/refresh/
+       Body: { "refresh": "<refresh_token>" }  — SimpleJWT.
+
+POST   /api/v1/auth/logout/
+       Auth: Bearer. Body: { "refresh": "<refresh_token>" } — blacklists refresh token.
+
+GET    /api/v1/auth/me/
+PATCH  /api/v1/auth/me/
+       Auth: Bearer. Update limited profile fields.
+
+POST   /api/v1/auth/kyc/submit/
+       Auth: Bearer. PAN + Aadhaar.
+
+GET    /api/v1/auth/kyc/status/
+       Auth: Bearer.
+
+POST   /api/v1/auth/bank/
+       Auth: Bearer. Bank/UPI payout payload.
+
+POST   /api/v1/auth/validate-referral/
+       Public. Body: { "referral_code": "CODE" } — returns sponsor display name if valid.
+
+MODULE: Admin auth (/api/v1/admin/auth/)
+POST   /api/v1/admin/auth/login/
+       Public. Staff email + password (Django authenticate).
+
+POST   /api/v1/admin/auth/send-otp/
+       Public. Same payload as /auth/send-otp/ (typically ADMIN_LOGIN purpose).
+
+POST   /api/v1/admin/auth/verify-otp/
+       Public. Second factor for admin (email + OTP).
+
+MODULE: User — Referral (/api/v1/user/referral*)
+GET    /api/v1/user/referral/
+       Auth: Bearer. Returns referral_code, referral_link, qr_url placeholder.
+
+GET    /api/v1/user/referral/stats/
+       Auth: Bearer. Direct referral counts + sums (simplified).
+
+GET    /api/v1/user/referral/list/
+       Auth: Bearer. Paginated-style list of direct referrals.
+
+MODULE: User — Binary tree (/api/v1/user/tree*)
+GET    /api/v1/user/tree/
+GET    /api/v1/user/tree/uplines/
+GET    /api/v1/user/tree/downlines/
+GET    /api/v1/user/tree/level/<n>/
+       Auth: Bearer.
+
+MODULE: Admin — Tree
+GET    /api/v1/admin/tree/user/<user_id>/
+       Auth: Bearer + admin role (IsAdminRole).
+
+GET    /api/v1/admin/tree/platform/
+       Auth: Bearer + admin role.
+
+MODULE: Commissions (/api/v1/user/commissions*)
+GET    /api/v1/user/commissions/
+GET    /api/v1/user/commissions/summary/
+GET    /api/v1/user/commissions/milestones/
+GET    /api/v1/user/commissions/tds/
+       Auth: Bearer.
+
+MODULE: Admin — Commissions
+GET    /api/v1/admin/commissions/
+GET    /api/v1/admin/commissions/pending/
+POST   /api/v1/admin/commissions/force-credit/
+GET    /api/v1/admin/commissions/tds-report/
+GET    /api/v1/admin/commissions/export/
+       Auth: Bearer + FINANCE (or SUPER_ADMIN via permission class).
+
+MODULE: Wallet (/api/v1/user/wallet*)
+GET    /api/v1/user/wallet/
+GET    /api/v1/user/wallet/transactions/
+GET    /api/v1/user/wallet/bands/
+POST   /api/v1/user/wallet/withdraw/
+GET    /api/v1/user/wallet/withdrawals/
+       Auth: Bearer.
+
+MODULE: Admin — Withdrawals
+GET    /api/v1/admin/withdrawals/
+GET    /api/v1/admin/withdrawals/pending/
+POST   /api/v1/admin/withdrawals/<id>/approve/
+POST   /api/v1/admin/withdrawals/<id>/reject/
+POST   /api/v1/admin/withdrawals/batch-process/
+GET    /api/v1/admin/withdrawals/export/
+       Auth: Bearer + FINANCE.
+
+MODULE: Sponsor slots
+GET    /api/v1/user/sponsor-slots/
+POST   /api/v1/user/sponsor-slots/<code>/share/
+       Auth: Bearer.
+
+POST   /api/v1/sponsor-slots/validate/
+       Public. { "code": "SPONSOR-..." }
+
+GET    /api/v1/admin/sponsor-slots/
+GET    /api/v1/admin/sponsor-slots/flagged/
+POST   /api/v1/admin/sponsor-slots/<code>/expire/
+       Auth: Bearer + admin role.
+
+MODULE: Courses & e-books
+GET    /api/v1/courses/
+GET    /api/v1/courses/<slug>/
+       Public.
+
+GET    /api/v1/user/courses/enrolled/
+GET    /api/v1/user/courses/<slug>/download/
+       Auth: Bearer.
+
+GET    /api/v1/admin/courses/
+POST   /api/v1/admin/courses/
+PATCH  /api/v1/admin/courses/<id>/
+DELETE /api/v1/admin/courses/<id>/  (soft delete in implementation: is_active=False)
+GET    /api/v1/admin/courses/enrollments/
+       Auth: Bearer + admin role. (Upload-to-Azure endpoint to be added per deployment.)
+
+MODULE: Payments & orders
+POST   /api/v1/payments/create-order/
+POST   /api/v1/payments/verify/
+POST   /api/v1/payments/webhook/
+       Webhook: Razorpay signature header X-Razorpay-Signature — must verify HMAC.
+
+GET    /api/v1/user/orders/
+GET    /api/v1/user/orders/<id>/invoice/
+POST   /api/v1/user/orders/<id>/refund/
+
+GET    /api/v1/admin/orders/
+GET    /api/v1/admin/revenue/
+GET    /api/v1/admin/gst-report/
+
+MODULE: Admin panel & compliance
+GET    /api/v1/admin/dashboard/
+
+GET    /api/v1/admin/users/
+PATCH  /api/v1/admin/users/<id>/
+POST   /api/v1/admin/users/<id>/suspend/
+GET    /api/v1/admin/users/kyc-queue/
+POST   /api/v1/admin/users/<id>/kyc/verify/
+GET    /api/v1/admin/users/delisted/
+
+GET    /api/v1/admin/config/
+PATCH  /api/v1/admin/config/   — SUPER_ADMIN only for sensitive keys.
+
+GET    /api/v1/admin/reports/tds/
+GET    /api/v1/admin/reports/gst/
+GET    /api/v1/admin/reports/retail-ratio/
+GET    /api/v1/admin/reports/compliance/
+
+GET    /api/v1/admin/grievances/
+POST   /api/v1/admin/grievances/<id>/respond/
+
+------------------------------------------------------------------------------
+INFRASTRUCTURE & SETTINGS
+------------------------------------------------------------------------------
+- Production database: MySQL 8.x (see config/settings/production.py and .env.example).
+- Tests / CI: SQLite in-memory (config/settings/testing.py); run pytest from project root:
+    set DJANGO_SETTINGS_MODULE=config.settings.testing
+    pytest
+- Celery + Redis: broker/result backend from REDIS_URL; beat schedule includes daily sponsor-slot expiry task.
+- Docker: see mlm_backend/docker/docker-compose.yml (web, nginx, mysql, redis, celery, celery-beat).
+
+ENVIRONMENT VARIABLES (representative)
+--------------------------------------
+SECRET_KEY, DEBUG, ALLOWED_HOSTS,
+DB_ENGINE, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT,
+REDIS_URL,
+RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET,
+RAZORPAY_PAYOUT_KEY_ID, RAZORPAY_PAYOUT_KEY_SECRET,
+FRONTEND_BASE_URL, CORS_ALLOWED_ORIGINS,
+GST_NUMBER, PAN_NUMBER, COMPANY_NAME,
+JWT_ACCESS_TOKEN_LIFETIME_MINUTES, JWT_REFRESH_TOKEN_LIFETIME_DAYS,
+AZURE_STORAGE_* (for ebook/invoice blobs + signed URLs).
+
+END OF apidoc.txt

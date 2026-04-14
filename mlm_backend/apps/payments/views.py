@@ -1,0 +1,139 @@
+import json
+
+from django.conf import settings
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated
+
+from apps.commissions.engine import CommissionEngine
+from apps.common.permissions import IsFinanceAdmin
+from apps.common.responses import envelope_response
+from apps.courses.models import EBook, Enrollment
+
+from .models import Order
+from .services import create_checkout_order, verify_payment, verify_webhook_signature
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def create_order(request):
+    sponsor_code = request.data.get("sponsor_code") or request.data.get("sponsor_slot_code")
+    is_retail = bool(request.data.get("is_retail", False))
+    slug = request.data.get("ebook_slug")
+    ebook = EBook.objects.filter(slug=slug).first() if slug else None
+    try:
+        order, rz = create_checkout_order(
+            request.user,
+            ebook=ebook,
+            sponsor_code=sponsor_code,
+            is_retail=is_retail,
+        )
+    except RuntimeError as e:
+        return envelope_response(None, message=str(e), success=False, status=500)
+    if rz is None:
+        return envelope_response(
+            {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "amount_paise": 0,
+                "razorpay_order_id": None,
+                "key_id": settings.RAZORPAY_KEY_ID,
+                "status": order.status,
+            }
+        )
+    return envelope_response(
+        {
+            "order_id": order.id,
+            "order_number": order.order_number,
+            "amount_paise": rz["amount"],
+            "razorpay_order_id": rz["id"],
+            "key_id": settings.RAZORPAY_KEY_ID,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def verify(request):
+    order_id = request.data.get("order_id")
+    payment_id = request.data.get("razorpay_payment_id")
+    signature = request.data.get("razorpay_signature")
+    order = Order.objects.filter(pk=order_id, user=request.user).first()
+    if not order:
+        return envelope_response(None, message="Order not found", success=False, status=404)
+    try:
+        verify_payment(order, payment_id, signature)
+    except Exception as exc:
+        return envelope_response(None, message=str(exc), success=False, status=400)
+    return envelope_response({"status": "PAID", "order_number": order.order_number})
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def webhook(request):
+    body = request.body
+    sig = request.headers.get("X-Razorpay-Signature", "")
+    if not verify_webhook_signature(body, sig):
+        return envelope_response(None, message="Bad signature", success=False, status=400)
+    payload = json.loads(body.decode("utf-8"))
+    return envelope_response({"received": True, "event": payload.get("event")})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def my_orders(request):
+    qs = Order.objects.filter(user=request.user).order_by("-id")[:50]
+    data = [
+        {
+            "id": o.id,
+            "order_number": o.order_number,
+            "status": o.status,
+            "amount_paid": str(o.amount_paid),
+        }
+        for o in qs
+    ]
+    return envelope_response({"results": data})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def order_invoice(request, pk: int):
+    o = Order.objects.filter(pk=pk, user=request.user).first()
+    if not o or not hasattr(o, "gst_invoice"):
+        return envelope_response(None, message="No invoice", success=False, status=404)
+    inv = o.gst_invoice
+    return envelope_response({"invoice_number": inv.invoice_number, "pdf_url": inv.pdf_url})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def order_refund(request, pk: int):
+    o = Order.objects.filter(pk=pk, user=request.user).first()
+    if not o or o.status != Order.Status.PAID:
+        return envelope_response(None, message="Not refundable", success=False, status=400)
+    if o.refund_eligible_until and timezone.now() > o.refund_eligible_until:
+        return envelope_response(None, message="Refund window closed", success=False, status=400)
+    o.status = Order.Status.REFUNDED
+    o.save(update_fields=["status"])
+    CommissionEngine.reverse_commissions(o)
+    Enrollment.objects.filter(order=o).delete()
+    return envelope_response({"status": "REFUNDED"})
+
+
+@api_view(["GET"])
+@permission_classes([IsFinanceAdmin])
+def admin_orders(request):
+    qs = Order.objects.all().order_by("-id")[:200]
+    return envelope_response({"results": [{"id": x.id, "status": x.status} for x in qs]})
+
+
+@api_view(["GET"])
+@permission_classes([IsFinanceAdmin])
+def admin_revenue(request):
+    return envelope_response({"today": "0", "week": "0", "month": "0"})
+
+
+@api_view(["GET"])
+@permission_classes([IsFinanceAdmin])
+def admin_gst_report(request):
+    return envelope_response({"gstr1": []})

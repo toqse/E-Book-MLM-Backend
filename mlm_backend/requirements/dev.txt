@@ -1,0 +1,6 @@
+-r base.txt
+pytest>=8.0.0,<9
+pytest-django>=4.8.0,<5
+factory-boy>=3.3.0,<4
+responses>=0.25.0,<1
+freezegun>=1.5.0,<2

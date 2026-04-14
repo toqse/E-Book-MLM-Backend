@@ -1,0 +1,54 @@
+from decimal import Decimal
+
+from apps.admin_panel.utils import get_system_config
+from apps.sponsor_slots.services import SponsorSlotService
+
+
+# Cumulative earnings thresholds (₹) — aligned with PDF band table
+BAND_EDGES = [
+    Decimal("200"),
+    Decimal("4000"),
+    Decimal("5000"),
+    Decimal("9000"),
+    Decimal("10000"),
+    Decimal("14000"),
+    Decimal("15000"),
+    Decimal("19000"),
+    Decimal("20000"),
+    Decimal("22200"),
+]
+
+
+def _band_index_for_earnings(total: Decimal) -> int:
+    if total < BAND_EDGES[0]:
+        return 0
+    for i in range(len(BAND_EDGES) - 1):
+        low, high = BAND_EDGES[i], BAND_EDGES[i + 1]
+        if low <= total < high:
+            return i + 1
+    return 9
+
+
+def on_total_earned_updated(wallet):
+    idx = _band_index_for_earnings(wallet.total_earned)
+    prev = wallet.current_band
+    if idx <= prev:
+        return
+    wallet.current_band = idx
+    wallet.save(update_fields=["current_band"])
+    cfg = get_system_config()
+    slot_bands = {2, 4, 6, 8}
+    if idx in slot_bands:
+        from apps.sponsor_slots.models import SponsorSlotBatch
+
+        if not SponsorSlotBatch.objects.filter(
+            issued_to=wallet.user, band_number=idx
+        ).exists():
+            SponsorSlotService.issue_batch(wallet.user, band_number=idx, cfg=cfg)
+
+
+def describe_bands_status(wallet) -> list[dict]:
+    out = []
+    for i in range(1, 10):
+        out.append({"band": i, "unlocked": wallet.current_band >= i})
+    return out
