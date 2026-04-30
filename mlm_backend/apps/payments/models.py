@@ -14,6 +14,13 @@ class Order(models.Model):
         on_delete=models.CASCADE,
         related_name="orders",
     )
+    ebook = models.ForeignKey(
+        "courses.EBook",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="orders",
+    )
     order_number = models.CharField(max_length=40, unique=True)
     base_price = models.DecimalField(max_digits=10, decimal_places=2, default=200)
     gst_amount = models.DecimalField(max_digits=10, decimal_places=2, default=36)

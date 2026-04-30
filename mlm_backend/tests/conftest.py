@@ -28,6 +28,11 @@ def primary_ebook(db):
         title="Primary Course",
         slug="primary-course",
         category="Business",
+        description="Primary course",
+        pages_count=120,
+        language="English",
+        price=200,
+        status=EBook.Status.PUBLISHED,
         file_url="https://example.com/ebook.pdf",
         is_primary=True,
         is_active=True,
@@ -38,7 +43,8 @@ def primary_ebook(db):
 def member_user(db):
     mid, ref, link = allocate_member_identity()
     u = User(
-        phone="9999999999",
+        phone="+919999999999",
+        email="member-test@example.com",
         full_name="Test User",
         member_id=mid,
         referral_code=ref,

@@ -26,16 +26,21 @@ class User(AbstractBaseUser, PermissionsMixin):
         BANK = "BANK", "Bank"
         UPI = "UPI", "UPI"
 
-    phone = models.CharField(max_length=15, unique=True, null=True, blank=True)
+    phone = models.CharField(max_length=20, unique=True, null=True, blank=True)
     email = models.EmailField(unique=True, null=True, blank=True)
     login_identifier = models.CharField(max_length=255, unique=True, db_index=True)
     full_name = models.CharField(max_length=255)
 
     pan_number = models.CharField(max_length=10, null=True, blank=True)
-    aadhaar_number = models.CharField(max_length=12, null=True, blank=True)
+    # Stored as masked form (e.g. XXXX-XXXX-1234), which needs 14 chars.
+    aadhaar_number = models.CharField(max_length=14, null=True, blank=True)
     kyc_status = models.CharField(
         max_length=20, choices=KYCStatus.choices, default=KYCStatus.PENDING
     )
+    kyc_submitted_at = models.DateTimeField(null=True, blank=True)
+    kyc_reviewed_at = models.DateTimeField(null=True, blank=True)
+    kyc_rejection_reason = models.TextField(blank=True, default="")
+    compliance_submission_version = models.PositiveIntegerField(default=0)
 
     is_member = models.BooleanField(default=False)
     role = models.CharField(
@@ -94,7 +99,10 @@ class User(AbstractBaseUser, PermissionsMixin):
         if self.email:
             self.email = self.email.strip().lower()
         if self.phone:
-            self.login_identifier = self.phone
+            self.login_identifier = self.phone.strip()
         elif self.email:
             self.login_identifier = self.email
+        elif self.login_identifier and "@" in self.login_identifier:
+            # Superuser created with email as login_identifier but email field empty
+            self.login_identifier = self.login_identifier.strip().lower()
         super().save(*args, **kwargs)

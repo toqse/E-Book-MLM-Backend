@@ -43,7 +43,16 @@ def create_checkout_order(
     is_retail: bool = False,
 ):
     cfg = get_system_config()
-    base = cfg.product_base_price
+    selected_ebook = ebook
+    if selected_ebook is None:
+        selected_ebook = EBook.objects.filter(
+            is_primary=True,
+            status=EBook.Status.PUBLISHED,
+        ).first()
+    if selected_ebook and selected_ebook.status != EBook.Status.PUBLISHED:
+        raise RuntimeError("Selected book is not published")
+
+    base = selected_ebook.price if selected_ebook else cfg.product_base_price
     gst = (base * cfg.gst_rate).quantize(Decimal("0.01"))
     gateway = Decimal("5.72")
     total = (base + gst + gateway).quantize(Decimal("0.01"))
@@ -59,6 +68,7 @@ def create_checkout_order(
 
     order = Order.objects.create(
         user=user,
+        ebook=selected_ebook,
         order_number=generate_order_number(),
         base_price=base,
         gst_amount=gst,
@@ -72,7 +82,7 @@ def create_checkout_order(
     )
 
     if total == 0 and slot_code:
-        finalize_zero_rupee_order(order, user, ebook, slot_code)
+        finalize_zero_rupee_order(order, user, selected_ebook, slot_code)
         return order, None
 
     client = _client()
@@ -107,7 +117,12 @@ def finalize_zero_rupee_order(order: Order, user: User, ebook: EBook | None, slo
 @transaction.atomic
 def _grant_enrollment(order: Order, user: User, ebook: EBook | None):
     if ebook is None:
-        ebook = EBook.objects.filter(is_primary=True, is_active=True).first()
+        ebook = order.ebook
+    if ebook is None:
+        ebook = EBook.objects.filter(
+            is_primary=True,
+            status=EBook.Status.PUBLISHED,
+        ).first()
     if not ebook:
         return
     Enrollment.objects.get_or_create(
@@ -150,7 +165,10 @@ def verify_payment(order: Order, payment_id: str, signature: str):
     cfg = get_system_config()
     order.refund_eligible_until = timezone.now() + timedelta(days=cfg.refund_window_days)
     order.save()
-    ebook = EBook.objects.filter(is_primary=True, is_active=True).first()
+    ebook = order.ebook or EBook.objects.filter(
+        is_primary=True,
+        status=EBook.Status.PUBLISHED,
+    ).first()
     _grant_enrollment(order, order.user, ebook)
     _place_and_commission(order, order.user)
     _ensure_gst_invoice(order)

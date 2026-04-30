@@ -1,6 +1,35 @@
 from rest_framework.views import exception_handler as drf_exception_handler
 
 
+def _first_validation_message(data) -> str:
+    """Surface the first human-readable validation line as the top-level message."""
+    if not isinstance(data, dict):
+        return "Validation failed"
+    if "detail" in data and len(data) == 1:
+        d = data["detail"]
+        if isinstance(d, list) and d:
+            return str(d[0])
+        return str(d)
+    if "non_field_errors" in data:
+        nfe = data["non_field_errors"]
+        if isinstance(nfe, list) and nfe:
+            return str(nfe[0])
+        if isinstance(nfe, str):
+            return nfe
+    for key, val in data.items():
+        if key in ("detail", "non_field_errors"):
+            continue
+        if isinstance(val, list) and val:
+            return str(val[0])
+        if isinstance(val, dict):
+            nested = _first_validation_message(val)
+            if nested != "Validation failed":
+                return nested
+        if isinstance(val, str):
+            return val
+    return "Validation failed"
+
+
 def envelope_exception_handler(exc, context):
     response = drf_exception_handler(exc, context)
     if response is None:
@@ -9,12 +38,7 @@ def envelope_exception_handler(exc, context):
     if isinstance(data, dict) and "success" in data:
         return response
     errors = data
-    message = "Validation failed"
-    if isinstance(data, dict):
-        if "detail" in data and len(data) == 1:
-            message = str(data["detail"])
-        elif "non_field_errors" in data:
-            message = str(data["non_field_errors"][0])
+    message = _first_validation_message(data)
     response.data = {
         "success": False,
         "data": None,

@@ -8,7 +8,7 @@ from apps.users.services import allocate_member_identity
 @pytest.mark.django_db
 def test_bfs_placement(system_config):
     mid1, r1, l1 = allocate_member_identity()
-    s = User(phone="9000000001", full_name="S", member_id=mid1, referral_code=r1, referral_link=l1)
+    s = User(phone="+919000000001", full_name="S", member_id=mid1, referral_code=r1, referral_link=l1)
     s.set_unusable_password()
     s.save()
     s.is_member = True
@@ -17,7 +17,7 @@ def test_bfs_placement(system_config):
 
     mid2, r2, l2 = allocate_member_identity()
     u = User(
-        phone="9000000002",
+        phone="+919000000002",
         full_name="U",
         member_id=mid2,
         referral_code=r2,

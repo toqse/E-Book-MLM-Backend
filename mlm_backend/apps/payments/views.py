@@ -20,7 +20,14 @@ def create_order(request):
     sponsor_code = request.data.get("sponsor_code") or request.data.get("sponsor_slot_code")
     is_retail = bool(request.data.get("is_retail", False))
     slug = request.data.get("ebook_slug")
-    ebook = EBook.objects.filter(slug=slug).first() if slug else None
+    ebook = EBook.objects.filter(slug=slug, status=EBook.Status.PUBLISHED).first() if slug else None
+    if slug and not ebook:
+        return envelope_response(
+            None,
+            message="Book not found or not published",
+            success=False,
+            status=404,
+        )
     try:
         order, rz = create_checkout_order(
             request.user,

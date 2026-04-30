@@ -1,3 +1,4 @@
 -r base.txt
 mysqlclient>=2.2.0,<3
-gunicorn>=22.0.0,<23
+gunicorn>=23.0.0,<24
+whitenoise>=6.7.0,<7

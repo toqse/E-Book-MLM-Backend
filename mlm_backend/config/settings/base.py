@@ -5,12 +5,19 @@ from pathlib import Path
 from celery.schedules import crontab
 from dotenv import load_dotenv
 
-load_dotenv()
-
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+# Load project .env regardless of process cwd (fixes missing DEFAULT_* when running from repo root/Docker).
+load_dotenv(BASE_DIR / ".env")
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-only-secret-change-me")
 DEBUG = os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes")
+
+# When True, OTP is included in JSON and logged (never use in real production unless you intend it).
+EXPOSE_OTP_IN_RESPONSE = os.environ.get("EXPOSE_OTP_IN_RESPONSE", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
 
@@ -37,6 +44,7 @@ INSTALLED_APPS = [
     "apps.admin_panel",
     "apps.notifications",
     "apps.audit",
+    "apps.agreements",
 ]
 
 MIDDLEWARE = [
@@ -86,6 +94,8 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
+# Local/proxied media serving toggle (use nginx/object storage in real production).
+SERVE_MEDIA = os.environ.get("SERVE_MEDIA", "false").lower() in ("1", "true", "yes")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "users.User"
@@ -112,14 +122,14 @@ REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "apps.common.exceptions.envelope_exception_handler",
 }
 
-ACCESS_MIN = int(os.environ.get("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", "60"))
-REFRESH_DAYS = int(os.environ.get("JWT_REFRESH_TOKEN_LIFETIME_DAYS", "7"))
+ACCESS_MIN = max(1, int(os.environ.get("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", "60")))
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=ACCESS_MIN),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=REFRESH_DAYS),
-    "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
+    # Access-only JWTs — refresh flow disabled (no issuance, no rotation).
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=36500),
+    "ROTATE_REFRESH_TOKENS": False,
+    "BLACKLIST_AFTER_ROTATION": False,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
@@ -151,6 +161,36 @@ RAZORPAY_PAYOUT_KEY_ID = os.environ.get("RAZORPAY_PAYOUT_KEY_ID", "")
 RAZORPAY_PAYOUT_KEY_SECRET = os.environ.get("RAZORPAY_PAYOUT_KEY_SECRET", "")
 
 FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000")
+# Reserved referral code for the company root; maps to the primary superuser (see users.services).
+DEFAULT_COMPANY_REFERRAL_CODE = (
+    os.environ.get("DEFAULT_COMPANY_REFERRAL_CODE", "Admin") or "Admin"
+).strip()
+COMPANY_SUPERUSER_MEMBER_ID = os.environ.get("COMPANY_SUPERUSER_MEMBER_ID", "SYS000001")
 GST_NUMBER = os.environ.get("GST_NUMBER", "")
 COMPANY_PAN = os.environ.get("PAN_NUMBER", "")
 COMPANY_NAME = os.environ.get("COMPANY_NAME", "MLM Platform")
+
+# OTP send endpoints log to stderr when EXPOSE_OTP_IN_RESPONSE is true.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "simple": {
+            "format": "{levelname} {name}: {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "simple",
+        },
+    },
+    "loggers": {
+        "apps.authentication": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}

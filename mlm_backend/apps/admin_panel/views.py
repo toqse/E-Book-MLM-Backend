@@ -1,7 +1,9 @@
+from django.db.models import F
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
 from apps.admin_panel.models import Grievance
+from apps.agreements.models import MemberComplianceProfile
 from apps.admin_panel.utils import get_system_config
 from apps.common.permissions import (
     IsAdminRole,
@@ -73,22 +75,139 @@ def admin_user_suspend(request, pk: int):
     return envelope_response({"ok": True})
 
 
+def _abs_media_url(request, filefield) -> str | None:
+    if not filefield:
+        return None
+    try:
+        return request.build_absolute_uri(filefield.url)
+    except Exception:
+        return filefield.url
+
+
+@api_view(["GET"])
+@permission_classes([IsSupportAdmin])
+def compliance_queue(request):
+    qs = User.objects.filter(kyc_status=User.KYCStatus.PENDING).order_by(
+        F("kyc_submitted_at").desc(nulls_last=True), "-id"
+    )[:100]
+    out = []
+    for u in qs.select_related("compliance_profile"):
+        p = getattr(u, "compliance_profile", None)
+        row = {
+            "user_id": u.id,
+            "member_id": u.member_id,
+            "full_name": u.full_name,
+            "phone": u.phone,
+            "email": u.email,
+            "kyc_submitted_at": u.kyc_submitted_at.isoformat()
+            if u.kyc_submitted_at
+            else None,
+            "compliance_submission_version": u.compliance_submission_version,
+        }
+        if p:
+            row["profile"] = {
+                "date_of_birth": p.date_of_birth.isoformat()
+                if p.date_of_birth
+                else None,
+                "gender": p.gender,
+                "full_address": p.full_address,
+                "city": p.city,
+                "pin_code": p.pin_code,
+                "state": p.state,
+                "country": p.country,
+                "pan_number": p.pan_number,
+                "name_on_pan": p.name_on_pan,
+                "aadhar_number": p.aadhar_number,
+                "name_on_aadhar": p.name_on_aadhar,
+                "nominee_name": p.nominee_name,
+                "nominee_relationship": p.nominee_relationship,
+                "nominee_phone": p.nominee_phone,
+                "nominee_date_of_birth": p.nominee_date_of_birth.isoformat()
+                if p.nominee_date_of_birth
+                else None,
+                "account_holder_name": p.account_holder_name,
+                "bank_name": p.bank_name,
+                "account_number": p.account_number,
+                "ifsc": p.ifsc,
+                "branch": p.branch,
+                "account_type": p.account_type,
+                "payout_preference": p.payout_preference,
+            }
+            row["pan_document_url"] = _abs_media_url(request, p.pan_document)
+            row["aadhar_document_url"] = _abs_media_url(request, p.aadhar_document)
+            row["bank_on_user"] = {
+                "bank_account_number": u.bank_account_number,
+                "bank_ifsc": u.bank_ifsc,
+                "upi_id": u.upi_id,
+            }
+        else:
+            row["profile"] = None
+            row["pan_document_url"] = None
+            row["aadhar_document_url"] = None
+        out.append(row)
+    return envelope_response({"results": out})
+
+
 @api_view(["GET"])
 @permission_classes([IsSupportAdmin])
 def kyc_queue(request):
+    """Deprecated: use GET /api/v1/admin/compliance-queue/ for full payload."""
     qs = User.objects.filter(kyc_status=User.KYCStatus.PENDING)[:100]
     return envelope_response({"results": [u.id for u in qs]})
 
 
 @api_view(["POST"])
 @permission_classes([IsSupportAdmin])
-def kyc_verify(request, pk: int):
+def compliance_approve(request, pk: int):
     u = User.objects.filter(pk=pk).first()
     if not u:
         return envelope_response(None, message="Not found", success=False, status=404)
+    if not MemberComplianceProfile.objects.filter(user=u).exists():
+        return envelope_response(
+            None,
+            message="Member has no compliance profile to approve.",
+            success=False,
+            status=400,
+        )
+    now = timezone.now()
     u.kyc_status = User.KYCStatus.VERIFIED
-    u.save(update_fields=["kyc_status"])
-    return envelope_response({"ok": True})
+    u.kyc_reviewed_at = now
+    u.kyc_rejection_reason = ""
+    u.save(
+        update_fields=["kyc_status", "kyc_reviewed_at", "kyc_rejection_reason", "updated_at"]
+    )
+    return envelope_response({"kyc_status": u.kyc_status, "kyc_reviewed_at": now.isoformat()})
+
+
+@api_view(["POST"])
+@permission_classes([IsSupportAdmin])
+def compliance_reject(request, pk: int):
+    u = User.objects.filter(pk=pk).first()
+    if not u:
+        return envelope_response(None, message="Not found", success=False, status=404)
+    reason = (request.data.get("reason") or "").strip()
+    if not reason:
+        return envelope_response(
+            None,
+            message="reason is required",
+            success=False,
+            status=400,
+        )
+    now = timezone.now()
+    u.kyc_status = User.KYCStatus.REJECTED
+    u.kyc_reviewed_at = now
+    u.kyc_rejection_reason = reason
+    u.save(
+        update_fields=["kyc_status", "kyc_reviewed_at", "kyc_rejection_reason", "updated_at"]
+    )
+    return envelope_response({"kyc_status": u.kyc_status})
+
+
+@api_view(["POST"])
+@permission_classes([IsSupportAdmin])
+def kyc_verify(request, pk: int):
+    """Backward-compatible alias for compliance approval."""
+    return compliance_approve(request, pk)
 
 
 @api_view(["GET"])

@@ -7,7 +7,8 @@ services:
       MYSQL_PASSWORD: mlm_pass
       MYSQL_ROOT_PASSWORD: rootpass
     ports:
-      - "3306:3306"
+      # Host 3307 avoids clash with another stack (e.g. MySQL already on :3306)
+      - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -20,7 +21,8 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      # Host 6380 if another Redis already uses :6379
+      - "6380:6379"
 
   web:
     build:
@@ -28,13 +30,32 @@ services:
       dockerfile: docker/Dockerfile
     command: >
       sh -c "python manage.py migrate --noinput &&
-      gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+      python manage.py collectstatic --noinput &&
+      exec gunicorn config.wsgi:application
+      --bind 0.0.0.0:8000
+      --workers 3
+      --worker-class gthread
+      --threads 4
+      --timeout 120
+      --graceful-timeout 30
+      --keep-alive 5
+      --access-logfile -
+      --error-logfile -"
     env_file:
       - ../.env
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       DB_HOST: db
+      DB_NAME: mlm_db
+      DB_USER: mlm_user
+      DB_PASSWORD: mlm_pass
       REDIS_URL: redis://redis:6379/0
+      # Do not use host .env SQLite mode inside containers
+      USE_SQLITE: "false"
+      # Allow session/CSRF cookies over plain HTTP (local Docker)
+      USE_INSECURE_COOKIES: "1"
+      # Serve /media via Django routes for local Docker access.
+      SERVE_MEDIA: "1"
     depends_on:
       db:
         condition: service_healthy
@@ -42,6 +63,8 @@ services:
         condition: service_started
     ports:
       - "8000:8000"
+    volumes:
+      - media_data:/app/media
 
   celery:
     build:
@@ -53,12 +76,18 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       DB_HOST: db
+      DB_NAME: mlm_db
+      DB_USER: mlm_user
+      DB_PASSWORD: mlm_pass
       REDIS_URL: redis://redis:6379/0
+      USE_SQLITE: "false"
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
+    volumes:
+      - media_data:/app/media
 
   celery-beat:
     build:
@@ -70,12 +99,18 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       DB_HOST: db
+      DB_NAME: mlm_db
+      DB_USER: mlm_user
+      DB_PASSWORD: mlm_pass
       REDIS_URL: redis://redis:6379/0
+      USE_SQLITE: "false"
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
+    volumes:
+      - media_data:/app/media
 
   nginx:
     image: nginx:alpine
@@ -88,3 +123,4 @@ services:
 
 volumes:
   mysql_data:
+  media_data:

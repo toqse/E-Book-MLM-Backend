@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
@@ -10,50 +11,226 @@ from apps.common.responses import envelope_response
 from .models import EBook, Enrollment
 
 
+def _media_url(request, file_field):
+    if not file_field:
+        return None
+    try:
+        return request.build_absolute_uri(file_field.url)
+    except Exception:
+        return file_field.url
+
+
+def _book_payload(request, b: EBook):
+    return {
+        "id": b.id,
+        "slug": b.slug,
+        "title": b.title,
+        "category": b.category,
+        "description": b.description,
+        "thumbnail_url": _media_url(request, b.thumbnail),
+        "pages_count": b.pages_count,
+        "language": b.language,
+        "price": str(b.price),
+        "status": b.status,
+        "is_primary": b.is_primary,
+        "is_active": b.is_active,
+        "full_pdf_url": _media_url(request, b.full_pdf),
+        "preview_pdf_url": _media_url(request, b.preview_pdf),
+    }
+
+
+def _is_uploaded_file(value):
+    return hasattr(value, "name") and hasattr(value, "size")
+
+
+def _file_ext_ok(value, allowed_exts: tuple[str, ...]) -> bool:
+    if value is None:
+        return False
+    name = ""
+    if _is_uploaded_file(value):
+        name = value.name or ""
+    elif isinstance(value, str):
+        name = value
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    return ext in allowed_exts
+
+
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _apply_status_bridge(b: EBook):
+    b.is_active = b.status == EBook.Status.PUBLISHED
+
+
+def _validate_and_apply_book_input(request, b: EBook, *, partial: bool):
+    data = request.data
+    files = request.FILES
+    errors = {}
+
+    required_fields = [
+        "title",
+        "category",
+        "description",
+        "pages_count",
+        "language",
+        "price",
+        "status",
+        "thumbnail",
+        "full_pdf",
+        "preview_pdf",
+    ]
+
+    if not partial:
+        for field in required_fields:
+            if field not in data and field not in files:
+                errors[field] = "This field is required."
+
+    def assign_text(field_name: str):
+        if field_name in data:
+            val = (data.get(field_name) or "").strip()
+            if not val:
+                errors[field_name] = "This field may not be blank."
+            else:
+                setattr(b, field_name, val)
+
+    assign_text("title")
+    assign_text("category")
+    assign_text("description")
+    assign_text("language")
+
+    if "slug" in data:
+        slug = (data.get("slug") or "").strip()
+        if not slug:
+            errors["slug"] = "Slug may not be blank."
+        else:
+            b.slug = slug
+
+    if "pages_count" in data:
+        try:
+            pages_count = int(str(data.get("pages_count")).strip())
+            if pages_count <= 0:
+                raise ValueError("pages_count")
+            b.pages_count = pages_count
+        except Exception:
+            errors["pages_count"] = "pages_count must be a positive integer."
+
+    if "price" in data:
+        try:
+            price = Decimal(str(data.get("price")).strip())
+            if price < 0:
+                raise InvalidOperation
+            b.price = price.quantize(Decimal("0.01"))
+        except Exception:
+            errors["price"] = "price must be a non-negative decimal number."
+
+    if "status" in data:
+        status_val = (data.get("status") or "").strip().upper()
+        if status_val not in {EBook.Status.DRAFT, EBook.Status.PUBLISHED}:
+            errors["status"] = "status must be DRAFT or PUBLISHED."
+        else:
+            b.status = status_val
+            _apply_status_bridge(b)
+
+    if "is_active" in data and "status" not in data:
+        b.is_active = _coerce_bool(data.get("is_active"))
+        b.status = EBook.Status.PUBLISHED if b.is_active else EBook.Status.DRAFT
+
+    if "is_primary" in data:
+        b.is_primary = _coerce_bool(data.get("is_primary"))
+
+    if "thumbnail" in files:
+        thumbnail = files.get("thumbnail")
+        if not _file_ext_ok(thumbnail, ("jpg", "jpeg", "png", "webp")):
+            errors["thumbnail"] = "thumbnail must be an image file (jpg/jpeg/png/webp)."
+        else:
+            b.thumbnail = thumbnail
+    elif "thumbnail" in data and not partial:
+        if not _file_ext_ok(data.get("thumbnail"), ("jpg", "jpeg", "png", "webp")):
+            errors["thumbnail"] = "thumbnail must be an image URL or file path."
+
+    if "full_pdf" in files:
+        full_pdf = files.get("full_pdf")
+        if not _file_ext_ok(full_pdf, ("pdf",)):
+            errors["full_pdf"] = "full_pdf must be a PDF file."
+        else:
+            b.full_pdf = full_pdf
+    elif "full_pdf" in data and not partial:
+        if not _file_ext_ok(data.get("full_pdf"), ("pdf",)):
+            errors["full_pdf"] = "full_pdf must be a PDF URL or file path."
+
+    if "preview_pdf" in files:
+        preview_pdf = files.get("preview_pdf")
+        if not _file_ext_ok(preview_pdf, ("pdf",)):
+            errors["preview_pdf"] = "preview_pdf must be a PDF file."
+        else:
+            b.preview_pdf = preview_pdf
+    elif "preview_pdf" in data and not partial:
+        if not _file_ext_ok(data.get("preview_pdf"), ("pdf",)):
+            errors["preview_pdf"] = "preview_pdf must be a PDF URL or file path."
+
+    if errors:
+        return errors
+
+    # Legacy bridge for older clients still passing file_url.
+    if "file_url" in data:
+        b.file_url = (data.get("file_url") or "").strip()
+    elif b.file_url == "":
+        b.file_url = "https://example.com/file.pdf"
+
+    _apply_status_bridge(b)
+    return None
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def list_ebooks(request):
-    qs = EBook.objects.filter(is_active=True)
-    data = [
-        {
-            "slug": b.slug,
-            "title": b.title,
-            "category": b.category,
-            "is_primary": b.is_primary,
-        }
-        for b in qs
-    ]
+    qs = EBook.objects.filter(status=EBook.Status.PUBLISHED).order_by("-id")
+    data = [_book_payload(request, b) for b in qs]
     return envelope_response({"results": data})
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def ebook_detail(request, slug: str):
-    b = EBook.objects.filter(slug=slug, is_active=True).first()
+    b = EBook.objects.filter(slug=slug, status=EBook.Status.PUBLISHED).first()
     if not b:
         return envelope_response(None, message="Not found", success=False, status=404)
-    return envelope_response(
-        {"slug": b.slug, "title": b.title, "category": b.category, "file_url": b.file_url}
-    )
+    return envelope_response(_book_payload(request, b))
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_enrollments(request):
-    qs = Enrollment.objects.filter(user=request.user).select_related("ebook")
-    data = [{"slug": e.ebook.slug, "title": e.ebook.title} for e in qs]
+    qs = Enrollment.objects.filter(user=request.user).select_related("ebook").order_by("-id")
+    data = [
+        {
+            "slug": e.ebook.slug,
+            "title": e.ebook.title,
+            "category": e.ebook.category,
+            "price": str(e.ebook.price),
+            "thumbnail_url": _media_url(request, e.ebook.thumbnail),
+        }
+        for e in qs
+    ]
     return envelope_response({"results": data})
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def download_signed(request, slug: str):
-    b = EBook.objects.filter(slug=slug).first()
+    b = EBook.objects.filter(slug=slug, status=EBook.Status.PUBLISHED).first()
     if not b:
         return envelope_response(None, message="Not found", success=False, status=404)
     if not Enrollment.objects.filter(user=request.user, ebook=b).exists():
         return envelope_response(None, message="Not enrolled", success=False, status=403)
-    url = b.file_url
+    url = _media_url(request, b.full_pdf) or b.file_url
+    if not url:
+        return envelope_response(None, message="Book PDF missing", success=False, status=400)
     exp = (timezone.now() + timedelta(minutes=15)).isoformat()
     return envelope_response({"download_url": url, "expires_at": exp})
 
@@ -62,23 +239,18 @@ def download_signed(request, slug: str):
 @permission_classes([IsAdminRole])
 def admin_course_list(request):
     if request.method == "GET":
-        qs = EBook.objects.all()
-        return envelope_response(
-            {
-                "results": [
-                    {"id": b.id, "slug": b.slug, "title": b.title, "is_active": b.is_active}
-                    for b in qs
-                ]
-            }
-        )
-    EBook.objects.create(
-        title=request.data.get("title", "Course"),
-        slug=request.data.get("slug", "course"),
-        category=request.data.get("category", "General"),
-        file_url=request.data.get("file_url", "https://example.com/file.pdf"),
-        is_primary=bool(request.data.get("is_primary", False)),
+        qs = EBook.objects.all().order_by("-id")
+        return envelope_response({"results": [_book_payload(request, b) for b in qs]})
+
+    b = EBook(
+        file_url="https://example.com/file.pdf",
+        status=EBook.Status.DRAFT,
     )
-    return envelope_response({"ok": True})
+    errors = _validate_and_apply_book_input(request, b, partial=False)
+    if errors:
+        return envelope_response(None, message="Validation failed", success=False, errors=errors, status=400)
+    b.save()
+    return envelope_response(_book_payload(request, b), message="Created", status=201)
 
 
 @api_view(["PATCH", "DELETE"])
@@ -88,13 +260,14 @@ def admin_course_detail(request, pk: int):
     if not b:
         return envelope_response(None, message="Not found", success=False, status=404)
     if request.method == "PATCH":
-        for field in ["title", "slug", "category", "file_url", "is_active", "is_primary"]:
-            if field in request.data:
-                setattr(b, field, request.data[field])
+        errors = _validate_and_apply_book_input(request, b, partial=True)
+        if errors:
+            return envelope_response(None, message="Validation failed", success=False, errors=errors, status=400)
         b.save()
-        return envelope_response({"ok": True})
+        return envelope_response(_book_payload(request, b), message="Updated")
     b.is_active = False
-    b.save(update_fields=["is_active"])
+    b.status = EBook.Status.DRAFT
+    b.save(update_fields=["is_active", "status"])
     return envelope_response({"deleted": True})
 
 

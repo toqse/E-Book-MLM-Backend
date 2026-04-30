@@ -6,264 +6,641 @@ Timezone: Asia/Kolkata (IST); timestamps ISO 8601 in responses where applicable.
 
 CONVENTIONS
 -----------
-Authentication: Bearer JWT in header:
+Authentication (member/admin JWT): Bearer in header:
   Authorization: Bearer <access_token>
 
-Standard JSON envelope (most endpoints):
+Standard JSON envelope (most endpoints — see exceptions below):
   Success:
     { "success": true, "data": { ... }, "message": "<string>", "errors": null }
   Error:
-    { "success": false, "data": null, "message": "<string>", "errors": { ... } }
+    { "success": false, "data": null, "message": "<string>", "errors": <object|null> }
 
-Pagination (list endpoints returning results):
-  { "success": true, "data": { "count": N, "next": null, "previous": null, "results": [ ... ] }, ... }
-  (Some list endpoints return a custom { "results": [...], "count": ... } inside data.)
+Exceptions to the envelope:
+  • CSV export endpoints — return plain text/csv HTTP responses with Content-Disposition;
+    Content-Type: text/csv.
 
-Monetary amounts: returned as strings with two decimals where applicable (e.g. "30.00").
+Validation errors may use DRF’s field error structure inside "errors" (via envelope
+exception handler) for 400-class failures.
 
-Roles (admin staff users): SUPER_ADMIN, FINANCE, SUPPORT, MEMBER.
-Admin APIs require is_staff=True and appropriate role (see each endpoint).
+Pagination: many list endpoints return { "results": [...], "count": ... } inside "data".
 
-Throttling: default DRF throttles — authenticated users ~100/min (see REST_FRAMEWORK in settings).
+Monetary amounts: returned as decimal strings where applicable (e.g. "30.00", "0").
 
-------------------------------------------------------------------------------
+Staff roles (is_staff=True; User.role): SUPER_ADMIN, FINANCE, SUPPORT. MEMBERS are not staff.
+Permission classes in code:
+  • IsAdminRole — SUPER_ADMIN, FINANCE, or SUPPORT + is_staff (broad admin).
+  • IsFinanceAdmin — SUPER_ADMIN or FINANCE + is_staff.
+  • IsSupportAdmin — SUPER_ADMIN or SUPPORT + is_staff.
+  • IsSuperAdmin — SUPER_ADMIN only.
+
+Throttling (REST_FRAMEWORK): user ~100/min, anon ~30/min unless overridden.
+
+-----------------------------------------------------------------------------
 FLOWS (high level)
-------------------------------------------------------------------------------
+-----------------------------------------------------------------------------
 
 1) Member registration (OTP + JWT)
-   - POST /api/v1/auth/send-otp/  purpose=REGISTER, phone or email
-   - POST /api/v1/auth/verify-otp-register/  otp_code, full_name, optional referral_code
-   - Response includes access + refresh JWT and profile stub.
-   - Referral: optional ?ref= on marketing site is sent as referral_code; sponsor FK is immutable after registration.
+   - POST /api/v1/auth/register/send-otp/  — mandatory: phone (E.164 e.g. +918589960592), full_name,
+     referral_code; optional: email. Validates sponsor; stores profile on the OTP server-side.
+   - POST /api/v1/auth/verify-otp-register/  — body: phone (same E.164) + otp_code only (completes signup).
+   - Generic POST /api/v1/auth/send-otp/ does NOT accept purpose=REGISTER (use register/send-otp/).
+   - LOGIN / KYC OTP (phone channel): same strict E.164 with leading + as registration (e.g. +918589960592).
+   - data.tokens + data.user on successful verify.
+   - Company referral code "Admin": see DEFAULT_COMPANY_REFERRAL_CODE / superuser (earlier docs).
 
 2) Member login
    - POST /api/v1/auth/send-otp/  purpose=LOGIN
    - POST /api/v1/auth/verify-otp-login/
 
-3) Token refresh / logout
-   - POST /api/v1/auth/token/refresh/  (SimpleJWT; body: { "refresh": "<token>" })
-   - POST /api/v1/auth/logout/  body: { "refresh": "<token>" }  (blacklists refresh token)
+3) JWT (access only) / logout
+   - Access token TTL: JWT_ACCESS_TOKEN_LIFETIME_MINUTES (default 60) in django-rest-framework-simplejwt.
+   - No refresh token endpoint; login/register again after expiry for a new token.
+   - POST /api/v1/auth/logout/ — Bearer optional; discard access token client-side after call.
 
-4) KYC and payout details
-   - POST /api/v1/auth/kyc/submit/  PAN + Aadhaar (Aadhaar stored masked server-side)
-   - GET  /api/v1/auth/kyc/status/
-   - POST /api/v1/auth/bank/  bank account / UPI / preference
+4) Compliance (agreements OTP + extended KYC/bank/nominee)
+   - GET /api/v1/agreements/ (Bearer) — active legal documents (content_html + PDF URL when present).
+   - POST /api/v1/agreements/send-otp/ — JSON { "document_ids": [int, ...] }; OTP tied to JWT user identity only.
+   - POST /api/v1/agreements/verify/ — JSON { "document_ids", "otp_code" }; records UserAgreementAcceptance + client IP.
+   - POST /api/v1/auth/compliance/submit/ — multipart form: identity, address, nominee, bank, payout; files pan_document,
+     aadhar_document (required on first submit; optional on update if already stored). Dates in DD/MM/YYYY.
+     Requires all active LegalDocuments with requires_acceptance_for_compliance=true at current version.
+   - GET /api/v1/auth/kyc/status/ — kyc_status, timestamps, missing_acceptances, has_compliance_profile, etc.
+   - Deprecated (410 Gone): POST /api/v1/auth/kyc/submit/, POST /api/v1/auth/bank/ — use compliance/submit/.
 
 5) Course catalog and enrollment
-   - GET /api/v1/courses/  (public) — active e-books
-   - GET /api/v1/courses/<slug>/  (public) — detail
-   - Purchase:
-     - POST /api/v1/payments/create-order/
-       Fields: ebook_slug (optional), sponsor_code (optional sponsor-slot code), is_retail (optional bool)
-     - If valid sponsor slot: amount due 0; GST invoice still generated server-side.
-     - Else Razorpay order created; client pays via Razorpay Checkout.
-     - POST /api/v1/payments/verify/  razorpay_payment_id, razorpay_signature, order_id
+   - GET /api/v1/courses/ (public) — active e-books
+   - GET /api/v1/courses/<slug>/ (public)
+   - Purchase: POST /api/v1/payments/create-order/ (ebook_slug, sponsor_code, is_retail)
+   - Zero-amount path when valid sponsor slot; else Razorpay order (amount_paise, ids).
+   - POST /api/v1/payments/verify/  razorpay fields + order_id
    - GET /api/v1/user/courses/enrolled/
-   - GET /api/v1/user/courses/<slug>/download/ — returns URL + expiry metadata (integrate Azure SAS in production)
+   - GET /api/v1/user/courses/<slug>/download/ — URL + expires_at (SAS in production)
 
-6) Binary tree placement (after first qualifying MLM purchase)
-   - On successful PAID order (non-retail): user becomes member, BinaryTreeService places node under sponsor subtree (BFS, left-first).
-   - GET /api/v1/user/tree/ — own subtree snapshot (limited depth)
-   - GET /api/v1/user/tree/uplines/ — ancestor chain
-   - GET /api/v1/user/tree/downlines/ — downline list (simplified listing)
+6) Binary tree (after qualifying MLM purchase)
+   - GET /api/v1/user/tree/, /uplines/, /downlines/, /level/<n>/
 
-7) Commission engine (async via Celery in production; eager in tests)
-   - On PAID MLM order: direct ₹30 to sponsor; up to three binary uplines × ₹10 each, skipping sponsor duplicate (one-credit rule).
-   - Earning cap from SystemConfig (default ₹22,200) enforced per recipient.
-   - Milestone bonuses on sponsor direct-referral milestones (simplified table in engine).
-   - Refund within window: commissions reversed; enrollment removed.
+7) Commission engine (Celery in prod; eager in tests)
+   - Direct + upline + milestones; cap from SystemConfig; refunds reverse commissions.
 
 8) Wallet, bands, withdrawals
-   - Wallet balances updated on commission credit/debit.
-   - Crossing configured band thresholds may auto-issue sponsor-slot batches (see wallet/bands.py).
-   - Member requests withdrawal per band; finance admin approves (Razorpay Payout integration to be wired with env keys).
+   - Band ladder unlocks sponsor-slot batches at configured indices.
+   - Member POST withdraw; FINANCE approve/reject/export.
 
-9) Sponsor slots
-   - Slot codes issued on slot-type bands; validate publicly at checkout.
-   - Member lists batches/codes; share channel logged.
+9) Sponsor slots — validate publicly; member lists batches; share logs channel.
 
-10) Admin / back-office
-   - Admin login: password + OTP 2FA pattern (endpoints provided).
-   - Dashboards, user/KYC management, commissions, withdrawals, reports (stubs where noted in code).
+10) Admin — password + OTP patterns; dashboards, users, reports (some stubs).
 
-------------------------------------------------------------------------------
-ENDPOINT CATALOG
-------------------------------------------------------------------------------
+
+=============================================================================
+DETAILED ENDPOINT REFERENCE
+=============================================================================
+
+Every subsection lists: METHOD URL | Auth | Request | Success data (inside envelope
+unless noted) | Common errors.
+
 
 MODULE: Authentication (/api/v1/auth/)
-POST   /api/v1/auth/send-otp/
-       Body: { "phone": "<optional>", "email": "<optional>", "purpose": "REGISTER"|"LOGIN"|"KYC"|"ADMIN_LOGIN" }
-       Public. Rate limit: max 3 OTP sends / 10 minutes per identifier (cache counter).
+--------------------------------------------------------------------------------
+POST /api/v1/auth/send-otp/
+  Auth: None.
+  Body (JSON): {
+    "phone": "<optional when using email login; strict E.164 with + when supplied — e.g. +918589960592>",
+    "email": "<optional>",
+    "purpose": "LOGIN" | "KYC" | "ADMIN_LOGIN"
+  }
+  Rules: Provide phone (E.164 +…) and/or email. Bare domestic numbers without + are rejected. Not used for signup.
+  Success data (when EXPOSE_OTP_IN_RESPONSE=true, default unless env disables):
+    {
+      "expires_in_seconds": 600,
+      "otp": "<six-digit code; also INFO-logged under logger apps.authentication>"
+    }
+    When EXPOSE_OTP_IN_RESPONSE=false, "otp" is omitted (production SMS flows).
+  message: "OTP sent"
+  Errors: 429 — rate limited (max 3 sends / 10 minutes per identifier);
+    errors may include {"detail": "rate_limited"}.
 
-POST   /api/v1/auth/verify-otp-register/
-       Body: { "phone"|"email", "otp_code", "full_name", "referral_code"?: str }
-       Public. Creates User with member_id / referral_code / referral_link.
+POST /api/v1/auth/register/send-otp/
+  Auth: None.
+  Body: {
+    "phone": "<required; strict E.164 with leading +: e.g. +918589960592>",
+    "email": "<optional; stored if provided>",
+    "full_name": "<required>",
+    "referral_code": "<required; e.g. Admin for company sponsor>"
+  }
+  Validates sponsor exists; rejects duplicate phone (or duplicate email when email supplied).
+  Success: same envelope as send-otp (expires_in_seconds + otp when EXPOSE_OTP_IN_RESPONSE is on).
+  Errors: 400 invalid referral / validation / duplicate user; 429 rate limit per phone.
 
-POST   /api/v1/auth/verify-otp-login/
-       Body: { "phone"|"email", "otp_code" }
-       Public.
+POST /api/v1/auth/verify-otp-register/
+  Auth: None.
+  Body: {
+    "phone": "<required; same E.164 as register/send-otp>",
+    "otp_code": "6 chars"
+  }
+  Creates user from data stored on the matching unused REGISTER OTP (full_name, optional email, sponsor).
+  Success data: {
+    "user": { id, member_id, full_name, phone, email, referral_code, is_member, role },
+    "tokens": { "access" }
+  }
+  Errors: 400 invalid OTP / expired session data / duplicate phone-email; note: complete within OTP TTL after send.
 
-POST   /api/v1/auth/token/refresh/
-       Body: { "refresh": "<refresh_token>" }  — SimpleJWT.
+POST /api/v1/auth/verify-otp-login/
+  Auth: None.
+  Body (JSON): identifier — phone (strict E.164 with +, same as send-otp) or email — plus otp_code (6 chars).
+  Success data: same user + tokens shape as register.
+  Errors: 423 account locked (otp_locked_until); 404 user not found; 400 OTP errors.
 
-POST   /api/v1/auth/logout/
-       Auth: Bearer. Body: { "refresh": "<refresh_token>" } — blacklists refresh token.
+POST /api/v1/auth/logout/
+  Auth: Bearer access JWT recommended (session context); body optional.
+  Success: data null; message "Logged out" — client removes stored access JWT.
 
-GET    /api/v1/auth/me/
-PATCH  /api/v1/auth/me/
-       Auth: Bearer. Update limited profile fields.
+GET/PATCH /api/v1/auth/me/
+  Auth: Bearer.
+  GET — Success data: same user stub as verify (id, member_id, full_name, phone, email,
+    referral_code, is_member, role).
+  PATCH — Body may include full_name and/or payout_preference (passed through to User).
+  Success data: updated user stub; message "Updated"
 
-POST   /api/v1/auth/kyc/submit/
-       Auth: Bearer. PAN + Aadhaar.
+POST /api/v1/auth/kyc/submit/
+  Deprecated: returns 410 Gone — use POST /api/v1/auth/compliance/submit/.
 
-GET    /api/v1/auth/kyc/status/
-       Auth: Bearer.
+GET /api/v1/auth/kyc/status/
+  Auth: Bearer.
+  Success data includes: kyc_status, kyc_submitted_at, kyc_reviewed_at, kyc_rejection_reason (or null),
+    pan_last4, missing_acceptances (list of docs needing acceptance at latest version),
+    has_compliance_profile, compliance_submission_version.
 
-POST   /api/v1/auth/bank/
-       Auth: Bearer. Bank/UPI payout payload.
+POST /api/v1/auth/bank/
+  Deprecated: returns 410 Gone — use POST /api/v1/auth/compliance/submit/.
 
-POST   /api/v1/auth/validate-referral/
-       Public. Body: { "referral_code": "CODE" } — returns sponsor display name if valid.
+POST /api/v1/auth/compliance/submit/
+  Auth: Bearer. Content-Type: multipart/form-data (or multipart with JSON-compatible fields supported by parser).
+  Text fields:
+    date_of_birth (DD/MM/YYYY), gender (M|F|O|U),
+    full_address, city, pin_code, state, country,
+    pan_number, name_on_pan, aadhar_number (12 digits), name_on_aadhar,
+    nominee_name, nominee_relationship, nominee_phone (strict E.164 +91 Indian mobile rule),
+    nominee_date_of_birth (DD/MM/YYYY),
+    account_holder_name, account_number, bank_name, ifsc, branch,
+    account_type (SAVINGS|CURRENT|NRO|NRE|RECURRING|OTHER),
+    optional payout_preference (BANK|UPI); omitted or blank defaults to UPI,
+    optional upi_id for UPI payouts.
+  Files: pan_document, aadhar_document (PDF or image types as accepted by storage).
+  Server syncs PAN + masked Aadhaar onto User alongside MemberComplianceProfile; sets kyc_status PENDING pending admin review.
+  Success: { "kyc_status", "compliance_submission_version" }; 400 if mandatory agreements missing.
+
+POST /api/v1/auth/validate-referral/
+  Auth: None.
+  Body: { "referral_code": "CODE" } or { "code": "CODE" }
+  Success data: { "sponsor_name": "<full_name>" }
+  Errors: 404 invalid code.
+
+
+MODULE: Agreements (/api/v1/agreements/, member)
+--------------------------------------------------------------------------------
+GET /api/v1/agreements/
+  Auth: Bearer.
+  Success: {
+    "results": [
+      { "id", "name", "category", "document_type", "year", "description",
+        "content_html", "version", "pdf_url", "pdf_file_url", "requires_acceptance_for_compliance" }
+    ]
+  }
+
+POST /api/v1/agreements/send-otp/
+  Auth: Bearer.
+  Body (JSON): { "document_ids": [ <active doc ids that require acceptance> ] }
+  Uses member's stored phone/email only (never arbitrary numbers).
+  OTP purpose AGREEMENT; OTP payload binds document_ids + user_id server-side.
+
+POST /api/v1/agreements/verify/
+  Auth: Bearer.
+  Body (JSON): { "document_ids": [<same ids as OTP session — same order-independent match>], "otp_code": "......" }
+  Success: acceptance_batch_id, accepted_document_ids; creates UserAgreementAcceptance rows.
+
+
+MODULE: Admin agreements & compliance (/api/v1/admin/…)
+--------------------------------------------------------------------------------
+GET /api/v1/admin/agreements/
+  Auth: Bearer + IsSuperAdmin.
+  Lists all LegalDocument rows (inactive included).
+
+POST /api/v1/admin/agreements/
+  Auth: IsSuperAdmin.
+  Body (JSON or multipart): name (required); category; document_type; year; description; content_html;
+    version (default "1.0"); pdf_file (upload); requires_acceptance_for_compliance; is_active.
+  At least one of content_html or pdf_file required on create/update.
+
+GET/PATCH/DELETE /api/v1/admin/agreements/<id>/
+  Auth: IsSuperAdmin.
+  PATCH partial update. DELETE is soft (is_active=false).
+
+GET /api/v1/admin/compliance-queue/
+  Auth: IsSupportAdmin.
+  Returns rich pending submissions: profile fields, nominee, bank echoes, signed media URLs when DEBUG/media served.
+
+POST /api/v1/admin/users/<id>/compliance/approve/
+  Auth: IsSupportAdmin. Requires MemberComplianceProfile exists; sets kyc_status VERIFIED; kyc_reviewed_at now.
+
+POST /api/v1/admin/users/<id>/compliance/reject/
+  Auth: IsSupportAdmin. Body JSON { "reason": "..." } — sets REJECTED and stores reason.
+
+POST /api/v1/admin/users/<id>/kyc/verify/
+  Backward-compatible alias for compliance approve (still IsSupportAdmin).
+
+GET /api/v1/admin/users/kyc-queue/
+  Deprecated minimal list: user ids only — prefer GET /api/v1/admin/compliance-queue/.
+
 
 MODULE: Admin auth (/api/v1/admin/auth/)
-POST   /api/v1/admin/auth/login/
-       Public. Staff email + password (Django authenticate).
+--------------------------------------------------------------------------------
+POST /api/v1/admin/auth/login/
+  Auth: None.
+  Body: { "email", "password" } — Django authenticate; user must exist and is_staff.
+  Success data: { "tokens": { "access" } }
+  message: "Admin step 1 OK"
+  Errors: 401 invalid credentials.
 
-POST   /api/v1/admin/auth/send-otp/
-       Public. Same payload as /auth/send-otp/ (typically ADMIN_LOGIN purpose).
+POST /api/v1/admin/auth/send-otp/
+  Same implementation as POST /api/v1/auth/send-otp/ (typically purpose ADMIN_LOGIN).
 
-POST   /api/v1/admin/auth/verify-otp/
-       Public. Second factor for admin (email + OTP).
+POST /api/v1/admin/auth/verify-otp/
+  Auth: None.
+  Body: { "email": "<staff email>", "otp_code": "6 chars" } (phone unused path)
+  Success data: { "tokens": { "access" } } for matching is_staff user.
+  Errors: 400 OTP invalid; 403 no staff user for email.
+
 
 MODULE: User — Referral (/api/v1/user/referral*)
-GET    /api/v1/user/referral/
-       Auth: Bearer. Returns referral_code, referral_link, qr_url placeholder.
+--------------------------------------------------------------------------------
+GET /api/v1/user/referral/
+  Auth: Bearer.
+  Success data: {
+    "referral_code": "...",
+    "referral_link": "...",
+    "qr_url": "<same as referral_link in current implementation>"
+  }
 
-GET    /api/v1/user/referral/stats/
-       Auth: Bearer. Direct referral counts + sums (simplified).
+GET /api/v1/user/referral/stats/
+  Auth: Bearer.
+  Success data: {
+    "direct_referrals": <int>,
+    "direct_commission_total": "<decimal string, sum DIRECT net_amount>"
+  }
 
-GET    /api/v1/user/referral/list/
-       Auth: Bearer. Paginated-style list of direct referrals.
+GET /api/v1/user/referral/list/
+  Auth: Bearer.
+  Success data: {
+    "results": [ { "member_id", "full_name", "created_at" }, ... ]   (truncated at 50),
+    "count": <full queryset count>
+  }
+
 
 MODULE: User — Binary tree (/api/v1/user/tree*)
-GET    /api/v1/user/tree/
-GET    /api/v1/user/tree/uplines/
-GET    /api/v1/user/tree/downlines/
-GET    /api/v1/user/tree/level/<n>/
-       Auth: Bearer.
+--------------------------------------------------------------------------------
+GET /api/v1/user/tree/
+  Auth: Bearer.
+  Success data: If user has no binary node: { "root": null }.
+  Else { "root": nested tree depth ≤ 3 }: each node has member_id, full_name,
+    position, level, left, right (null if absent).
+
+GET /api/v1/user/tree/uplines/
+  Success data: { "uplines": [ { member_id, full_name, level }, ... ] } up to 4 ancestors.
+
+GET /api/v1/user/tree/downlines/
+  Success data: { "results": [ { member_id, full_name, level } ], "count": <int> } BFS.
+
+GET /api/v1/user/tree/level/<n>/
+  Auth: Bearer (n integer in path).
+  Success data (stub): { "level": n, "members": [] }
+
 
 MODULE: Admin — Tree
-GET    /api/v1/admin/tree/user/<user_id>/
-       Auth: Bearer + admin role (IsAdminRole).
+--------------------------------------------------------------------------------
+GET /api/v1/admin/tree/user/<user_id>/
+  Auth: Bearer + IsAdminRole (staff + SUPER_ADMIN|FINANCE|SUPPORT).
+  Success: same nested root as member tree but max depth 10; root null if no node.
+  Errors: 404 user not found.
 
-GET    /api/v1/admin/tree/platform/
-       Auth: Bearer + admin role.
+GET /api/v1/admin/tree/platform/
+  Auth: Bearer + IsAdminRole.
+  Success data: {
+    "roots": [ nested tree × up to 20 root nodes, each depth ≤ 2 ]
+  }
 
-MODULE: Commissions (/api/v1/user/commissions*)
-GET    /api/v1/user/commissions/
-GET    /api/v1/user/commissions/summary/
-GET    /api/v1/user/commissions/milestones/
-GET    /api/v1/user/commissions/tds/
-       Auth: Bearer.
 
-MODULE: Admin — Commissions
-GET    /api/v1/admin/commissions/
-GET    /api/v1/admin/commissions/pending/
-POST   /api/v1/admin/commissions/force-credit/
-GET    /api/v1/admin/commissions/tds-report/
-GET    /api/v1/admin/commissions/export/
-       Auth: Bearer + FINANCE (or SUPER_ADMIN via permission class).
+MODULE: User — Commissions (/api/v1/user/commissions*)
+--------------------------------------------------------------------------------
+GET /api/v1/user/commissions/
+  Auth: Bearer.
+  Success data: {
+    "results": [
+      { "id", "type", "amount", "net", "status", "created_at" }, ...   (latest 100),
+    ]
+  }
+  Notes: commission_type examples include DIRECT and types starting with UPLINE.
 
-MODULE: Wallet (/api/v1/user/wallet*)
-GET    /api/v1/user/wallet/
-GET    /api/v1/user/wallet/transactions/
-GET    /api/v1/user/wallet/bands/
-POST   /api/v1/user/wallet/withdraw/
-GET    /api/v1/user/wallet/withdrawals/
-       Auth: Bearer.
+GET /api/v1/user/commissions/summary/
+  Success data: {
+    "direct", "upline", "milestone", "tree_passive" — all decimal strings
+    (tree_passive fixed "0.00" in current code).
 
-MODULE: Admin — Withdrawals
-GET    /api/v1/admin/withdrawals/
-GET    /api/v1/admin/withdrawals/pending/
-POST   /api/v1/admin/withdrawals/<id>/approve/
-POST   /api/v1/admin/withdrawals/<id>/reject/
-POST   /api/v1/admin/withdrawals/batch-process/
-GET    /api/v1/admin/withdrawals/export/
-       Auth: Bearer + FINANCE.
+GET /api/v1/user/commissions/milestones/
+  Success data: { "history": [ { "referrals", "bonus", "status" }, ... ] }
+
+GET /api/v1/user/commissions/tds/
+  Success data: { "total_tds", "fy_band_cash" } as strings from Wallet.
+
+
+MODULE: Admin — Commissions (/api/v1/admin/commissions*)
+--------------------------------------------------------------------------------
+GET /api/v1/admin/commissions/
+  Auth: Bearer + IsFinanceAdmin.
+  Success data: {
+    "results": [
+      { "id", "recipient": "<member_id>", "source": "<member_id>",
+        "type", "net" }, ... up to 200
+    ]
+  }
+
+GET /api/v1/admin/commissions/pending/
+  Success data: { "results": [ ledger id ints, ... up to 100 ] }
+
+POST /api/v1/admin/commissions/force-credit/
+  Auth: Bearer + IsSuperAdmin only.
+  Success data: { "ok": false, "detail": "Not implemented in demo" }
+
+GET /api/v1/admin/commissions/tds-report/
+  Demo stub: { "month": "2026-04", "tds": "0.00" }
+
+GET /api/v1/admin/commissions/export/
+  Plain CSV attachment; columns: type,amount (no JSON envelope).
+
+
+MODULE: Wallet — Member (/api/v1/user/wallet*)
+--------------------------------------------------------------------------------
+GET /api/v1/user/wallet/
+  Auth: Bearer.
+  Success data: {
+    "cash_balance", "total_earned", "current_band", "fy_withdrawn"
+  } (first two and fy_withdrawn as strings; current_band int).
+
+GET /api/v1/user/wallet/transactions/
+  Success data: {
+    "results": [ { "type", "amount", "balance_after", "at" }, ... max 100 ]
+  }
+
+GET /api/v1/user/wallet/bands/
+  Success data: {
+    "bands": [
+      { "band": 1..9, "unlocked": true|false }, ...
+    ]
+  }
+
+POST /api/v1/user/wallet/withdraw/
+  Body: { "band": <int>, "amount": "<decimal string>" }
+  Validates amount > 0 and ≤ cash_balance; creates WithdrawalRequest.
+  Success data: { "withdrawal_id", "status" }
+  Errors: 400 "Invalid amount"
+
+GET /api/v1/user/wallet/withdrawals/
+  Success data: {
+    "results": [ { "id", "band", "amount", "status" }, ... max 50 ]
+  }
+
+
+MODULE: Admin — Withdrawals (/api/v1/admin/withdrawals*)
+--------------------------------------------------------------------------------
+GET /api/v1/admin/withdrawals/
+  Auth: Bearer + IsFinanceAdmin.
+  Success data: { "results": [ { "id", "status" }, ... max 200 ] }
+
+GET /api/v1/admin/withdrawals/pending/
+  Success data: { "results": [ withdrawal ids ] }
+
+POST /api/v1/admin/withdrawals/<id>/approve/
+  Success data: { "id", "status" } (status APPROVED)
+  Errors: 404.
+
+POST /api/v1/admin/withdrawals/<id>/reject/
+  Body: optional { "reason": "..." } (stored as reject_reason).
+  Success data: { "ok": true }; status REJECTED.
+
+POST /api/v1/admin/withdrawals/batch-process/
+  Demo stub: { "processed": 0 }
+
+GET /api/v1/admin/withdrawals/export/
+  Plain CSV — headers id,status (no envelope).
+
 
 MODULE: Sponsor slots
-GET    /api/v1/user/sponsor-slots/
-POST   /api/v1/user/sponsor-slots/<code>/share/
-       Auth: Bearer.
+--------------------------------------------------------------------------------
+GET /api/v1/user/sponsor-slots/
+  Auth: Bearer.
+  Success data: {
+    "batches": [
+      {
+        "batch_id", "band", "expires_at",
+        "codes": [ { "code", "status", "expires_at" }, ... ]
+      }, ...
+    ]
+  }
 
-POST   /api/v1/sponsor-slots/validate/
-       Public. { "code": "SPONSOR-..." }
+POST /api/v1/user/sponsor-slots/<code>/share/
+  Body: optional { "channel": "COPY" } — stored as shared_via; marks code SHARED.
+  Success: { "ok": true }; 404 if code not yours.
 
-GET    /api/v1/admin/sponsor-slots/
-GET    /api/v1/admin/sponsor-slots/flagged/
-POST   /api/v1/admin/sponsor-slots/<code>/expire/
-       Auth: Bearer + admin role.
+POST /api/v1/sponsor-slots/validate/
+  Auth: None.
+  Body: { "code": "..." } or { "sponsor_code": "..." }
+  Success: { "valid": true, "issuer": "<full_name>" }
+  Errors: 400 invalid/expired.
+
+GET /api/v1/admin/sponsor-slots/
+  Auth: Bearer + IsAdminRole.
+  Success: { "count": <batch count capped query> }
+
+GET /api/v1/admin/sponsor-slots/flagged/
+  Success: { "results": [ "<codes>", ... ] }
+
+POST /api/v1/admin/sponsor-slots/<code>/expire/
+  Success: { "ok": true }; status set EXPIRED. 404 if unknown code.
+
 
 MODULE: Courses & e-books
-GET    /api/v1/courses/
-GET    /api/v1/courses/<slug>/
-       Public.
+--------------------------------------------------------------------------------
+GET /api/v1/courses/
+  Auth: None.
+  Success data: {
+    "results": [ { "id", "slug", "title", "category", "description",
+      "thumbnail_url", "pages_count", "language", "price", "status", "is_primary" }, ... ]
+  } for published books only.
 
-GET    /api/v1/user/courses/enrolled/
-GET    /api/v1/user/courses/<slug>/download/
-       Auth: Bearer.
+GET /api/v1/courses/<slug>/
+  Success data: { "id", "slug", "title", "category", "description",
+    "thumbnail_url", "pages_count", "language", "price", "status", "full_pdf_url", "preview_pdf_url" }
+  Errors: 404 (unknown or non-published book).
 
-GET    /api/v1/admin/courses/
-POST   /api/v1/admin/courses/
-PATCH  /api/v1/admin/courses/<id>/
-DELETE /api/v1/admin/courses/<id>/  (soft delete in implementation: is_active=False)
-GET    /api/v1/admin/courses/enrollments/
-       Auth: Bearer + admin role. (Upload-to-Azure endpoint to be added per deployment.)
+GET /api/v1/user/courses/enrolled/
+  Auth: Bearer.
+  Success data: { "results": [ { "slug", "title", "category", "price", "thumbnail_url" }, ... ] }
+
+GET /api/v1/user/courses/<slug>/download/
+  Auth: Bearer.
+  Success: { "download_url": "<ebook full_pdf url>", "expires_at": "<ISO, +15 min>" }
+  Errors: 404 book; 403 not enrolled.
+
+GET /api/v1/admin/courses/
+  Auth: Bearer + IsAdminRole.
+  Success: { "results": [ { "id", "slug", "title", "category", "description", "thumbnail_url",
+    "pages_count", "language", "price", "status", "is_primary", "is_active",
+    "full_pdf_url", "preview_pdf_url" }, ... ] }
+
+POST /api/v1/admin/courses/
+  Body (multipart/form-data recommended): title, category, thumbnail (image), description, pages_count,
+    language, price, status (DRAFT|PUBLISHED), full_pdf, preview_pdf.
+  Optional: slug, is_primary, file_url (legacy fallback).
+  Success: returns created book object.
+
+PATCH /api/v1/admin/courses/<id>/
+  Body: partial update of create fields + is_active.
+  Success: returns updated book object; 404.
+
+DELETE /api/v1/admin/courses/<id>/
+  Soft delete: sets status=DRAFT and is_active=false.
+  Success: { "deleted": true }
+
+GET /api/v1/admin/courses/enrollments/
+  Success: { "count": <up to 200 enrollments> }
+
 
 MODULE: Payments & orders
-POST   /api/v1/payments/create-order/
-POST   /api/v1/payments/verify/
-POST   /api/v1/payments/webhook/
-       Webhook: Razorpay signature header X-Razorpay-Signature — must verify HMAC.
+--------------------------------------------------------------------------------
+POST /api/v1/payments/create-order/
+  Auth: Bearer.
+  Body: {
+    "ebook_slug": "<optional; must be published>",
+    "sponsor_code" | "sponsor_slot_code": "<optional>",
+    "is_retail": <optional bool, default false>
+  }
+  Pricing: uses selected ebook.price (fallback to primary published book price if ebook_slug omitted).
+  If Razorpay order not created (₹0 path): data includes order_id, order_number,
+    amount_paise: 0, razorpay_order_id: null, key_id, status.
+  Else: order_id, order_number, amount_paise, razorpay_order_id, key_id.
+  Errors: 500 RuntimeError message from service layer.
 
-GET    /api/v1/user/orders/
-GET    /api/v1/user/orders/<id>/invoice/
-POST   /api/v1/user/orders/<id>/refund/
+POST /api/v1/payments/verify/
+  Body: {
+    "order_id": <int>,
+    "razorpay_payment_id": "...",
+    "razorpay_signature": "..."
+  }
+  Success: { "status": "PAID", "order_number" }
+  Errors: 404 order; 400 verification exception message.
 
-GET    /api/v1/admin/orders/
-GET    /api/v1/admin/revenue/
-GET    /api/v1/admin/gst-report/
+POST /api/v1/payments/webhook/
+  Auth: None.
+  Header: X-Razorpay-Signature — HMAC verified against raw body.
+  Body: Razorpay JSON payload.
+  Success: { "received": true, "event": "<from payload>" }
+  Errors: 400 bad signature.
+
+GET /api/v1/user/orders/
+  Success data: {
+    "results": [ { "id", "order_number", "status", "amount_paid" }, ... max 50 ]
+  }
+
+GET /api/v1/user/orders/<id>/invoice/
+  Success: { "invoice_number", "pdf_url" }
+  Errors: 404 no invoice.
+
+POST /api/v1/user/orders/<id>/refund/
+  Allowed only PAID within refund_eligible_until.
+  Success: { "status": "REFUNDED" } — reverses commissions, deletes enrollment.
+  Errors: 400 not refundable / window closed.
+
+GET /api/v1/admin/orders/
+  Auth: IsFinanceAdmin.
+  Success: { "results": [ { "id", "status" }, ... ] }
+
+GET /api/v1/admin/revenue/
+  Demo stub: { "today", "week", "month" } as "0" strings.
+
+GET /api/v1/admin/gst-report/
+  Demo stub: { "gstr1": [] }
+
 
 MODULE: Admin panel & compliance
-GET    /api/v1/admin/dashboard/
+--------------------------------------------------------------------------------
+GET /api/v1/admin/dashboard/
+  Auth: IsAdminRole.
+  Success: {
+    "total_members", "new_orders_today", "pending_withdrawals", "pending_kyc"
+  }
 
-GET    /api/v1/admin/users/
-PATCH  /api/v1/admin/users/<id>/
-POST   /api/v1/admin/users/<id>/suspend/
-GET    /api/v1/admin/users/kyc-queue/
-POST   /api/v1/admin/users/<id>/kyc/verify/
-GET    /api/v1/admin/users/delisted/
+GET /api/v1/admin/users/
+  Success: {
+    "results": [
+      { "id", "member_id", "full_name", "role", "account_status" }, ... max 100
+    ]
+  }
 
-GET    /api/v1/admin/config/
-PATCH  /api/v1/admin/config/   — SUPER_ADMIN only for sensitive keys.
+PATCH /api/v1/admin/users/<id>/
+  Body: optional any of role, account_status, kyc_status.
+  Success: { "ok": true }; 404.
 
-GET    /api/v1/admin/reports/tds/
-GET    /api/v1/admin/reports/gst/
-GET    /api/v1/admin/reports/retail-ratio/
-GET    /api/v1/admin/reports/compliance/
+POST /api/v1/admin/users/<id>/suspend/
+  Sets account_status SUSPENDED.
+  Success: { "ok": true }
 
-GET    /api/v1/admin/grievances/
-POST   /api/v1/admin/grievances/<id>/respond/
+GET /api/v1/admin/users/kyc-queue/
+  See MODULE: Admin agreements & compliance — returns legacy list of pending user IDs only.
 
-------------------------------------------------------------------------------
+POST /api/v1/admin/users/<id>/kyc/verify/
+  See MODULE: Admin agreements & compliance — alias of compliance approve (requires compliance profile).
+
+GET /api/v1/admin/users/delisted/
+  Auth: IsAdminRole.
+  Success: { "results": [] } (stub).
+
+GET/PATCH /api/v1/admin/config/
+  Auth: IsSuperAdmin only.
+  GET data: {
+    "product_base_price", "gst_rate", "direct_commission", "upline_commission",
+    "earning_cap" } as strings.
+  PATCH body: any subset of those plus refund_window_days; sets updated_by.
+  Success PATCH: { "ok": true }
+
+GET /api/v1/admin/reports/tds/
+  Auth: IsFinanceAdmin. Stub: { "fy", "total" }.
+
+GET /api/v1/admin/reports/gst/
+  Stub: { "collected" }.
+
+GET /api/v1/admin/reports/retail-ratio/
+  Success: { "retail_ratio", "total_orders", "retail_orders" }.
+
+GET /api/v1/admin/reports/compliance/
+  Auth: IsAdminRole. Stub: { "doca_ready": true }.
+
+GET /api/v1/admin/grievances/
+  Auth: IsSupportAdmin.
+  Success: { "results": [ { "id", "subject", "status" }, ... ] }
+
+POST /api/v1/admin/grievances/<id>/respond/
+  Body: { "response": "..." } — sets admin_response, status CLOSED.
+  Success: { "ok": true }
+
+
+-----------------------------------------------------------------------------
 INFRASTRUCTURE & SETTINGS
-------------------------------------------------------------------------------
-- Production database: MySQL 8.x (see config/settings/production.py and .env.example).
-- Tests / CI: SQLite in-memory (config/settings/testing.py); run pytest from project root:
+-----------------------------------------------------------------------------
+- Production database: MySQL 8.x (config/settings/production.py, .env.example).
+- Tests / CI: SQLite in-memory (config/settings/testing.py); from project root:
     set DJANGO_SETTINGS_MODULE=config.settings.testing
     pytest
-- Celery + Redis: broker/result backend from REDIS_URL; beat schedule includes daily sponsor-slot expiry task.
-- Docker: see mlm_backend/docker/docker-compose.yml (web, nginx, mysql, redis, celery, celery-beat).
+- Celery + Redis: broker/result from REDIS_URL; beat includes sponsor-slot expiry.
+- Docker: mlm_backend/docker/docker-compose.yml (web, nginx, mysql, redis, celery, beat).
 
 ENVIRONMENT VARIABLES (representative)
 --------------------------------------
@@ -274,7 +651,8 @@ RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET,
 RAZORPAY_PAYOUT_KEY_ID, RAZORPAY_PAYOUT_KEY_SECRET,
 FRONTEND_BASE_URL, CORS_ALLOWED_ORIGINS,
 GST_NUMBER, PAN_NUMBER, COMPANY_NAME,
-JWT_ACCESS_TOKEN_LIFETIME_MINUTES, JWT_REFRESH_TOKEN_LIFETIME_DAYS,
-AZURE_STORAGE_* (for ebook/invoice blobs + signed URLs).
+JWT_ACCESS_TOKEN_LIFETIME_MINUTES,
+AZURE_STORAGE_* (ebook/invoice blobs + signed URLs).
+
 
 END OF apidoc.txt

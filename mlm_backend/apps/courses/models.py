@@ -3,9 +3,25 @@ from django.db import models
 
 
 class EBook(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "DRAFT", "Draft"
+        PUBLISHED = "PUBLISHED", "Published"
+
     title = models.CharField(max_length=255)
     slug = models.SlugField(unique=True)
     category = models.CharField(max_length=100)
+    description = models.TextField(blank=True, default="")
+    thumbnail = models.FileField(upload_to="ebooks/thumbnails/%Y/%m/", null=True, blank=True)
+    pages_count = models.PositiveIntegerField(default=1)
+    language = models.CharField(max_length=64, blank=True, default="English")
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.DRAFT,
+    )
+    full_pdf = models.FileField(upload_to="ebooks/full/%Y/%m/", null=True, blank=True)
+    preview_pdf = models.FileField(upload_to="ebooks/preview/%Y/%m/", null=True, blank=True)
     file_url = models.URLField(max_length=500)
     is_active = models.BooleanField(default=True)
     is_primary = models.BooleanField(default=False)

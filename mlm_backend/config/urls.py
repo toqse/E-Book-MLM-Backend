@@ -1,8 +1,9 @@
+from django.conf import settings
 from django.contrib import admin
-from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
-
+from django.urls import path, re_path
+from django.views.static import serve
 from apps.admin_panel import views as adminv
+from apps.agreements import views as agreement_views
 from apps.authentication import views as auth_views
 from apps.commissions import user_views as comm_views
 from apps.courses import views as course_views
@@ -15,6 +16,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     # Auth
     path("api/v1/auth/send-otp/", auth_views.send_otp),
+    path("api/v1/auth/register/send-otp/", auth_views.send_register_otp),
     path("api/v1/auth/verify-otp-register/", auth_views.verify_otp_register),
     path("api/v1/auth/verify-otp-login/", auth_views.verify_otp_login),
     path("api/v1/auth/logout/", auth_views.logout),
@@ -22,8 +24,11 @@ urlpatterns = [
     path("api/v1/auth/kyc/submit/", auth_views.kyc_submit),
     path("api/v1/auth/kyc/status/", auth_views.kyc_status),
     path("api/v1/auth/bank/", auth_views.bank_update),
+    path("api/v1/auth/compliance/submit/", agreement_views.compliance_submit),
+    path("api/v1/agreements/", agreement_views.legal_documents_public_list),
+    path("api/v1/agreements/send-otp/", agreement_views.agreement_send_otp),
+    path("api/v1/agreements/verify/", agreement_views.agreement_verify),
     path("api/v1/auth/validate-referral/", auth_views.validate_referral),
-    path("api/v1/auth/token/refresh/", TokenRefreshView.as_view()),
     # Admin auth
     path("api/v1/admin/auth/login/", auth_views.admin_password_login),
     path("api/v1/admin/auth/send-otp/", auth_views.admin_send_otp),
@@ -91,7 +96,21 @@ urlpatterns = [
     path("api/v1/admin/users/<int:pk>/", adminv.admin_users_detail),
     path("api/v1/admin/users/<int:pk>/suspend/", adminv.admin_user_suspend),
     path("api/v1/admin/users/kyc-queue/", adminv.kyc_queue),
+    path("api/v1/admin/compliance-queue/", adminv.compliance_queue),
     path("api/v1/admin/users/<int:pk>/kyc/verify/", adminv.kyc_verify),
+    path(
+        "api/v1/admin/users/<int:pk>/compliance/approve/",
+        adminv.compliance_approve,
+    ),
+    path(
+        "api/v1/admin/users/<int:pk>/compliance/reject/",
+        adminv.compliance_reject,
+    ),
+    path("api/v1/admin/agreements/", agreement_views.admin_legal_documents),
+    path(
+        "api/v1/admin/agreements/<int:pk>/",
+        agreement_views.admin_legal_document_detail,
+    ),
     path("api/v1/admin/users/delisted/", adminv.users_delisted),
     path("api/v1/admin/config/", adminv.system_config_view),
     path("api/v1/admin/reports/tds/", adminv.report_tds),
@@ -101,3 +120,16 @@ urlpatterns = [
     path("api/v1/admin/grievances/", adminv.grievances_list),
     path("api/v1/admin/grievances/<int:pk>/respond/", adminv.grievance_respond),
 ]
+if settings.DEBUG:
+    from django.conf.urls.static import static
+
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+elif getattr(settings, "SERVE_MEDIA", False):
+    media_prefix = settings.MEDIA_URL.lstrip("/").rstrip("/") + "/"
+    urlpatterns += [
+        re_path(
+            rf"^{media_prefix}(?P<path>.*)$",
+            serve,
+            {"document_root": settings.MEDIA_ROOT},
+        )
+    ]
