@@ -61,8 +61,8 @@ FLOWS (high level)
    - GET /api/v1/agreements/ (Bearer) — active legal documents (content_html + PDF URL when present).
    - POST /api/v1/agreements/send-otp/ — JSON { "document_ids": [int, ...] }; OTP tied to JWT user identity only.
    - POST /api/v1/agreements/verify/ — JSON { "document_ids", "otp_code" }; records UserAgreementAcceptance + client IP.
-   - POST /api/v1/auth/compliance/submit/ — multipart form: identity, address, nominee, bank, payout; files pan_document,
-     aadhar_document (required on first submit; optional on update if already stored). Dates in DD/MM/YYYY.
+  - POST /api/v1/auth/compliance/submit/ — multipart form: identity, address, nominee, bank, payout; files pan_document,
+    aadhar_front and aadhar_back (both required on first submit; optional on update if already stored). Dates in DD/MM/YYYY.
      Requires all active LegalDocuments with requires_acceptance_for_compliance=true at current version.
    - GET /api/v1/auth/kyc/status/ — kyc_status, timestamps, missing_acceptances, has_compliance_profile, etc.
    - Deprecated (410 Gone): POST /api/v1/auth/kyc/submit/, POST /api/v1/auth/bank/ — use compliance/submit/.
@@ -70,7 +70,7 @@ FLOWS (high level)
 5) Course catalog and enrollment
    - GET /api/v1/courses/ (public) — active e-books
    - GET /api/v1/courses/<slug>/ (public)
-   - Purchase: POST /api/v1/payments/create-order/ (ebook_slug, sponsor_code, is_retail)
+   - Purchase: POST /api/v1/payments/create-order/ (ebook_id or ebook_slug, sponsor_code, is_retail)
    - Zero-amount path when valid sponsor slot; else Razorpay order (amount_paise, ids).
    - POST /api/v1/payments/verify/  razorpay fields + order_id
    - GET /api/v1/user/courses/enrolled/
@@ -185,7 +185,7 @@ POST /api/v1/auth/compliance/submit/
     account_type (SAVINGS|CURRENT|NRO|NRE|RECURRING|OTHER),
     optional payout_preference (BANK|UPI); omitted or blank defaults to UPI,
     optional upi_id for UPI payouts.
-  Files: pan_document, aadhar_document (PDF or image types as accepted by storage).
+  Files: pan_document, aadhar_front, aadhar_back (PDF or image types as accepted by storage).
   Server syncs PAN + masked Aadhaar onto User alongside MemberComplianceProfile; sets kyc_status PENDING pending admin review.
   Success: { "kyc_status", "compliance_submission_version" }; 400 if mandatory agreements missing.
 
@@ -477,8 +477,13 @@ GET /api/v1/courses/
   } for published books only.
 
 GET /api/v1/courses/<slug>/
+GET /api/v1/courses/<id>/
   Success data: { "id", "slug", "title", "category", "description",
-    "thumbnail_url", "pages_count", "language", "price", "status", "full_pdf_url", "preview_pdf_url" }
+    "thumbnail_url", "pages_count", "language", "price", "status", "pdf_url" }
+  pdf_url selection:
+    - anonymous (no token): preview pdf URL
+    - authenticated + purchased/enrolled for this book: full pdf URL
+    - authenticated + not purchased: preview pdf URL
   Errors: 404 (unknown or non-published book).
 
 GET /api/v1/user/courses/enrolled/
@@ -519,11 +524,13 @@ MODULE: Payments & orders
 POST /api/v1/payments/create-order/
   Auth: Bearer.
   Body: {
+    "ebook_id": "<optional; preferred when both ebook_id and ebook_slug are sent>",
     "ebook_slug": "<optional; must be published>",
     "sponsor_code" | "sponsor_slot_code": "<optional>",
     "is_retail": <optional bool, default false>
   }
-  Pricing: uses selected ebook.price (fallback to primary published book price if ebook_slug omitted).
+  Detection rule: if both ebook_id and ebook_slug are present, ebook_id is used.
+  Pricing: uses selected ebook.price (fallback to primary published book price if ebook_id/ebook_slug omitted).
   If Razorpay order not created (₹0 path): data includes order_id, order_number,
     amount_paise: 0, razorpay_order_id: null, key_id, status.
   Else: order_id, order_number, amount_paise, razorpay_order_id, key_id.

@@ -196,7 +196,7 @@ def compliance_submit(request: Request):
             {
                 "missing_acceptances": user_missing_acceptances(user),
             },
-            message="Accept all required agreements (current version) before submitting compliance.",
+            message="Accept all required agreements before submitting documents.",
             success=False,
             status=400,
         )
@@ -205,11 +205,13 @@ def compliance_submit(request: Request):
     data = ser.validated_data
 
     pan_f = request.FILES.get("pan_document")
-    aad_f = request.FILES.get("aadhar_document")
+    aad_front_f = request.FILES.get("aadhar_front")
+    aad_back_f = request.FILES.get("aadhar_back")
 
     profile = getattr(user, "compliance_profile", None)
     existing_pan = bool(profile and profile.pan_document)
-    existing_aadhaar = bool(profile and profile.aadhar_document)
+    existing_aadhaar_front = bool(profile and profile.aadhar_front)
+    existing_aadhaar_back = bool(profile and profile.aadhar_back)
     if not pan_f and not existing_pan:
         return envelope_response(
             None,
@@ -217,10 +219,17 @@ def compliance_submit(request: Request):
             success=False,
             status=400,
         )
-    if not aad_f and not existing_aadhaar:
+    if not aad_front_f and not existing_aadhaar_front:
         return envelope_response(
             None,
-            message="aadhar_document file is required.",
+            message="aadhar_front file is required.",
+            success=False,
+            status=400,
+        )
+    if not aad_back_f and not existing_aadhaar_back:
+        return envelope_response(
+            None,
+            message="aadhar_back file is required.",
             success=False,
             status=400,
         )
@@ -259,8 +268,10 @@ def compliance_submit(request: Request):
 
         if pan_f:
             profile.pan_document = pan_f
-        if aad_f:
-            profile.aadhar_document = aad_f
+        if aad_front_f:
+            profile.aadhar_front = aad_front_f
+        if aad_back_f:
+            profile.aadhar_back = aad_back_f
 
         profile.save()
 

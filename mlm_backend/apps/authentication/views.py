@@ -272,12 +272,41 @@ def _user_payload(user: User):
     }
 
 
+def _fmt_ddmmyyyy(date_obj):
+    if not date_obj:
+        return None
+    return date_obj.strftime("%d/%m/%Y")
+
+
+def _me_payload(user: User):
+    profile = MemberComplianceProfile.objects.filter(user=user).first()
+    personal_information = {
+        "full_name": user.full_name or None,
+        "email_address": user.email or None,
+        "mobile_number": user.phone or None,
+        "date_of_birth": _fmt_ddmmyyyy(profile.date_of_birth) if profile else None,
+        "gender": profile.get_gender_display() if profile and profile.gender else None,
+    }
+    member_information = {
+        "member_id": user.member_id or None,
+        "joined_date": user.created_at.date().isoformat() if user.created_at else None,
+        "address": profile.full_address if profile and profile.full_address else None,
+        "state": profile.state if profile and profile.state else None,
+        "pin_code": profile.pin_code if profile and profile.pin_code else None,
+        "country": profile.country if profile and profile.country else None,
+    }
+    data = _user_payload(user)
+    data["personal_information"] = personal_information
+    data["member_information"] = member_information
+    return data
+
+
 @api_view(["GET", "PATCH"])
 @permission_classes([permissions.IsAuthenticated])
 def me(request: Request):
     user = request.user
     if request.method == "GET":
-        return envelope_response(_user_payload(user))
+        return envelope_response(_me_payload(user))
     for field in ["full_name", "payout_preference"]:
         if field in request.data:
             setattr(user, field, request.data[field])

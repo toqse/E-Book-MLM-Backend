@@ -53,7 +53,8 @@ def create_checkout_order(
         raise RuntimeError("Selected book is not published")
 
     base = selected_ebook.price if selected_ebook else cfg.product_base_price
-    gst = (base * cfg.gst_rate).quantize(Decimal("0.01"))
+    gst_rate = Decimal(str(cfg.gst_rate))
+    gst = (base * gst_rate).quantize(Decimal("0.01"))
     gateway = Decimal("5.72")
     total = (base + gst + gateway).quantize(Decimal("0.01"))
 

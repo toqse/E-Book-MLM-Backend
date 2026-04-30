@@ -105,6 +105,16 @@ class MemberComplianceProfile(models.Model):
         blank=True,
         null=True,
     )
+    aadhar_front = models.FileField(
+        upload_to="kyc/aadhaar/front/%Y/%m/",
+        blank=True,
+        null=True,
+    )
+    aadhar_back = models.FileField(
+        upload_to="kyc/aadhaar/back/%Y/%m/",
+        blank=True,
+        null=True,
+    )
 
     nominee_name = models.CharField(max_length=255, blank=True, default="")
     nominee_relationship = models.CharField(max_length=128, blank=True, default="")

@@ -82,7 +82,8 @@ def snapshot_profile_hashes(profile: MemberComplianceProfile) -> dict:
         "nominee": profile.nominee_name + profile.nominee_phone,
         "pk": str(profile.pk or ""),
         "pan_f": getattr(profile.pan_document, "name", "") or "",
-        "aar_f": getattr(profile.aadhar_document, "name", "") or "",
+        "aar_front_f": getattr(profile.aadhar_front, "name", "") or "",
+        "aar_back_f": getattr(profile.aadhar_back, "name", "") or "",
     }
 
 

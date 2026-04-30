@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from apps.agreements.models import MemberComplianceProfile
 from apps.authentication.models import OTPRecord
 from apps.authentication.otp import normalize_otp_code, verify_otp
 
@@ -286,3 +287,43 @@ def test_admin_otp_login_with_email():
     assert verify.status_code == 200, verify.content
     assert verify.json()["data"]["tokens"]["access"]
     assert verify.json()["data"]["role"] == "admin"
+
+
+@pytest.mark.django_db
+def test_me_includes_personal_and_member_info_blocks():
+    u = User.objects.create_user(
+        login_identifier="+919444444444",
+        password="pw",
+        phone="+919444444444",
+        email="me@test.dev",
+        full_name="Me User",
+        member_id="MBR000301",
+        referral_code="MBR301",
+        referral_link="http://localhost:3000/join?ref=MBR301",
+        role=User.Role.MEMBER,
+        is_staff=False,
+    )
+    MemberComplianceProfile.objects.create(
+        user=u,
+        date_of_birth="1992-03-15",
+        gender=MemberComplianceProfile.Gender.M,
+        full_address="42, MG Road, Ernakulam",
+        state="Kerala",
+        pin_code="682001",
+        country="India",
+    )
+    client = APIClient()
+    client.force_authenticate(user=u)
+    resp = client.get("/api/v1/auth/me/")
+    assert resp.status_code == 200, resp.content
+    data = resp.json()["data"]
+    assert data["personal_information"]["full_name"] == "Me User"
+    assert data["personal_information"]["email_address"] == "me@test.dev"
+    assert data["personal_information"]["mobile_number"] == "+919444444444"
+    assert data["personal_information"]["date_of_birth"] == "15/03/1992"
+    assert data["personal_information"]["gender"] == "Male"
+    assert data["member_information"]["member_id"] == "MBR000301"
+    assert data["member_information"]["address"] == "42, MG Road, Ernakulam"
+    assert data["member_information"]["state"] == "Kerala"
+    assert data["member_information"]["pin_code"] == "682001"
+    assert data["member_information"]["country"] == "India"

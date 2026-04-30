@@ -134,7 +134,8 @@ def compliance_queue(request):
                 "payout_preference": p.payout_preference,
             }
             row["pan_document_url"] = _abs_media_url(request, p.pan_document)
-            row["aadhar_document_url"] = _abs_media_url(request, p.aadhar_document)
+            row["aadhar_front_url"] = _abs_media_url(request, p.aadhar_front)
+            row["aadhar_back_url"] = _abs_media_url(request, p.aadhar_back)
             row["bank_on_user"] = {
                 "bank_account_number": u.bank_account_number,
                 "bank_ifsc": u.bank_ifsc,
@@ -143,7 +144,8 @@ def compliance_queue(request):
         else:
             row["profile"] = None
             row["pan_document_url"] = None
-            row["aadhar_document_url"] = None
+            row["aadhar_front_url"] = None
+            row["aadhar_back_url"] = None
         out.append(row)
     return envelope_response({"results": out})
 

@@ -91,7 +91,8 @@ def test_compliance_flow_with_agreement_otp_and_admin_approve():
     assert UserAgreementAcceptance.objects.filter(user=u, document=doc).exists()
 
     pdf = SimpleUploadedFile("pan.pdf", b"%PDF", content_type="application/pdf")
-    aad = SimpleUploadedFile("aad.pdf", b"%PDF", content_type="application/pdf")
+    aad_front = SimpleUploadedFile("aad_front.pdf", b"%PDF", content_type="application/pdf")
+    aad_back = SimpleUploadedFile("aad_back.pdf", b"%PDF", content_type="application/pdf")
 
     payload = {
         "date_of_birth": "15/03/1990",
@@ -118,7 +119,8 @@ def test_compliance_flow_with_agreement_otp_and_admin_approve():
         "payout_preference": "BANK",
         "upi_id": "",
         "pan_document": pdf,
-        "aadhar_document": aad,
+        "aadhar_front": aad_front,
+        "aadhar_back": aad_back,
     }
     r_sub = client.post("/api/v1/auth/compliance/submit/", payload, format="multipart")
     assert r_sub.status_code == 200, r_sub.content
@@ -131,7 +133,10 @@ def test_compliance_flow_with_agreement_otp_and_admin_approve():
     staff_client.force_authenticate(user=staff)
     q = staff_client.get("/api/v1/admin/compliance-queue/")
     assert q.status_code == 200
-    assert any(row["user_id"] == u.id for row in q.json()["data"]["results"])
+    queue_rows = q.json()["data"]["results"]
+    target_row = next(row for row in queue_rows if row["user_id"] == u.id)
+    assert target_row["aadhar_front_url"]
+    assert target_row["aadhar_back_url"]
 
     ap = staff_client.post(f"/api/v1/admin/users/{u.id}/compliance/approve/")
     assert ap.status_code == 200

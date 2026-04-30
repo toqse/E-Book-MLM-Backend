@@ -19,9 +19,16 @@ from .services import create_checkout_order, verify_payment, verify_webhook_sign
 def create_order(request):
     sponsor_code = request.data.get("sponsor_code") or request.data.get("sponsor_slot_code")
     is_retail = bool(request.data.get("is_retail", False))
+    ebook_id = request.data.get("ebook_id")
     slug = request.data.get("ebook_slug")
-    ebook = EBook.objects.filter(slug=slug, status=EBook.Status.PUBLISHED).first() if slug else None
-    if slug and not ebook:
+
+    ebook = None
+    if ebook_id not in (None, ""):
+        ebook = EBook.objects.filter(pk=ebook_id, status=EBook.Status.PUBLISHED).first()
+    elif slug:
+        ebook = EBook.objects.filter(slug=slug, status=EBook.Status.PUBLISHED).first()
+
+    if (ebook_id not in (None, "") or slug) and not ebook:
         return envelope_response(
             None,
             message="Book not found or not published",
@@ -36,6 +43,10 @@ def create_order(request):
             is_retail=is_retail,
         )
     except RuntimeError as e:
+        return envelope_response(None, message=str(e), success=False, status=500)
+    except Exception as e:
+        # External gateway/library errors (e.g. bad Razorpay credentials or network issues)
+        # should still return API envelope JSON instead of a raw Django 500 HTML page.
         return envelope_response(None, message=str(e), success=False, status=500)
     if rz is None:
         return envelope_response(

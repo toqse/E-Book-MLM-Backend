@@ -39,6 +39,36 @@ def _book_payload(request, b: EBook):
     }
 
 
+def _resolve_detail_pdf_url(request, b: EBook):
+    preview_url = _media_url(request, b.preview_pdf) or b.file_url
+    full_url = _media_url(request, b.full_pdf) or b.file_url
+    u = getattr(request, "user", None)
+    if not u or not getattr(u, "is_authenticated", False):
+        return preview_url
+    enrolled = Enrollment.objects.filter(user=u, ebook=b).exists()
+    if enrolled:
+        return full_url
+    return preview_url
+
+
+def _book_detail_payload(request, b: EBook):
+    return {
+        "id": b.id,
+        "slug": b.slug,
+        "title": b.title,
+        "category": b.category,
+        "description": b.description,
+        "thumbnail_url": _media_url(request, b.thumbnail),
+        "pages_count": b.pages_count,
+        "language": b.language,
+        "price": str(b.price),
+        "status": b.status,
+        "is_primary": b.is_primary,
+        "is_active": b.is_active,
+        "pdf_url": _resolve_detail_pdf_url(request, b),
+    }
+
+
 def _is_uploaded_file(value):
     return hasattr(value, "name") and hasattr(value, "size")
 
@@ -200,7 +230,16 @@ def ebook_detail(request, slug: str):
     b = EBook.objects.filter(slug=slug, status=EBook.Status.PUBLISHED).first()
     if not b:
         return envelope_response(None, message="Not found", success=False, status=404)
-    return envelope_response(_book_payload(request, b))
+    return envelope_response(_book_detail_payload(request, b))
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def ebook_detail_by_id(request, pk: int):
+    b = EBook.objects.filter(pk=pk, status=EBook.Status.PUBLISHED).first()
+    if not b:
+        return envelope_response(None, message="Not found", success=False, status=404)
+    return envelope_response(_book_detail_payload(request, b))
 
 
 @api_view(["GET"])

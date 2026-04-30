@@ -74,6 +74,7 @@ urlpatterns = [
     path("api/v1/admin/sponsor-slots/<str:code>/expire/", slot_views.admin_expire_code),
     # Courses
     path("api/v1/courses/", course_views.list_ebooks),
+    path("api/v1/courses/<int:pk>/", course_views.ebook_detail_by_id),
     path("api/v1/courses/<slug:slug>/", course_views.ebook_detail),
     path("api/v1/user/courses/enrolled/", course_views.my_enrollments),
     path("api/v1/user/courses/<slug:slug>/download/", course_views.download_signed),
