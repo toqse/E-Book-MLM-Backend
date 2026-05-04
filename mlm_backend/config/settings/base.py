@@ -19,6 +19,22 @@ EXPOSE_OTP_IN_RESPONSE = os.environ.get("EXPOSE_OTP_IN_RESPONSE", "true").lower(
     "yes",
 )
 
+
+def _env_positive_int(key: str, default: int) -> int:
+    raw = os.environ.get(key)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        n = int(str(raw).strip())
+    except ValueError:
+        return default
+    return n if n > 0 else default
+
+
+# OTP send burst limit per phone/email (cache-backed; same window as OTP_SEND_WINDOW_SECONDS).
+OTP_SEND_MAX_PER_WINDOW = _env_positive_int("OTP_SEND_MAX_PER_WINDOW", 3)
+OTP_SEND_WINDOW_SECONDS = _env_positive_int("OTP_SEND_WINDOW_SECONDS", 600)
+
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
 
 INSTALLED_APPS = [
@@ -152,6 +168,10 @@ CELERY_BEAT_SCHEDULE = {
     "expire-sponsor-slots-daily": {
         "task": "apps.sponsor_slots.tasks.expire_sponsor_slots",
         "schedule": crontab(hour=0, minute=5),
+    },
+    "auto-place-pending-binary": {
+        "task": "apps.mlm_tree.tasks.auto_place_pending_placements",
+        "schedule": crontab(minute="*/5"),
     },
 }
 

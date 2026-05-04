@@ -12,6 +12,7 @@ from apps.authentication.models import OTPRecord
 from apps.authentication.otp import (
     can_send_otp,
     create_otp_record,
+    otp_send_rate_limit_message,
     register_otp_send,
     verify_otp,
 )
@@ -95,7 +96,7 @@ def agreement_send_otp(request: Request):
     if not can_send_otp(ident):
         return envelope_response(
             None,
-            message="OTP rate limit: max 3 per 10 minutes",
+            message=otp_send_rate_limit_message(),
             success=False,
             errors={"detail": "rate_limited"},
             status=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -144,7 +145,7 @@ def agreement_verify(request: Request):
         return envelope_response(None, message=err, success=False, status=400)
     got_p = rec.payload or {}
     if int(got_p.get("user_id") or 0) != user.id:
-        return envelope_response(None, message="invalid_otp", success=False, status=400)
+        return envelope_response(None, message="Invalid Otp", success=False, status=400)
     if sorted(got_p.get("document_ids") or []) != doc_ids:
         return envelope_response(
             None,

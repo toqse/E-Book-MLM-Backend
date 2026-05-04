@@ -2,6 +2,7 @@ import random
 import string
 from datetime import timedelta
 
+from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 
@@ -26,16 +27,34 @@ def normalize_otp_code(raw) -> str | None:
     return digits.zfill(6)
 
 
+def _otp_send_max() -> int:
+    return int(getattr(settings, "OTP_SEND_MAX_PER_WINDOW", 3))
+
+
+def _otp_send_window_seconds() -> int:
+    return int(getattr(settings, "OTP_SEND_WINDOW_SECONDS", 600))
+
+
+def otp_send_rate_limit_message() -> str:
+    max_n = _otp_send_max()
+    sec = _otp_send_window_seconds()
+    if sec >= 60 and sec % 60 == 0:
+        m = sec // 60
+        unit = "minute" if m == 1 else "minutes"
+        return f"OTP rate limit: max {max_n} per {m} {unit}"
+    return f"OTP rate limit: max {max_n} per {sec} seconds"
+
+
 def can_send_otp(identifier: str) -> bool:
     key = f"otp_send_count:{identifier}"
     n = cache.get(key, 0)
-    return n < 3
+    return n < _otp_send_max()
 
 
 def register_otp_send(identifier: str):
     key = f"otp_send_count:{identifier}"
     n = cache.get(key, 0)
-    cache.set(key, n + 1, timeout=600)
+    cache.set(key, n + 1, timeout=_otp_send_window_seconds())
 
 
 def create_otp_record(
@@ -75,7 +94,7 @@ def verify_otp(phone=None, email=None, code=None, purpose=OTPRecord.Purpose.LOGI
     """Resolve OTP by matching code for this identity, not only the latest send row."""
     code_n = normalize_otp_code(code)
     if not code_n:
-        return None, "invalid_otp"
+        return None, "Invalid Otp"
 
     id_qs = OTPRecord.objects.filter(
         purpose=purpose,
@@ -98,7 +117,7 @@ def verify_otp(phone=None, email=None, code=None, purpose=OTPRecord.Purpose.LOGI
     rec = id_qs.filter(otp_code=code_n).order_by("-created_at").first()
     if rec:
         if rec.attempts >= 5:
-            return None, "too_many_attempts"
+            return None, "Too Many Attempts, Try Again Later"
         rec.is_used = True
         rec.save(update_fields=["is_used"])
         return rec, None
@@ -106,7 +125,7 @@ def verify_otp(phone=None, email=None, code=None, purpose=OTPRecord.Purpose.LOGI
     latest = id_qs.order_by("-created_at").first()
     if latest:
         if latest.attempts >= 5:
-            return None, "too_many_attempts"
+            return None, "Too Many Attempts, Try Again Later"
         latest.attempts += 1
         latest.save(update_fields=["attempts"])
-    return None, "invalid_otp"
+    return None, "Invalid Otp"

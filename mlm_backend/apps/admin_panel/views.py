@@ -230,6 +230,10 @@ def system_config_view(request):
                 "direct_commission": str(cfg.direct_commission),
                 "upline_commission": str(cfg.upline_commission),
                 "earning_cap": str(cfg.earning_cap),
+                "refund_window_days": cfg.refund_window_days,
+                "placement_manual_window_hours": cfg.placement_manual_window_hours,
+                "auto_placement_strategy": cfg.auto_placement_strategy,
+                "is_repurchase_commission_allowed": cfg.is_repurchase_commission_allowed,
             }
         )
     for field in [
@@ -239,9 +243,21 @@ def system_config_view(request):
         "upline_commission",
         "earning_cap",
         "refund_window_days",
+        "placement_manual_window_hours",
+        "auto_placement_strategy",
+        "is_repurchase_commission_allowed",
     ]:
-        if field in request.data:
-            setattr(cfg, field, request.data[field])
+        if field not in request.data:
+            continue
+        val = request.data[field]
+        if field == "is_repurchase_commission_allowed":
+            setattr(
+                cfg,
+                field,
+                val is True or str(val).lower() in ("1", "true", "yes"),
+            )
+        else:
+            setattr(cfg, field, val)
     cfg.updated_by = request.user
     cfg.save()
     return envelope_response({"ok": True})

@@ -9,6 +9,8 @@ from apps.commissions import user_views as comm_views
 from apps.courses import views as course_views
 from apps.payments import views as pay_views
 from apps.sponsor_slots import views as slot_views
+from apps.mlm_tree import admin_placement_views as mlm_placement_admin
+from apps.mlm_tree import user_views as mlm_tree_user_views
 from apps.users import member_views as user_views
 from apps.wallet import views as wallet_views
 
@@ -37,13 +39,27 @@ urlpatterns = [
     path("api/v1/user/referral/", user_views.referral_me),
     path("api/v1/user/referral/stats/", user_views.referral_stats),
     path("api/v1/user/referral/list/", user_views.referral_list),
+    path("api/v1/user/team/network/", user_views.team_network),
+    path("api/v1/user/team/network/roster/", user_views.team_network_roster),
     path("api/v1/user/tree/", user_views.tree_me),
+    path("api/v1/user/tree/subtree/", user_views.tree_subtree),
     path("api/v1/user/tree/uplines/", user_views.tree_uplines),
     path("api/v1/user/tree/downlines/", user_views.tree_downlines),
     path("api/v1/user/tree/level/<int:n>/", user_views.tree_level_n),
+    path("api/v1/user/tree/place-direct/", mlm_tree_user_views.tree_place_direct),
+    path("api/v1/admin/placements/pending/", mlm_placement_admin.admin_placements_pending),
+    path(
+        "api/v1/admin/placements/<int:order_id>/reverse/",
+        mlm_placement_admin.admin_placement_reverse,
+    ),
+    path(
+        "api/v1/admin/placements/<int:order_id>/reassign/",
+        mlm_placement_admin.admin_placement_reassign,
+    ),
     path("api/v1/admin/tree/user/<int:user_id>/", user_views.admin_tree_user),
     path("api/v1/admin/tree/platform/", user_views.admin_tree_platform),
-    # Commissions
+    # Commissions & earnings bundles
+    path("api/v1/user/earnings/", comm_views.user_earnings_bundle),
     path("api/v1/user/commissions/", comm_views.user_commissions),
     path("api/v1/user/commissions/summary/", comm_views.user_commissions_summary),
     path("api/v1/user/commissions/milestones/", comm_views.user_milestones),
@@ -53,7 +69,8 @@ urlpatterns = [
     path("api/v1/admin/commissions/force-credit/", comm_views.admin_force_credit),
     path("api/v1/admin/commissions/tds-report/", comm_views.admin_tds_report),
     path("api/v1/admin/commissions/export/", comm_views.admin_commissions_export),
-    # Wallet
+    # Wallet & payouts bundle
+    path("api/v1/user/payouts/", wallet_views.user_payouts_bundle),
     path("api/v1/user/wallet/", wallet_views.wallet_me),
     path("api/v1/user/wallet/transactions/", wallet_views.wallet_transactions),
     path("api/v1/user/wallet/bands/", wallet_views.wallet_bands),
@@ -89,6 +106,10 @@ urlpatterns = [
     path("api/v1/user/orders/<int:pk>/invoice/", pay_views.order_invoice),
     path("api/v1/user/orders/<int:pk>/refund/", pay_views.order_refund),
     path("api/v1/admin/orders/", pay_views.admin_orders),
+    path(
+        "api/v1/admin/orders/<str:order_ref>/verify-payment-manual/",
+        pay_views.admin_verify_payment_manual,
+    ),
     path("api/v1/admin/revenue/", pay_views.admin_revenue),
     path("api/v1/admin/gst-report/", pay_views.admin_gst_report),
     # Admin panel

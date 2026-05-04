@@ -164,11 +164,34 @@ def test_login_send_otp_rejects_truncated_indian_mobile():
         format="json",
     )
     assert r.status_code == 400
-    assert "Indian mobile" in r.json().get("message", "")
+    assert "Invalid" in r.json().get("message", "")
+
+
+@pytest.mark.django_db
+def test_login_send_otp_unknown_phone_returns_404():
+    client = APIClient()
+    r = client.post(
+        "/api/v1/auth/send-otp/",
+        {"phone": "+919888888888", "purpose": "LOGIN"},
+        format="json",
+    )
+    assert r.status_code == 404
+    assert r.json()["message"] == "User not found"
 
 
 @pytest.mark.django_db
 def test_send_otp_rate_limit():
+    User.objects.create_user(
+        login_identifier=LOGIN_PHONE,
+        password="pw",
+        phone=LOGIN_PHONE,
+        full_name="Rate Limit User",
+        member_id="MBR000401",
+        referral_code="MBR401",
+        referral_link="http://localhost:3000/join?ref=MBR401",
+        role=User.Role.MEMBER,
+        is_staff=False,
+    )
     client = APIClient()
     for _ in range(3):
         r = client.post(

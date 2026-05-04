@@ -9,6 +9,13 @@ class Order(models.Model):
         FAILED = "FAILED", "Failed"
         REFUNDED = "REFUNDED", "Refunded"
 
+    class PlacementStatus(models.TextChoices):
+        PENDING = "PENDING", "Pending manual or auto placement"
+        PLACED_MANUAL = "PLACED_MANUAL", "Placed by sponsor"
+        PLACED_AUTO = "PLACED_AUTO", "Placed by auto job"
+        PLACED_ADMIN = "PLACED_ADMIN", "Placed by admin"
+        FAILED = "FAILED", "Placement failed"
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -44,6 +51,17 @@ class Order(models.Model):
     refund_eligible_until = models.DateTimeField(null=True, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    placement_deadline_at = models.DateTimeField(null=True, blank=True)
+    placement_status = models.CharField(
+        max_length=32,
+        choices=PlacementStatus.choices,
+        null=True,
+        blank=True,
+    )
+    placement_leg_requested = models.CharField(max_length=10, null=True, blank=True)
+    placement_resolved_at = models.DateTimeField(null=True, blank=True)
+    placement_failure_reason = models.TextField(null=True, blank=True)
 
     class Meta:
         db_table = "payments_order"

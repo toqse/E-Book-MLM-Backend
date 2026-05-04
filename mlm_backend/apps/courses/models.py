@@ -30,6 +30,9 @@ class EBook(models.Model):
     class Meta:
         db_table = "courses_ebook"
 
+    def __str__(self) -> str:
+        return self.title
+
 
 class Enrollment(models.Model):
     user = models.ForeignKey(
@@ -55,3 +58,6 @@ class Enrollment(models.Model):
                 name="uniq_enrollment_user_ebook_order",
             )
         ]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} → {self.ebook.title} ({self.order_id})"

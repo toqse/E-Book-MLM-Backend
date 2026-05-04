@@ -12,6 +12,9 @@ class OrderAdmin(admin.ModelAdmin):
         "ebook",
         "status",
         "amount_paid",
+        "razorpay_order_id",
+        "razorpay_payment_id",
+        "paid_at",
         "is_retail_purchase",
         "is_sponsor_slot_redemption",
         "created_at",
@@ -35,6 +38,55 @@ class OrderAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
     autocomplete_fields = ("user", "ebook", "sponsor_code_used")
     ordering = ("-id",)
+    fieldsets = (
+        (None, {"fields": ("user", "ebook", "order_number", "status")}),
+        (
+            "Amounts",
+            {
+                "fields": (
+                    "base_price",
+                    "gst_amount",
+                    "gateway_charge",
+                    "total_amount",
+                    "discount_amount",
+                    "amount_paid",
+                )
+            },
+        ),
+        (
+            "Razorpay",
+            {
+                "fields": ("razorpay_order_id", "razorpay_payment_id"),
+                "description": "Gateway order id (created at checkout) and payment id (set when paid).",
+            },
+        ),
+        (
+            "Flags & slot",
+            {
+                "fields": (
+                    "is_retail_purchase",
+                    "is_sponsor_slot_redemption",
+                    "sponsor_code_used",
+                )
+            },
+        ),
+        (
+            "Binary placement",
+            {
+                "fields": (
+                    "placement_status",
+                    "placement_deadline_at",
+                    "placement_leg_requested",
+                    "placement_resolved_at",
+                    "placement_failure_reason",
+                )
+            },
+        ),
+        (
+            "Invoicing & timeline",
+            {"fields": ("gst_invoice_number", "paid_at", "refund_eligible_until", "created_at")},
+        ),
+    )
 
 
 @admin.register(GSTInvoice)

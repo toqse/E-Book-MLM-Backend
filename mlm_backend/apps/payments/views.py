@@ -1,17 +1,24 @@
 import json
+import secrets
 
 from django.conf import settings
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
+from apps.audit.services import write_audit
 from apps.commissions.engine import CommissionEngine
-from apps.common.permissions import IsFinanceAdmin
+from apps.common.permissions import IsFinanceAdmin, IsSuperAdmin
 from apps.common.responses import envelope_response
 from apps.courses.models import EBook, Enrollment
 
 from .models import Order
-from .services import create_checkout_order, verify_payment, verify_webhook_signature
+from .services import (
+    create_checkout_order,
+    finalize_order_as_paid,
+    verify_payment,
+    verify_webhook_signature,
+)
 
 
 @api_view(["POST"])
@@ -136,6 +143,63 @@ def order_refund(request, pk: int):
     CommissionEngine.reverse_commissions(o)
     Enrollment.objects.filter(order=o).delete()
     return envelope_response({"status": "REFUNDED"})
+
+
+def _resolve_order_for_admin_verify(order_ref: str) -> Order | None:
+    """Numeric `order_ref` = primary key; otherwise match `order_number` (e.g. ORD-20260504-ABC)."""
+    ref = (order_ref or "").strip()
+    if not ref:
+        return None
+    if ref.isdigit():
+        return Order.objects.filter(pk=int(ref)).first()
+    return Order.objects.filter(order_number__iexact=ref).first()
+
+
+@api_view(["POST"])
+@permission_classes([IsSuperAdmin])
+def admin_verify_payment_manual(request, order_ref: str):
+    """Mark a CREATED order as PAID with same side effects as Razorpay verify (dev / ops)."""
+    order = _resolve_order_for_admin_verify(order_ref)
+    if not order:
+        return envelope_response(None, message="Order not found", success=False, status=404)
+    if order.status == Order.Status.PAID:
+        return envelope_response(
+            {
+                "status": "PAID",
+                "order_number": order.order_number,
+                "order_id": order.id,
+            },
+            message="Order was already paid",
+        )
+    note = (request.data.get("note") or "").strip()
+    payment_id = f"MANUAL-{request.user.pk}-{secrets.token_hex(8)}"
+    if len(payment_id) > 64:
+        payment_id = payment_id[:64]
+    try:
+        finalize_order_as_paid(order, payment_id=payment_id)
+    except ValueError as exc:
+        return envelope_response(None, message=str(exc), success=False, status=400)
+    order.refresh_from_db()
+    write_audit(
+        "payment.admin_verified",
+        actor=request.user,
+        target_type="Order",
+        target_id=str(order.id),
+        payload={
+            "order_number": order.order_number,
+            "buyer_id": order.user_id,
+            "payment_id": payment_id,
+            "note": note or None,
+        },
+    )
+    return envelope_response(
+        {
+            "status": "PAID",
+            "order_number": order.order_number,
+            "order_id": order.id,
+        },
+        message="Order marked paid",
+    )
 
 
 @api_view(["GET"])

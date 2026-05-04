@@ -9,10 +9,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.admin_panel.utils import get_system_config
-from apps.commissions.engine import CommissionEngine
-from apps.commissions.tasks import process_commission_task
 from apps.courses.models import EBook, Enrollment
-from apps.mlm_tree.services import BinaryTreeService
+from apps.mlm_tree.placement import open_placement_queue_if_needed
 from apps.sponsor_slots.services import SponsorSlotService
 from apps.users.models import User
 
@@ -139,15 +137,40 @@ def _grant_enrollment(order: Order, user: User, ebook: EBook | None):
 def _place_and_commission(order: Order, user: User):
     if order.is_retail_purchase:
         return
-    sponsor = user.sponsor
-    try:
-        BinaryTreeService.place_member(user, sponsor)
-    except Exception:
-        pass
-    process_commission_task.delay(order.id)
+    open_placement_queue_if_needed(order, user)
 
 
-@transaction.atomic
+def finalize_order_as_paid(order: Order, *, payment_id: str) -> Order:
+    """
+    Mark order PAID and run enrollment, placement queue, GST invoice — same as
+    post-signature path in verify_payment. Idempotent if already PAID.
+    Only allowed from CREATED (raises ValueError otherwise).
+    """
+    with transaction.atomic():
+        order = Order.objects.select_for_update().get(pk=order.pk)
+        if order.status == Order.Status.PAID:
+            return order
+        if order.status != Order.Status.CREATED:
+            raise ValueError(
+                f"Order cannot be finalized from status {order.status}; only CREATED is allowed."
+            )
+        rid = (payment_id or "").strip()[:64]
+        order.status = Order.Status.PAID
+        order.razorpay_payment_id = rid or None
+        order.paid_at = timezone.now()
+        cfg = get_system_config()
+        order.refund_eligible_until = timezone.now() + timedelta(days=cfg.refund_window_days)
+        order.save()
+        ebook = order.ebook or EBook.objects.filter(
+            is_primary=True,
+            status=EBook.Status.PUBLISHED,
+        ).first()
+        _grant_enrollment(order, order.user, ebook)
+        _place_and_commission(order, order.user)
+        _ensure_gst_invoice(order)
+    return order
+
+
 def verify_payment(order: Order, payment_id: str, signature: str):
     if order.status == Order.Status.PAID:
         return order
@@ -160,20 +183,7 @@ def verify_payment(order: Order, payment_id: str, signature: str):
         "razorpay_signature": signature,
     }
     client.utility.verify_payment_signature(params)
-    order.status = Order.Status.PAID
-    order.razorpay_payment_id = payment_id
-    order.paid_at = timezone.now()
-    cfg = get_system_config()
-    order.refund_eligible_until = timezone.now() + timedelta(days=cfg.refund_window_days)
-    order.save()
-    ebook = order.ebook or EBook.objects.filter(
-        is_primary=True,
-        status=EBook.Status.PUBLISHED,
-    ).first()
-    _grant_enrollment(order, order.user, ebook)
-    _place_and_commission(order, order.user)
-    _ensure_gst_invoice(order)
-    return order
+    return finalize_order_as_paid(order, payment_id=payment_id)
 
 
 def _ensure_gst_invoice(order: Order):

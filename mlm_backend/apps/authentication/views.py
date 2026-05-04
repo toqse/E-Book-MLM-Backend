@@ -18,7 +18,13 @@ from apps.users.models import User
 from apps.users.services import allocate_member_identity, resolve_sponsor_by_code
 
 from .models import OTPRecord
-from .otp import can_send_otp, create_otp_record, register_otp_send, verify_otp
+from .otp import (
+    can_send_otp,
+    create_otp_record,
+    otp_send_rate_limit_message,
+    register_otp_send,
+    verify_otp,
+)
 from .serializers import (
     AdminLoginSerializer,
     SendOTPSerializer,
@@ -54,6 +60,14 @@ def _session_role(user: User) -> str:
     return "admin" if getattr(user, "is_staff", False) else "user"
 
 
+def _user_by_phone_or_email(phone: str | None, email: str | None) -> User | None:
+    if phone:
+        return User.objects.filter(phone=phone).first()
+    if email:
+        return User.objects.filter(email=email).first()
+    return None
+
+
 class LogoutView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -80,6 +94,25 @@ def send_otp(request: Request):
     }
     purpose = purpose_map[purpose_raw]
     ident = phone or email
+
+    if purpose in (OTPRecord.Purpose.LOGIN, OTPRecord.Purpose.KYC):
+        if not _user_by_phone_or_email(phone, email):
+            return envelope_response(
+                None,
+                message="User not found",
+                success=False,
+                status=status.HTTP_404_NOT_FOUND,
+            )
+    elif purpose == OTPRecord.Purpose.ADMIN_LOGIN:
+        u = _user_by_phone_or_email(phone, email)
+        if not u or not u.is_staff:
+            return envelope_response(
+                None,
+                message="Forbidden",
+                success=False,
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
     if not can_send_otp(ident):
         return envelope_response(
             None,
@@ -238,7 +271,7 @@ def verify_otp_login(request: Request):
         return envelope_response(None, message="Account locked", success=False, status=423)
 
     rec, err = verify_otp(phone=phone, email=email, code=code, purpose=OTPRecord.Purpose.LOGIN)
-    if err == "invalid_otp" and user:
+    if err == "Invalid Otp" and user:
         # track failed attempts on user simplified: lock after 5 failures in session — omitted
         pass
     if err:
@@ -276,6 +309,69 @@ def _fmt_ddmmyyyy(date_obj):
     if not date_obj:
         return None
     return date_obj.strftime("%d/%m/%Y")
+
+
+def _abs_media_url(request: Request, filefield) -> str | None:
+    if not filefield:
+        return None
+    try:
+        return request.build_absolute_uri(filefield.url)
+    except Exception:
+        return filefield.url
+
+
+def _compliance_submitted_payload(
+    request: Request, user: User, profile: MemberComplianceProfile | None
+) -> dict | None:
+    """Compliance snapshot grouped for KYC status: personal, KYC, bank, nominee."""
+    if not profile:
+        return None
+    return {
+        "personal_details": {
+            "full_name": user.full_name or None,
+            "email": user.email or None,
+            "phone": user.phone or None,
+            "date_of_birth": profile.date_of_birth.isoformat()
+            if profile.date_of_birth
+            else None,
+            "gender": profile.gender,
+            "full_address": profile.full_address,
+            "city": profile.city,
+            "pin_code": profile.pin_code,
+            "state": profile.state,
+            "country": profile.country,
+        },
+        "kyc_details": {
+            "pan_number": profile.pan_number,
+            "name_on_pan": profile.name_on_pan,
+            "aadhar_number": profile.aadhar_number,
+            "name_on_aadhar": profile.name_on_aadhar,
+            "verification_documents": {
+                "pan_document_url": _abs_media_url(request, profile.pan_document),
+                "aadhar_front_url": _abs_media_url(request, profile.aadhar_front),
+                "aadhar_back_url": _abs_media_url(request, profile.aadhar_back),
+                "aadhar_document_url": _abs_media_url(request, profile.aadhar_document),
+            },
+        },
+        "bank_details": {
+            "account_holder_name": profile.account_holder_name,
+            "account_number": profile.account_number,
+            "bank_name": profile.bank_name,
+            "ifsc": profile.ifsc,
+            "branch": profile.branch,
+            "account_type": profile.account_type,
+            "payout_preference": profile.payout_preference,
+        },
+        "nominee_details": {
+            "nominee_name": profile.nominee_name,
+            "nominee_relationship": profile.nominee_relationship,
+            "nominee_phone": profile.nominee_phone,
+            "nominee_date_of_birth": profile.nominee_date_of_birth.isoformat()
+            if profile.nominee_date_of_birth
+            else None,
+        },
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+    }
 
 
 def _me_payload(user: User):
@@ -333,7 +429,7 @@ def kyc_submit(request: Request):
 def kyc_status(request: Request):
     u = request.user
     missed = user_missing_acceptances(u)
-    has_profile = MemberComplianceProfile.objects.filter(user=u).exists()
+    profile = MemberComplianceProfile.objects.filter(user=u).first()
     return envelope_response(
         {
             "kyc_status": u.kyc_status,
@@ -346,8 +442,9 @@ def kyc_status(request: Request):
             "kyc_rejection_reason": u.kyc_rejection_reason or None,
             "pan_last4": (u.pan_number or "")[-4:],
             "missing_acceptances": missed,
-            "has_compliance_profile": bool(has_profile),
+            "has_compliance_profile": bool(profile),
             "compliance_submission_version": u.compliance_submission_version,
+            "compliance_submission": _compliance_submitted_payload(request, u, profile),
         },
     )
 
@@ -403,10 +500,15 @@ def admin_send_otp(request: Request):
         return envelope_response(
             None, message="Provide phone or email", success=False, status=400
         )
+    u = _user_by_phone_or_email(phone, email)
+    if not u or not u.is_staff:
+        return envelope_response(
+            None, message="Forbidden", success=False, status=status.HTTP_403_FORBIDDEN
+        )
     if not can_send_otp(ident):
         return envelope_response(
             None,
-            message="OTP rate limit: max 3 per 10 minutes",
+            message=otp_send_rate_limit_message(),
             success=False,
             errors={"detail": "rate_limited"},
             status=status.HTTP_429_TOO_MANY_REQUESTS,

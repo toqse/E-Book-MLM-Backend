@@ -27,6 +27,11 @@ class CommissionEngine:
     def process_order(order: Order) -> None:
         if order.status != Order.Status.PAID:
             return
+        active = CommissionLedger.objects.filter(order=order).exclude(
+            status=CommissionLedger.Status.REVERSED
+        )
+        if active.exists():
+            return
         buyer = order.user
         cfg = get_system_config()
         direct_amt = cfg.direct_commission
@@ -42,6 +47,22 @@ class CommissionEngine:
                 payload={"order_number": order.order_number},
             )
             return
+
+        if not cfg.is_repurchase_commission_allowed:
+            prior = Order.objects.filter(
+                user_id=buyer.id,
+                status=Order.Status.PAID,
+                is_retail_purchase=False,
+            ).exclude(pk=order.pk)
+            if prior.exists():
+                write_audit(
+                    "order.commission_skipped_repurchase",
+                    actor=None,
+                    target_type="Order",
+                    target_id=order.id,
+                    payload={"order_number": order.order_number, "buyer_id": buyer.id},
+                )
+                return
 
         sponsor = buyer.sponsor
         if not sponsor:

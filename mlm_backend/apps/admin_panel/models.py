@@ -3,6 +3,12 @@ from django.db import models
 
 
 class SystemConfig(models.Model):
+    class AutoPlacementStrategy(models.TextChoices):
+        LEFT_FIRST = "LEFT_FIRST", "Left first (default spillover)"
+        RIGHT_FIRST = "RIGHT_FIRST", "Right first"
+        LONG_LEG = "LONG_LEG", "Long leg (larger subtree first)"
+        WEAK_LEG = "WEAK_LEG", "Weak leg (smaller subtree first)"
+
     product_base_price = models.DecimalField(max_digits=10, decimal_places=2, default=200)
     gst_rate = models.DecimalField(max_digits=6, decimal_places=4, default=0.1800)
     direct_commission = models.DecimalField(max_digits=10, decimal_places=2, default=30)
@@ -13,6 +19,16 @@ class SystemConfig(models.Model):
     tds_194r_rate = models.DecimalField(max_digits=6, decimal_places=4, default=0.1000)
     tds_cash_trigger = models.DecimalField(max_digits=12, decimal_places=2, default=20000)
     refund_window_days = models.PositiveIntegerField(default=7)
+    placement_manual_window_hours = models.PositiveIntegerField(default=24)
+    auto_placement_strategy = models.CharField(
+        max_length=20,
+        choices=AutoPlacementStrategy.choices,
+        default=AutoPlacementStrategy.LEFT_FIRST,
+    )
+    is_repurchase_commission_allowed = models.BooleanField(
+        default=False,
+        help_text="If false, no MLM commissions on a buyer's 2nd+ paid non-retail orders.",
+    )
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,

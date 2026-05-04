@@ -1,17 +1,52 @@
-from django.db.models import Sum
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.request import Request
 
+from apps.admin_panel.utils import get_system_config
 from apps.common.permissions import IsFinanceAdmin, IsSuperAdmin
 from apps.common.responses import envelope_response
+from apps.wallet.services.member_money import (
+    build_commissions_summary,
+    build_earnings_response,
+    get_wallet_row,
+)
 
 from .models import CommissionLedger, MilestoneRecord
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+def user_earnings_bundle(request: Request):
+    """Consolidated earnings: overview and/or paginated ledger (see GET /api/v1/user/earnings/)."""
+    include = request.query_params.get("include")
+    period = request.query_params.get("period", "all") or "all"
+    typ = request.query_params.get("type", "all") or "all"
+    try:
+        page = max(1, int(request.query_params.get("page", "1") or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(request.query_params.get("page_size", "20") or 20)
+    except (TypeError, ValueError):
+        page_size = 20
+    data = build_earnings_response(
+        request.user,
+        include_raw=include,
+        period=period,
+        ledger_type=typ,
+        page=page,
+        page_size=page_size,
+    )
+    return envelope_response(data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def user_commissions(request):
-    qs = request.user.commissions_received.all().order_by("-id")[:100]
+    qs = (
+        request.user.commissions_received.select_related("source_user", "order")
+        .order_by("-id")[:100]
+    )
     data = [
         {
             "id": x.id,
@@ -28,23 +63,11 @@ def user_commissions(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
-def user_commissions_summary(request):
+def user_commissions_summary(request: Request):
     u = request.user
-    direct = u.commissions_received.filter(
-        commission_type=CommissionLedger.CommissionType.DIRECT
-    ).aggregate(s=Sum("net_amount"))["s"]
-    up = u.commissions_received.filter(
-        commission_type__startswith="UPLINE"
-    ).aggregate(s=Sum("net_amount"))["s"]
-    ms = u.milestone_records.aggregate(s=Sum("net_bonus"))["s"]
-    return envelope_response(
-        {
-            "direct": str(direct or 0),
-            "upline": str(up or 0),
-            "milestone": str(ms or 0),
-            "tree_passive": "0.00",
-        }
-    )
+    cfg = get_system_config()
+    wallet = get_wallet_row(u)
+    return envelope_response(build_commissions_summary(u, cfg, wallet))
 
 
 @api_view(["GET"])

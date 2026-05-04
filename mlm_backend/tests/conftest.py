@@ -18,6 +18,8 @@ def system_config(db):
             "direct_commission": 30,
             "upline_commission": 10,
             "earning_cap": 22200,
+            "placement_manual_window_hours": 24,
+            "auto_placement_strategy": SystemConfig.AutoPlacementStrategy.LEFT_FIRST,
         },
     )
 
