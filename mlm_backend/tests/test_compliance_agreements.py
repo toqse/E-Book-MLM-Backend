@@ -177,3 +177,42 @@ def test_admin_agreement_crud_superadmin():
     d = client.delete(f"/api/v1/admin/agreements/{pid}/")
     assert d.status_code == 200
     assert not LegalDocument.objects.get(pk=pid).is_active
+
+
+@pytest.mark.django_db
+def test_agreements_list_supports_category_filter():
+    u = _member_user("+919887766500")
+    client = APIClient()
+    client.force_authenticate(user=u)
+    LegalDocument.objects.create(
+        name="Terms",
+        category="Legal",
+        document_type="terms",
+        year=2026,
+        description="d",
+        content_html="<p>x</p>",
+        version="1.0",
+        requires_acceptance_for_compliance=True,
+        is_active=True,
+    )
+    LegalDocument.objects.create(
+        name="Refund",
+        category="Payments",
+        document_type="policy",
+        year=2026,
+        description="d",
+        content_html="<p>y</p>",
+        version="1.0",
+        requires_acceptance_for_compliance=False,
+        is_active=True,
+    )
+
+    all_resp = client.get("/api/v1/agreements/")
+    assert all_resp.status_code == 200
+    assert len(all_resp.json()["data"]["results"]) == 2
+
+    filtered = client.get("/api/v1/agreements/", {"category": "legal"})
+    assert filtered.status_code == 200
+    rows = filtered.json()["data"]["results"]
+    assert len(rows) == 1
+    assert rows[0]["category"] == "Legal"

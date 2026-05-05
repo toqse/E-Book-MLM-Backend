@@ -1,4 +1,5 @@
 import json
+import logging
 import secrets
 
 from django.conf import settings
@@ -12,13 +13,69 @@ from apps.common.permissions import IsFinanceAdmin, IsSuperAdmin
 from apps.common.responses import envelope_response
 from apps.courses.models import EBook, Enrollment
 
-from .models import Order
+from .models import GSTInvoice, Order
 from .services import (
     create_checkout_order,
+    ensure_gst_invoice_pdf,
     finalize_order_as_paid,
+    normalize_billing_from_payload,
     verify_payment,
     verify_webhook_signature,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _invoice_pdf_url(request, inv: GSTInvoice):
+    """Return an absolute URL when possible; never raises (storage / Host header issues)."""
+    legacy = (inv.pdf_url or "").strip() or None
+
+    names = getattr(inv.pdf_file, "name", "") or ""
+    if not names.strip():
+        return legacy
+
+    try:
+        rel_url = inv.pdf_file.url
+    except Exception:
+        logger.exception("invoice_pdf_file_url_failed invoice_id=%s", inv.pk)
+        return legacy
+
+    if rel_url.startswith(("http://", "https://")):
+        return rel_url
+
+    try:
+        return request.build_absolute_uri(rel_url)
+    except Exception:
+        logger.exception(
+            "invoice_build_absolute_uri_failed invoice_id=%s rel=%s",
+            inv.pk,
+            rel_url,
+        )
+        return rel_url if rel_url else legacy
+
+
+def _ebook_thumbnail_url(request, ebook: EBook | None):
+    if not ebook:
+        return None
+    names = getattr(ebook.thumbnail, "name", "") or ""
+    if not names.strip():
+        return None
+    try:
+        rel_url = ebook.thumbnail.url
+    except Exception:
+        logger.exception("ebook_thumbnail_url_failed ebook_id=%s", ebook.pk)
+        return None
+    if rel_url.startswith(("http://", "https://")):
+        return rel_url
+    try:
+        return request.build_absolute_uri(rel_url)
+    except Exception:
+        logger.exception(
+            "ebook_thumbnail_build_absolute_uri_failed ebook_id=%s rel=%s",
+            ebook.pk,
+            rel_url,
+        )
+        return rel_url or None
 
 
 @api_view(["POST"])
@@ -42,13 +99,17 @@ def create_order(request):
             success=False,
             status=404,
         )
+    billing = normalize_billing_from_payload(request.data)
     try:
         order, rz = create_checkout_order(
             request.user,
             ebook=ebook,
             sponsor_code=sponsor_code,
             is_retail=is_retail,
+            billing=billing,
         )
+    except ValueError as e:
+        return envelope_response(None, message=str(e), success=False, status=400)
     except RuntimeError as e:
         return envelope_response(None, message=str(e), success=False, status=500)
     except Exception as e:
@@ -107,16 +168,30 @@ def webhook(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_orders(request):
-    qs = Order.objects.filter(user=request.user).order_by("-id")[:50]
-    data = [
-        {
+    qs = Order.objects.filter(user=request.user).select_related("ebook").order_by("-id")[:50]
+    data = []
+    for o in qs:
+        purchased_at = o.paid_at or o.created_at
+        row = {
             "id": o.id,
             "order_number": o.order_number,
             "status": o.status,
+            "purchased_at": purchased_at.isoformat() if purchased_at else None,
+            "ebook_title": o.ebook.title if o.ebook else None,
+            "thumbnail_url": _ebook_thumbnail_url(request, o.ebook),
             "amount_paid": str(o.amount_paid),
+            "pdf_url": None,
         }
-        for o in qs
-    ]
+        if o.status == Order.Status.PAID:
+            try:
+                inv = GSTInvoice.objects.filter(order_id=o.id).first()
+                if inv:
+                    ensure_gst_invoice_pdf(o)
+                    inv.refresh_from_db()
+                    row["pdf_url"] = _invoice_pdf_url(request, inv)
+            except Exception:
+                logger.exception("my_orders_paid_invoice_failed order_id=%s", o.pk)
+        data.append(row)
     return envelope_response({"results": data})
 
 
@@ -124,10 +199,17 @@ def my_orders(request):
 @permission_classes([IsAuthenticated])
 def order_invoice(request, pk: int):
     o = Order.objects.filter(pk=pk, user=request.user).first()
-    if not o or not hasattr(o, "gst_invoice"):
+    inv = GSTInvoice.objects.filter(order_id=o.pk).first() if o else None
+    if not o or not inv:
         return envelope_response(None, message="No invoice", success=False, status=404)
-    inv = o.gst_invoice
-    return envelope_response({"invoice_number": inv.invoice_number, "pdf_url": inv.pdf_url})
+    try:
+        ensure_gst_invoice_pdf(o)
+        inv.refresh_from_db()
+    except Exception:
+        logger.exception("order_invoice_pdf_prepare_failed order_id=%s", o.pk)
+    return envelope_response(
+        {"invoice_number": inv.invoice_number, "pdf_url": _invoice_pdf_url(request, inv)}
+    )
 
 
 @api_view(["POST"])

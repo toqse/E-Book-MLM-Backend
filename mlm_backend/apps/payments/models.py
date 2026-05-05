@@ -63,8 +63,41 @@ class Order(models.Model):
     placement_resolved_at = models.DateTimeField(null=True, blank=True)
     placement_failure_reason = models.TextField(null=True, blank=True)
 
+    billing_line1 = models.CharField(max_length=255, blank=True, default="")
+    billing_line2 = models.CharField(max_length=255, blank=True, default="")
+    billing_city = models.CharField(max_length=128, blank=True, default="")
+    billing_state = models.CharField(max_length=128, blank=True, default="")
+    billing_postal_code = models.CharField(max_length=20, blank=True, default="")
+    billing_country = models.CharField(max_length=128, blank=True, default="")
+
     class Meta:
         db_table = "payments_order"
+
+
+class OrderLine(models.Model):
+    """One row per ebook on a multi-item order (cart checkout). Legacy orders have zero lines."""
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name="lines",
+    )
+    ebook = models.ForeignKey(
+        "courses.EBook",
+        on_delete=models.PROTECT,
+        related_name="order_lines",
+    )
+    unit_base_price = models.DecimalField(max_digits=10, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "payments_orderline"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["order", "ebook"],
+                name="uniq_orderline_order_ebook",
+            ),
+        ]
 
 
 class GSTInvoice(models.Model):
@@ -81,6 +114,12 @@ class GSTInvoice(models.Model):
     total_gst = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     grand_total = models.DecimalField(max_digits=10, decimal_places=2)
+    pdf_file = models.FileField(
+        upload_to="gst_invoices/%Y/%m/",
+        max_length=500,
+        null=True,
+        blank=True,
+    )
     pdf_url = models.URLField(max_length=500, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

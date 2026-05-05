@@ -5,6 +5,7 @@ from django.views.static import serve
 from apps.admin_panel import views as adminv
 from apps.agreements import views as agreement_views
 from apps.authentication import views as auth_views
+from apps.cart import views as cart_views
 from apps.commissions import user_views as comm_views
 from apps.courses import views as course_views
 from apps.payments import views as pay_views
@@ -94,11 +95,17 @@ urlpatterns = [
     path("api/v1/courses/<int:pk>/", course_views.ebook_detail_by_id),
     path("api/v1/courses/<slug:slug>/", course_views.ebook_detail),
     path("api/v1/user/courses/enrolled/", course_views.my_enrollments),
+    path("api/v1/user/courses/enrolled/<int:pk>/", course_views.my_enrolled_ebook_detail_by_id),
+    path("api/v1/user/courses/enrolled/<slug:slug>/", course_views.my_enrolled_ebook_detail),
     path("api/v1/user/courses/<slug:slug>/download/", course_views.download_signed),
     path("api/v1/admin/courses/", course_views.admin_course_list),
     path("api/v1/admin/courses/<int:pk>/", course_views.admin_course_detail),
     path("api/v1/admin/courses/enrollments/", course_views.admin_enrollments),
     # Payments
+    path("api/v1/user/cart/", cart_views.cart_root),
+    path("api/v1/user/cart/items/", cart_views.cart_add_item),
+    path("api/v1/user/cart/items/<int:item_id>/", cart_views.cart_remove_item),
+    path("api/v1/user/cart/checkout/", cart_views.cart_checkout),
     path("api/v1/payments/create-order/", pay_views.create_order),
     path("api/v1/payments/verify/", pay_views.verify),
     path("api/v1/payments/webhook/", pay_views.webhook),

@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -39,20 +40,18 @@ def _book_payload(request, b: EBook):
     }
 
 
-def _resolve_detail_pdf_url(request, b: EBook):
+def _preview_full_urls(request, b: EBook) -> tuple:
     preview_url = _media_url(request, b.preview_pdf) or b.file_url
     full_url = _media_url(request, b.full_pdf) or b.file_url
-    u = getattr(request, "user", None)
-    if not u or not getattr(u, "is_authenticated", False):
-        return preview_url
-    enrolled = Enrollment.objects.filter(user=u, ebook=b).exists()
-    if enrolled:
-        return full_url
-    return preview_url
+    return preview_url, full_url
 
 
-def _book_detail_payload(request, b: EBook):
-    return {
+def _public_catalog_book_payload(
+    request,
+    b: EBook,
+    enrolled_book_ids: set[int] | None = None,
+) -> dict:
+    payload = {
         "id": b.id,
         "slug": b.slug,
         "title": b.title,
@@ -65,8 +64,35 @@ def _book_detail_payload(request, b: EBook):
         "status": b.status,
         "is_primary": b.is_primary,
         "is_active": b.is_active,
-        "pdf_url": _resolve_detail_pdf_url(request, b),
     }
+    if enrolled_book_ids is not None:
+        payload["is_already_purchased"] = b.pk in enrolled_book_ids
+    return payload
+
+
+def _book_detail_payload(request, b: EBook):
+    preview_url, full_url = _preview_full_urls(request, b)
+    u = getattr(request, "user", None)
+    auth = bool(u and getattr(u, "is_authenticated", False))
+    enrolled = Enrollment.objects.filter(user=u, ebook=b).exists() if auth else False
+    payload = {
+        "id": b.id,
+        "slug": b.slug,
+        "title": b.title,
+        "category": b.category,
+        "description": b.description,
+        "thumbnail_url": _media_url(request, b.thumbnail),
+        "pages_count": b.pages_count,
+        "language": b.language,
+        "price": str(b.price),
+        "status": b.status,
+        "is_primary": b.is_primary,
+        "is_active": b.is_active,
+        "pdf_url": full_url if enrolled else preview_url,
+    }
+    if auth:
+        payload["is_already_purchased"] = enrolled
+    return payload
 
 
 def _is_uploaded_file(value):
@@ -91,6 +117,87 @@ def _coerce_bool(value) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+def _parse_positive_int(raw: str | None, default: int, *, min_v: int = 1, max_v: int | None = None) -> int:
+    try:
+        v = int(raw.strip() if isinstance(raw, str) else (raw if raw is not None else default))
+    except (TypeError, ValueError, AttributeError):
+        v = default
+    v = max(min_v, v)
+    if max_v is not None:
+        v = min(v, max_v)
+    return v
+
+
+def _list_search_term(request) -> str:
+    raw = request.query_params.get("search") or request.query_params.get("q") or ""
+    return raw.strip()
+
+
+def _apply_course_list_filters(qs, request):
+    category = (request.query_params.get("category") or "").strip()
+    if category:
+        qs = qs.filter(category__iexact=category)
+
+    language = (request.query_params.get("language") or "").strip()
+    if language:
+        qs = qs.filter(language__iexact=language)
+
+    term = _list_search_term(request)
+    if term:
+        qs = qs.filter(
+            Q(title__icontains=term) | Q(category__icontains=term) | Q(language__icontains=term),
+        )
+
+    return qs
+
+
+def _group_books_slice_by_category(
+    books: list[EBook],
+    request,
+    enrolled_book_ids: set[int] | None = None,
+) -> list[dict]:
+    """Preserve order within `books`; merge consecutive rows with the same category string."""
+    out: list[dict] = []
+    for b in books:
+        payload = _public_catalog_book_payload(request, b, enrolled_book_ids)
+        if out and out[-1]["category"] == b.category:
+            out[-1]["books"].append(payload)
+        else:
+            out.append({"category": b.category, "books": [payload]})
+    return out
+
+
+def _paginated_grouped_course_catalog(qs, request) -> dict:
+    qs = qs.order_by("category", "-id")
+    page = _parse_positive_int(request.query_params.get("page"), 1, min_v=1, max_v=10_000)
+    page_size = _parse_positive_int(request.query_params.get("page_size"), 20, min_v=1, max_v=100)
+    total_count = qs.count()
+    start = (page - 1) * page_size
+    page_objs = list(qs[start : start + page_size])
+    total_pages = (total_count + page_size - 1) // page_size if total_count else 0
+    enrolled_for_page: set[int] | None = None
+    if getattr(request.user, "is_authenticated", False):
+        page_ids = [b.pk for b in page_objs]
+        enrolled_for_page = (
+            set(
+                Enrollment.objects.filter(user=request.user, ebook_id__in=page_ids).values_list(
+                    "ebook_id",
+                    flat=True,
+                )
+            )
+            if page_ids
+            else set()
+        )
+    data = _group_books_slice_by_category(page_objs, request, enrolled_for_page)
+    return {
+        "results": data,
+        "count": total_count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
 
 
 def _apply_status_bridge(b: EBook):
@@ -219,9 +326,9 @@ def _validate_and_apply_book_input(request, b: EBook, *, partial: bool):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def list_ebooks(request):
-    qs = EBook.objects.filter(status=EBook.Status.PUBLISHED).order_by("-id")
-    data = [_book_payload(request, b) for b in qs]
-    return envelope_response({"results": data})
+    qs = EBook.objects.filter(status=EBook.Status.PUBLISHED)
+    qs = _apply_course_list_filters(qs, request)
+    return envelope_response(_paginated_grouped_course_catalog(qs, request))
 
 
 @api_view(["GET"])
@@ -245,18 +352,32 @@ def ebook_detail_by_id(request, pk: int):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_enrollments(request):
-    qs = Enrollment.objects.filter(user=request.user).select_related("ebook").order_by("-id")
-    data = [
-        {
-            "slug": e.ebook.slug,
-            "title": e.ebook.title,
-            "category": e.ebook.category,
-            "price": str(e.ebook.price),
-            "thumbnail_url": _media_url(request, e.ebook.thumbnail),
-        }
-        for e in qs
-    ]
-    return envelope_response({"results": data})
+    ebook_ids = Enrollment.objects.filter(user=request.user).values_list("ebook_id", flat=True)
+    qs = EBook.objects.filter(pk__in=ebook_ids, status=EBook.Status.PUBLISHED)
+    qs = _apply_course_list_filters(qs, request)
+    return envelope_response(_paginated_grouped_course_catalog(qs, request))
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def my_enrolled_ebook_detail(request, slug: str):
+    b = EBook.objects.filter(slug=slug, status=EBook.Status.PUBLISHED).first()
+    if not b:
+        return envelope_response(None, message="Not found", success=False, status=404)
+    if not Enrollment.objects.filter(user=request.user, ebook=b).exists():
+        return envelope_response(None, message="Not enrolled", success=False, status=403)
+    return envelope_response(_book_detail_payload(request, b))
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def my_enrolled_ebook_detail_by_id(request, pk: int):
+    b = EBook.objects.filter(pk=pk, status=EBook.Status.PUBLISHED).first()
+    if not b:
+        return envelope_response(None, message="Not found", success=False, status=404)
+    if not Enrollment.objects.filter(user=request.user, ebook=b).exists():
+        return envelope_response(None, message="Not enrolled", success=False, status=403)
+    return envelope_response(_book_detail_payload(request, b))
 
 
 @api_view(["GET"])

@@ -58,7 +58,7 @@ FLOWS (high level)
    - POST /api/v1/auth/logout/ — Bearer optional; discard access token client-side after call.
 
 4) Compliance (agreements OTP + extended KYC/bank/nominee)
-   - GET /api/v1/agreements/ (Bearer) — active legal documents (content_html + PDF URL when present).
+   - GET /api/v1/agreements/ (Bearer) — active legal documents (content_html + PDF URL when present); optional category filter.
    - POST /api/v1/agreements/send-otp/ — JSON { "document_ids": [int, ...] }; OTP tied to JWT user identity only.
    - POST /api/v1/agreements/verify/ — JSON { "document_ids", "otp_code" }; records UserAgreementAcceptance + client IP.
   - POST /api/v1/auth/compliance/submit/ — multipart form: identity, address, nominee, bank, payout; files pan_document,
@@ -68,12 +68,16 @@ FLOWS (high level)
    - Deprecated (410 Gone): POST /api/v1/auth/kyc/submit/, POST /api/v1/auth/bank/ — use compliance/submit/.
 
 5) Course catalog and enrollment
-   - GET /api/v1/courses/ (public) — active e-books
+   - GET /api/v1/courses/ (public) — grouped catalog without pdf_url; with Bearer, each book includes is_already_purchased; filters and pagination unchanged
    - GET /api/v1/courses/<slug>/ (public)
-   - Purchase: POST /api/v1/payments/create-order/ (ebook_id or ebook_slug, sponsor_code, is_retail)
-   - Zero-amount path when valid sponsor slot; else Razorpay order (amount_paise, ids).
-   - POST /api/v1/payments/verify/  razorpay fields + order_id
-   - GET /api/v1/user/courses/enrolled/
+   - Cart (Bearer): GET /api/v1/user/cart/ — items + totals preview; POST /api/v1/user/cart/items/ — body ebook_id or ebook_slug; DELETE /api/v1/user/cart/items/<id>/; DELETE /api/v1/user/cart/ — clear; POST /api/v1/user/cart/checkout/ — same billing/sponsor/is_retail as create-order, response shape matches create-order (then POST /api/v1/payments/verify/ with order_id)
+   - Purchase (direct buy): POST /api/v1/payments/create-order/ (Bearer) — ebook_id or ebook_slug (optional; both → id wins), sponsor_code / sponsor_slot_code, is_retail, optional billing_* snapshot fields for the GST invoice
+   - Zero-amount path when valid sponsor slot; else Razorpay order (amount_paise, razorpay_order_id, key_id).
+   - POST /api/v1/payments/verify/ (Bearer) — order_id + Razorpay payment id/signature; on success order is PAID, enrollment + GST invoice PDF generated when applicable
+   - GET /api/v1/user/orders/ (Bearer) — recent orders with amount_paid; PAID rows may include pdf_url (absolute URL to invoice PDF when available)
+   - GET /api/v1/user/orders/<id>/invoice/ (Bearer) — invoice_number + pdf_url for that order
+   - GET /api/v1/user/courses/enrolled/ — same grouped shape as GET /courses/ for published books you are enrolled in; optional category/language/search and pagination
+   - GET /api/v1/user/courses/enrolled/<slug>/ | /enrolled/<id>/ — same body as GET /courses/<slug>|<id>/ (pdf_url + is_already_purchased); 403 if not enrolled
    - GET /api/v1/user/courses/<slug>/download/ — URL + expires_at (SAS in production)
 
 6) Binary tree (after qualifying MLM purchase)
@@ -203,6 +207,7 @@ MODULE: Agreements (/api/v1/agreements/, member)
 --------------------------------------------------------------------------------
 GET /api/v1/agreements/
   Auth: Bearer.
+  Query (optional): category (case-insensitive exact match on document category).
   Success: {
     "results": [
       { "id", "name", "category", "document_type", "year", "description",
@@ -592,15 +597,29 @@ MODULE: Courses & e-books
 --------------------------------------------------------------------------------
 GET /api/v1/courses/
   Auth: None.
+  Query (all optional): category, language (each matches with case-insensitive equality),
+    search or q (substring match across title, category, and language; ANDed with category/language when present),
+    page (default 1, min 1, max 10000), page_size (default 20, min 1, max 100).
   Success data: {
-    "results": [ { "id", "slug", "title", "category", "description",
-      "thumbnail_url", "pages_count", "language", "price", "status", "is_primary" }, ... ]
-  } for published books only.
+    "results": [
+      { "category": "<label string, not an id>",
+        "books": [ { "id", "slug", "title", "category", "description",
+          "thumbnail_url", "pages_count", "language", "price", "status", "is_primary",
+          "is_active" [ + "is_already_purchased": true|false when Bearer present ] }, ... ] }, ...
+    ],
+    "count": <matching published books (pagination is over this flattened set)>,
+    "page", "page_size", "total_pages"
+  }
+  Rows are ordered by category (ascending), then by book id descending within each category. Pagination slices that
+    flat ordering, then merges consecutive rows of the same category in the page slice.
+  pdf_url is not included on list items; use GET /courses/<slug>/ or /courses/<id>/ for pdf_url.
+    When authenticated, enrollment for each book on the current page is batched — is_already_purchased matches course detail semantics.
 
 GET /api/v1/courses/<slug>/
 GET /api/v1/courses/<id>/
   Success data: { "id", "slug", "title", "category", "description",
-    "thumbnail_url", "pages_count", "language", "price", "status", "pdf_url" }
+    "thumbnail_url", "pages_count", "language", "price", "status", "is_primary", "is_active", "pdf_url"
+    + when Bearer present: "is_already_purchased" (true|false, enrollment for this book) }
   pdf_url selection:
     - anonymous (no token): preview pdf URL
     - authenticated + purchased/enrolled for this book: full pdf URL
@@ -609,7 +628,16 @@ GET /api/v1/courses/<id>/
 
 GET /api/v1/user/courses/enrolled/
   Auth: Bearer.
-  Success data: { "results": [ { "slug", "title", "category", "price", "thumbnail_url" }, ... ] }
+  Query (same as GET /api/v1/courses/): category, language, search | q, page, page_size.
+  Success data: same shape as GET /api/v1/courses/ — grouped catalog without pdf_url; each book includes is_already_purchased (always true here),
+    count / page / page_size / total_pages for your enrolled published books only (one row per ebook even if multiple orders).
+
+GET /api/v1/user/courses/enrolled/<slug>/
+GET /api/v1/user/courses/enrolled/<id>/
+  Auth: Bearer.
+  Success data: same fields as GET /api/v1/courses/<slug>/ or /courses/<id>/ including pdf_url and is_already_purchased.
+    For this route you must be enrolled on the book; when allowed, pdf_url is the full PDF (same as purchased on public detail).
+  Errors: 404 unknown or unpublished book; 403 not enrolled for this book.
 
 GET /api/v1/user/courses/<slug>/download/
   Auth: Bearer.
@@ -640,31 +668,90 @@ GET /api/v1/admin/courses/enrollments/
   Success: { "count": <up to 200 enrollments> }
 
 
+MODULE: Shopping cart (/api/v1/user/cart/)
+--------------------------------------------------------------------------------
+GET /api/v1/user/cart/
+  Auth: Bearer.
+  Success data: {
+    "items": [ { "id", "ebook_id", "slug", "title", "price" }, ... ],
+    "totals": { "taxable_base", "gst_amount", "gateway_charge", "total" } — decimal strings; excludes sponsor discount (preview only).
+  }
+
+POST /api/v1/user/cart/items/
+  Auth: Bearer.
+  Body (JSON): { "ebook_id": <int> } and/or { "ebook_slug": "<string>" } — same resolution as create-order (id wins).
+  Success: same shape as GET /api/v1/user/cart/.
+  Errors: 404 — book not found / not published; 400 — already enrolled in that book; 400 — duplicate book already in cart.
+
+DELETE /api/v1/user/cart/items/<item_id>/
+  Auth: Bearer; <item_id> is the cart line id from GET cart.
+  Success: { "removed": true }; 404 — item not in your cart.
+
+DELETE /api/v1/user/cart/
+  Auth: Bearer — clears all items.
+  Success: { "cleared": true }.
+
+POST /api/v1/user/cart/checkout/
+  Auth: Bearer.
+  Body: same optional fields as POST /api/v1/payments/create-order/ (sponsor_code / sponsor_slot_code, is_retail, billing_*).
+  Success data: identical to create-order (Razorpay or zero-amount PAID path). Cart is emptied after a successful checkout.
+  Errors: 400 — empty cart, unpublished book in cart, already enrolled for a cart line, etc.; 401; 500 — Razorpay not configured / gateway errors.
+  After success, client completes payment with POST /api/v1/payments/verify/ using returned order_id (unchanged).
+
+
 MODULE: Payments & orders
 --------------------------------------------------------------------------------
 POST /api/v1/payments/create-order/
-  Auth: Bearer.
+  Auth: Bearer (member JWT).
+  Content-Type: application/json.
   Body: {
-    "ebook_id": "<optional; preferred when both ebook_id and ebook_slug are sent>",
-    "ebook_slug": "<optional; must be published>",
-    "sponsor_code" | "sponsor_slot_code": "<optional>",
-    "is_retail": <optional bool, default false>
+    "ebook_id": "<optional integer; if both ebook_id and ebook_slug are sent, ebook_id wins>",
+    "ebook_slug": "<optional string; must reference a published book>",
+    "sponsor_code": "<optional; alias for redeeming sponsor slot>",
+    "sponsor_slot_code": "<optional; same semantics as sponsor_code if sponsor_code omitted>",
+    "is_retail": <optional boolean, default false — retail purchase vs MLM path>,
+    "billing_line1": "<optional string; max 255; stored on order for the invoice 'Invoice To' address block>",
+    "billing_line2": "<optional string; max 255>",
+    "billing_city": "<optional string; max 128>",
+    "billing_state": "<optional string; max 128>",
+    "billing_postal_code": "<optional string; max 20>",
+    "billing_country": "<optional string; max 128>"
   }
-  Detection rule: if both ebook_id and ebook_slug are present, ebook_id is used.
-  Pricing: uses selected ebook.price (fallback to primary published book price if ebook_id/ebook_slug omitted).
-  If Razorpay order not created (₹0 path): data includes order_id, order_number,
-    amount_paise: 0, razorpay_order_id: null, key_id, status.
-  Else: order_id, order_number, amount_paise, razorpay_order_id, key_id.
-  Errors: 500 RuntimeError message from service layer.
+  Rules:
+    • Omitting both ebook_id and ebook_slug selects the configured primary published e-book (if any).
+    • Billing fields are optional for API compatibility; when sent, values are trimmed and length-capped
+      server-side and snapshotted on the Order (they appear on the generated GST invoice PDF).
+  Success data:
+    • Paid checkout (Razorpay): {
+        "order_id", "order_number", "amount_paise" <int>,
+        "razorpay_order_id", "key_id" (publisher key for client SDK)
+      }
+    • Zero-amount (valid sponsor slot): {
+        "order_id", "order_number", "amount_paise": 0,
+        "razorpay_order_id": null, "key_id", "status" (typically PAID; enrollment finalized server-side)
+      }
+  Errors:
+    • 401 — missing/invalid Bearer token.
+    • 404 — book not found / not published when ebook_id or ebook_slug was explicitly provided.
+    • 400 — when ebook_id or ebook_slug was provided: user already has an enrollment for that book.
+    • 500 — Razorpay not configured, selected book unpublished, gateway errors, etc. (message in envelope).
 
 POST /api/v1/payments/verify/
+  Auth: Bearer (member JWT; order must belong to the authenticated user).
+  Content-Type: application/json.
   Body: {
     "order_id": <int>,
-    "razorpay_payment_id": "...",
-    "razorpay_signature": "..."
+    "razorpay_payment_id": "<string>",
+    "razorpay_signature": "<string>"
   }
-  Success: { "status": "PAID", "order_number" }
-  Errors: 404 order; 400 verification exception message.
+  Success data: { "status": "PAID", "order_number" }
+  Side effects when transitioning to PAID (same pattern as manual admin verify):
+    enrollment for the purchased e-book, MLM placement queue when applicable,
+    GST invoice row + invoice PDF attachment (generated server-side; see pdf_url below).
+  Errors:
+    • 401 — not authenticated.
+    • 404 — order_id not found for this user.
+    • 400 — Razorpay signature mismatch / invalid payload / gateway error (message in envelope).
   MLM (non-retail): first PAID order for a member not yet in the binary tree
     sets placement_status=PENDING and placement_deadline_at (hours from
     placement_manual_window_hours). Sponsor places via POST .../tree/place-direct/;
@@ -673,24 +760,52 @@ POST /api/v1/payments/verify/
 
 POST /api/v1/payments/webhook/
   Auth: None.
-  Header: X-Razorpay-Signature — HMAC verified against raw body.
-  Body: Razorpay JSON payload.
-  Success: { "received": true, "event": "<from payload>" }
-  Errors: 400 bad signature.
+  Header: X-Razorpay-Signature — HMAC verified against raw body (see settings.RAZORPAY_KEY_SECRET).
+  Body: Razorpay JSON payload (raw bytes used for signature).
+  Success data: { "received": true, "event": "<from payload>" }
+  Errors: 400 — bad signature.
+  Note: handler currently acknowledges receipt; client flow still relies on POST .../payments/verify/ after pay.
 
 GET /api/v1/user/orders/
+  Auth: Bearer.
   Success data: {
-    "results": [ { "id", "order_number", "status", "amount_paid" }, ... max 50 ]
+    "results": [
+      {
+        "id": <int>,
+        "order_number": "<string>",
+        "status": "CREATED" | "PAID" | "FAILED" | "REFUNDED",
+        "purchased_at": "<ISO datetime string|null>",
+        "ebook_title": "<string|null>",
+        "thumbnail_url": "<absolute HTTPS/HTTP URL string|null>",
+        "amount_paid": "<decimal string>",
+        "pdf_url": "<absolute HTTPS/HTTP URL string|null>"
+      },
+      ... newest first, max 50
+    ]
   }
+  pdf_url:
+    • null for non-PAID orders, or when no GST invoice exists yet.
+    • For PAID orders: absolute URL to the invoice PDF file when generation succeeded (server may generate
+      on demand if missing). null if PDF file is still unavailable (e.g. generation error).
+    • Clients must serve/open media URLs per deployment (e.g. SERVE_MEDIA=1 locally, CDN/nginx in prod).
 
 GET /api/v1/user/orders/<id>/invoice/
-  Success: { "invoice_number", "pdf_url" }
-  Errors: 404 no invoice.
+  Auth: Bearer; <id> is the order primary key for the authenticated user’s order.
+  Success data: {
+    "invoice_number": "<string>",
+    "pdf_url": "<absolute URL|null — prefers FileField-backed invoice PDF; legacy DB pdf_url column if no file>"
+  }
+  Errors: 404 — order not found, not yours, or no GST invoice yet.
+
+Invoice PDF branding (operators): optional environment variables COMPANY_NAME, GST_NUMBER,
+  COMPANY_ADDRESS, COMPANY_PHONE, COMPANY_EMAIL, COMPANY_WEBSITE,
+  INVOICE_PAYMENT_DETAILS, INVOICE_TERMS_AND_CONDITIONS (see mlm_backend/.env.example).
 
 POST /api/v1/user/orders/<id>/refund/
-  Allowed only PAID within refund_eligible_until.
-  Success: { "status": "REFUNDED" } — reverses commissions, deletes enrollment.
-  Errors: 400 not refundable / window closed.
+  Auth: Bearer; <id> must be your order.
+  Allowed only when status is PAID and now <= refund_eligible_until (from SystemConfig.refund_window_days).
+  Success data: { "status": "REFUNDED" } — reverses commissions (when applicable), removes enrollment tied to this order.
+  Errors: 401; 400 — not PAID / refund window expired; 404 — order not found or not yours.
 
 GET /api/v1/admin/orders/
   Auth: IsFinanceAdmin.

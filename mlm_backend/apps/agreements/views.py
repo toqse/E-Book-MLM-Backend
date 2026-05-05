@@ -55,7 +55,11 @@ def _agreement_otp_payload(rec: OTPRecord) -> dict:
 @api_view(["GET"])
 @permission_classes([permissions.IsAuthenticated])
 def legal_documents_public_list(request: Request):
-    qs = LegalDocument.objects.filter(is_active=True).order_by("category", "name")
+    qs = LegalDocument.objects.filter(is_active=True)
+    category = (request.query_params.get("category") or "").strip()
+    if category:
+        qs = qs.filter(category__iexact=category)
+    qs = qs.order_by("category", "name")
     ser = LegalDocumentPublicSerializer(
         qs, many=True, context={"request": request}
     )

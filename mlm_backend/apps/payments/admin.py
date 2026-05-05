@@ -86,6 +86,19 @@ class OrderAdmin(admin.ModelAdmin):
             "Invoicing & timeline",
             {"fields": ("gst_invoice_number", "paid_at", "refund_eligible_until", "created_at")},
         ),
+        (
+            "Billing snapshot",
+            {
+                "fields": (
+                    "billing_line1",
+                    "billing_line2",
+                    "billing_city",
+                    "billing_state",
+                    "billing_postal_code",
+                    "billing_country",
+                ),
+            },
+        ),
     )
 
 
@@ -98,6 +111,7 @@ class GSTInvoiceAdmin(admin.ModelAdmin):
         "base_amount",
         "total_gst",
         "grand_total",
+        "pdf_file",
         "created_at",
     )
     list_filter = ("created_at",)

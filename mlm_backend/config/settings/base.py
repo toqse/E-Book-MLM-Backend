@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     "apps.wallet",
     "apps.sponsor_slots",
     "apps.courses",
+    "apps.cart",
     "apps.payments",
     "apps.admin_panel",
     "apps.notifications",
@@ -188,7 +189,14 @@ DEFAULT_COMPANY_REFERRAL_CODE = (
 COMPANY_SUPERUSER_MEMBER_ID = os.environ.get("COMPANY_SUPERUSER_MEMBER_ID", "SYS000001")
 GST_NUMBER = os.environ.get("GST_NUMBER", "")
 COMPANY_PAN = os.environ.get("PAN_NUMBER", "")
-COMPANY_NAME = os.environ.get("COMPANY_NAME", "MLM Platform")
+COMPANY_NAME = os.environ.get("COMPANY_NAME", "Just 200")
+COMPANY_ADDRESS = os.environ.get("COMPANY_ADDRESS", "")
+COMPANY_PHONE = os.environ.get("COMPANY_PHONE", "")
+COMPANY_EMAIL = os.environ.get("COMPANY_EMAIL", "")
+COMPANY_WEBSITE = os.environ.get("COMPANY_WEBSITE", "")
+# Multiline OK in .env when quoted — used on GST invoice PDF (payment / footer text).
+INVOICE_PAYMENT_DETAILS = os.environ.get("INVOICE_PAYMENT_DETAILS", "").strip()
+INVOICE_TERMS_AND_CONDITIONS = os.environ.get("INVOICE_TERMS_AND_CONDITIONS", "").strip()
 
 # OTP send endpoints log to stderr when EXPOSE_OTP_IN_RESPONSE is true.
 LOGGING = {
