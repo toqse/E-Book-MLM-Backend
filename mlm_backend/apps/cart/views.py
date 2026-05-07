@@ -15,6 +15,15 @@ from .services import preview_checkout_totals
 logger = logging.getLogger(__name__)
 
 
+def _media_url(request: Request, file_field) -> str | None:
+    if not file_field:
+        return None
+    try:
+        return request.build_absolute_uri(file_field.url)
+    except Exception:
+        return file_field.url
+
+
 def _get_or_create_cart(user) -> Cart:
     cart, _ = Cart.objects.get_or_create(user=user)
     return cart
@@ -45,6 +54,7 @@ def _cart_payload(request: Request) -> dict:
             "slug": it.ebook.slug,
             "title": it.ebook.title,
             "price": str(it.ebook.price),
+            "thumbnail_url": _media_url(request, it.ebook.thumbnail),
         }
         for it in items
     ]

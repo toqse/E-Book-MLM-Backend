@@ -24,6 +24,19 @@ def _member_user(phone: str = "+919887766554") -> User:
     return u
 
 
+def _attach_min_kyc_docs(profile: MemberComplianceProfile):
+    profile.pan_number = "ABCDE1234F"
+    profile.aadhar_number = "123412341234"
+    profile.pan_document = SimpleUploadedFile("pan.pdf", b"fake", content_type="application/pdf")
+    profile.aadhar_front = SimpleUploadedFile(
+        "aad_front.pdf", b"fake", content_type="application/pdf"
+    )
+    profile.aadhar_back = SimpleUploadedFile(
+        "aad_back.pdf", b"fake", content_type="application/pdf"
+    )
+    profile.save()
+
+
 @pytest.mark.django_db
 def test_kyc_submit_and_bank_deprecated_410():
     u = _member_user()
@@ -145,6 +158,108 @@ def test_compliance_flow_with_agreement_otp_and_admin_approve():
 
 
 @pytest.mark.django_db
+def test_admin_bulk_compliance_approve_accepts_body_ids():
+    u1 = _member_user("+919887766560")
+    u2 = _member_user("+919887766561")
+    staff = User.objects.create_user(
+        login_identifier="support2@test.dev",
+        password="pw",
+        email="support2@test.dev",
+        full_name="Support 2",
+        member_id="SUP000002",
+        referral_code="SUP002",
+        referral_link="http://localhost/join?ref=SUP002",
+        role=User.Role.SUPPORT,
+        is_staff=True,
+    )
+    p1 = MemberComplianceProfile.objects.create(user=u1)
+    p2 = MemberComplianceProfile.objects.create(user=u2)
+    _attach_min_kyc_docs(p1)
+    _attach_min_kyc_docs(p2)
+
+    staff_client = APIClient()
+    staff_client.force_authenticate(user=staff)
+
+    r = staff_client.post(
+        "/api/v1/admin/users/compliance/approve/",
+        {"user_ids": [u1.id, u2.id]},
+        format="json",
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()["data"]
+    assert set(body["approved_ids"]) == {u1.id, u2.id}
+
+    u1.refresh_from_db()
+    u2.refresh_from_db()
+    assert u1.kyc_status == User.KYCStatus.VERIFIED
+    assert u2.kyc_status == User.KYCStatus.VERIFIED
+
+
+@pytest.mark.django_db
+def test_admin_bulk_compliance_approve_partial_failures_sets_message_and_errors():
+    u1 = _member_user("+919887766570")
+    u2 = _member_user("+919887766571")
+    staff = User.objects.create_user(
+        login_identifier="support3@test.dev",
+        password="pw",
+        email="support3@test.dev",
+        full_name="Support 3",
+        member_id="SUP000003",
+        referral_code="SUP003",
+        referral_link="http://localhost/join?ref=SUP003",
+        role=User.Role.SUPPORT,
+        is_staff=True,
+    )
+    p1 = MemberComplianceProfile.objects.create(user=u1)
+    _attach_min_kyc_docs(p1)
+    # u2 intentionally has no compliance profile -> should fail
+
+    staff_client = APIClient()
+    staff_client.force_authenticate(user=staff)
+    r = staff_client.post(
+        "/api/v1/admin/users/compliance/approve/",
+        {"user_ids": [u1.id, u2.id]},
+        format="json",
+    )
+    assert r.status_code == 200, r.content
+    j = r.json()
+    assert j["success"] is False
+    assert j["message"] == "Approved with some failures"
+    assert j["errors"]["detail"] == "Approved with some failures"
+    assert set(j["data"]["approved_ids"]) == {u1.id}
+    assert any(x["id"] == u2.id for x in j["data"]["failed"])
+
+
+@pytest.mark.django_db
+def test_admin_bulk_compliance_approve_all_failures_returns_400():
+    u1 = _member_user("+919887766580")
+    staff = User.objects.create_user(
+        login_identifier="support4@test.dev",
+        password="pw",
+        email="support4@test.dev",
+        full_name="Support 4",
+        member_id="SUP000004",
+        referral_code="SUP004",
+        referral_link="http://localhost/join?ref=SUP004",
+        role=User.Role.SUPPORT,
+        is_staff=True,
+    )
+    # u1 has no compliance profile -> should fail
+    staff_client = APIClient()
+    staff_client.force_authenticate(user=staff)
+    r = staff_client.post(
+        "/api/v1/admin/users/compliance/approve/",
+        {"user_ids": [u1.id]},
+        format="json",
+    )
+    assert r.status_code == 400, r.content
+    j = r.json()
+    assert j["success"] is False
+    assert j["message"] == "Member has no compliance profile to approve."
+    assert j["errors"]["detail"] == "Member has no compliance profile to approve."
+
+
+@pytest.mark.django_db
 def test_admin_agreement_crud_superadmin():
     su = User.objects.create_superuser(
         "admin@test.dev",
@@ -158,7 +273,7 @@ def test_admin_agreement_crud_superadmin():
         "/api/v1/admin/agreements/",
         {
             "name": "Policy",
-            "category": "c",
+            "category": "LEGAL DOCUMENT",
             "document_type": "t",
             "year": 2026,
             "description": "d",
@@ -216,3 +331,78 @@ def test_agreements_list_supports_category_filter():
     rows = filtered.json()["data"]["results"]
     assert len(rows) == 1
     assert rows[0]["category"] == "Legal"
+
+
+@pytest.mark.django_db
+def test_agreements_compliance_legal_list_filters():
+    u = _member_user("+919887766501")
+    client = APIClient()
+    client.force_authenticate(user=u)
+    LegalDocument.objects.create(
+        name="Legal Req",
+        category="LEGAL DOCUMENT",
+        document_type="terms",
+        year=2026,
+        description="d",
+        content_html="<p>a</p>",
+        version="1.0",
+        requires_acceptance_for_compliance=True,
+        is_active=True,
+    )
+    LegalDocument.objects.create(
+        name="Legal Optional",
+        category="legal document",
+        document_type="terms",
+        year=2026,
+        description="d",
+        content_html="<p>b</p>",
+        version="1.0",
+        requires_acceptance_for_compliance=False,
+        is_active=True,
+    )
+    LegalDocument.objects.create(
+        name="KYC Req",
+        category="KYC & IDENTITY",
+        document_type="id",
+        year=2026,
+        description="d",
+        content_html="<p>c</p>",
+        version="1.0",
+        requires_acceptance_for_compliance=True,
+        is_active=True,
+    )
+    r = client.get("/api/v1/agreements/compliance-legal/")
+    assert r.status_code == 200
+    rows = r.json()["data"]["results"]
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Legal Req"
+    assert rows[0]["requires_acceptance_for_compliance"] is True
+    assert rows[0]["is_agreement_accepted"] is False
+
+
+@pytest.mark.django_db
+def test_admin_agreement_rejects_invalid_category():
+    su = User.objects.create_superuser(
+        "admin2@test.dev",
+        "pw",
+        full_name="Admin",
+        email="admin2@test.dev",
+    )
+    client = APIClient()
+    client.force_authenticate(user=su)
+    r = client.post(
+        "/api/v1/admin/agreements/",
+        {
+            "name": "Bad",
+            "category": "Other",
+            "document_type": "t",
+            "year": 2026,
+            "description": "d",
+            "content_html": "<p>a</p>",
+            "version": "1.0",
+            "is_active": True,
+            "requires_acceptance_for_compliance": False,
+        },
+        format="json",
+    )
+    assert r.status_code == 400

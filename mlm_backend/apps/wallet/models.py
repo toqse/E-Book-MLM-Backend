@@ -53,6 +53,10 @@ class WithdrawalRequest(models.Model):
         REJECTED = "REJECTED", "Rejected"
         FAILED = "FAILED", "Failed"
 
+    class PayoutMethod(models.TextChoices):
+        BANK = "BANK", "Bank"
+        UPI = "UPI", "UPI"
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -63,10 +67,32 @@ class WithdrawalRequest(models.Model):
     tds_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     net_payable = models.DecimalField(max_digits=12, decimal_places=2)
     tds_section = models.CharField(max_length=10, null=True, blank=True)
+    payout_method = models.CharField(
+        max_length=10,
+        choices=PayoutMethod.choices,
+        default=PayoutMethod.UPI,
+    )
+    payout_destination_hint = models.CharField(max_length=120, blank=True, default="")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     razorpay_payout_id = models.CharField(max_length=64, null=True, blank=True)
     utr_number = models.CharField(max_length=64, null=True, blank=True)
     reject_reason = models.TextField(blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="approved_withdrawals",
+    )
+    paid_at = models.DateTimeField(null=True, blank=True)
+    paid_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="paid_withdrawals",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

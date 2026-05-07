@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from apps.agreements.models import MemberComplianceProfile
 from apps.mlm_tree.services import BinaryTreeService
 from apps.payments.models import Order
 from apps.users.models import User
@@ -55,6 +56,9 @@ def test_referral_list_pending_placement_filter(system_config):
     sponsor.save()
     sponsor.is_member = True
     sponsor.save(update_fields=["is_member"])
+    sponsor.kyc_status = User.KYCStatus.VERIFIED
+    sponsor.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=sponsor)
     BinaryTreeService.place_member(sponsor, None)
 
     pending_user = _user("+919000000011", sponsor=sponsor)

@@ -9,16 +9,10 @@ from apps.payments.models import Order
 from apps.users.models import User
 from apps.wallet.bands import on_total_earned_updated
 from apps.wallet.models import Wallet, WalletTransaction
+from apps.tds.services import calculate_and_apply_194h_tds
 
+from .milestone_tiers import MILESTONES
 from .models import CommissionLedger, MilestoneRecord
-
-MILESTONES = [
-    (10, Decimal("0.15"), Decimal("300")),
-    (25, Decimal("0.12"), Decimal("600")),
-    (50, Decimal("0.10"), Decimal("1000")),
-    (75, Decimal("0.09"), Decimal("1350")),
-    (100, Decimal("0.08"), Decimal("1600")),
-]
 
 
 class CommissionEngine:
@@ -129,7 +123,38 @@ class CommissionEngine:
         gross: Decimal,
         cap: Decimal,
     ):
+        if recipient.kyc_status != User.KYCStatus.VERIFIED:
+            CommissionLedger.objects.create(
+                recipient=recipient,
+                source_user=source,
+                order=order,
+                commission_type=ctype,
+                amount=gross,
+                tds_deducted=Decimal("0"),
+                net_amount=Decimal("0"),
+                status=CommissionLedger.Status.HELD,
+            )
+            return
         wallet, _ = Wallet.objects.select_for_update().get_or_create(user=recipient)
+        # Business rule: during Band 2 (slot band), do not credit direct/tree commissions.
+        # We record a HELD ledger row for audit, but no wallet balances are updated.
+        if wallet.current_band == 2 and ctype in (
+            CommissionLedger.CommissionType.DIRECT,
+            CommissionLedger.CommissionType.UPLINE_L2,
+            CommissionLedger.CommissionType.UPLINE_L3,
+            CommissionLedger.CommissionType.UPLINE_L4,
+        ):
+            CommissionLedger.objects.create(
+                recipient=recipient,
+                source_user=source,
+                order=order,
+                commission_type=ctype,
+                amount=gross,
+                tds_deducted=Decimal("0"),
+                net_amount=Decimal("0"),
+                status=CommissionLedger.Status.HELD,
+            )
+            return
         remaining = cap - wallet.total_earned
         if remaining <= 0:
             recipient.account_status = User.AccountStatus.CAPPED
@@ -145,26 +170,34 @@ class CommissionEngine:
                 status=CommissionLedger.Status.HELD,
             )
             return
-        credit = min(gross, remaining)
-        wallet.cash_balance += credit
-        wallet.total_earned += credit
+        gross_credit = min(gross, remaining)
+        tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
+        wallet.cash_balance += tds.net_amount
+        wallet.total_earned += tds.net_amount
+        wallet.total_tds_deducted += tds.tds_amount
         wallet.save()
         WalletTransaction.objects.create(
             user=recipient,
             tx_type=WalletTransaction.TxType.CREDIT,
-            amount=credit,
+            amount=tds.net_amount,
             balance_after=wallet.cash_balance,
             reference=f"COMM-{order.order_number}",
-            meta={"type": ctype},
+            meta={
+                "type": ctype,
+                "gross": str(tds.gross_amount),
+                "tds": str(tds.tds_amount),
+                "tds_rate_percent": str(tds.tds_rate_percent),
+                "financial_year": tds.financial_year,
+            },
         )
         CommissionLedger.objects.create(
             recipient=recipient,
             source_user=source,
             order=order,
             commission_type=ctype,
-            amount=gross,
-            tds_deducted=Decimal("0"),
-            net_amount=credit,
+            amount=tds.gross_amount,
+            tds_deducted=tds.tds_amount,
+            net_amount=tds.net_amount,
             status=CommissionLedger.Status.CREDITED,
         )
         if wallet.total_earned >= cap:
@@ -182,28 +215,47 @@ class CommissionEngine:
                 user=sponsor, milestone_referrals=threshold
             ).exists():
                 continue
+            if sponsor.kyc_status != User.KYCStatus.VERIFIED:
+                MilestoneRecord.objects.create(
+                    user=sponsor,
+                    milestone_referrals=threshold,
+                    bonus_amount=bonus,
+                    tds_deducted=Decimal("0"),
+                    net_bonus=Decimal("0"),
+                    status="HELD",
+                )
+                return
             wallet, _ = Wallet.objects.select_for_update().get_or_create(user=sponsor)
             remaining = cfg.earning_cap - wallet.total_earned
             if remaining <= 0:
                 return
-            pay = min(bonus, remaining)
-            wallet.cash_balance += pay
-            wallet.total_earned += pay
+            gross_pay = min(bonus, remaining)
+            tds = calculate_and_apply_194h_tds(user=sponsor, gross_amount=gross_pay)
+            wallet.cash_balance += tds.net_amount
+            wallet.total_earned += tds.net_amount
+            wallet.total_tds_deducted += tds.tds_amount
             wallet.save()
             MilestoneRecord.objects.create(
                 user=sponsor,
                 milestone_referrals=threshold,
-                bonus_amount=bonus,
-                tds_deducted=Decimal("0"),
-                net_bonus=pay,
+                bonus_amount=tds.gross_amount,
+                tds_deducted=tds.tds_amount,
+                net_bonus=tds.net_amount,
                 status="CREDITED",
             )
             WalletTransaction.objects.create(
                 user=sponsor,
                 tx_type=WalletTransaction.TxType.CREDIT,
-                amount=pay,
+                amount=tds.net_amount,
                 balance_after=wallet.cash_balance,
                 reference=f"MILESTONE-{threshold}",
+                meta={
+                    "type": "MILESTONE",
+                    "gross": str(tds.gross_amount),
+                    "tds": str(tds.tds_amount),
+                    "tds_rate_percent": str(tds.tds_rate_percent),
+                    "financial_year": tds.financial_year,
+                },
             )
             on_total_earned_updated(wallet)
 

@@ -12,10 +12,14 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.audit.services import write_audit
 from apps.common.responses import envelope_response
-from apps.agreements.models import MemberComplianceProfile
-from apps.agreements.services import user_missing_acceptances
+from apps.agreements.models import AgreementCategory, LegalDocument, MemberComplianceProfile
+from apps.agreements.services import accepted_version_for_document, user_missing_acceptances
+from apps.admin_panel.utils import get_system_config
+from apps.mlm_tree.models import BinaryNode
 from apps.users.models import User
+from apps.users import team_services
 from apps.users.services import allocate_member_identity, resolve_sponsor_by_code
+from apps.wallet.services.member_money import build_band_ladder, get_wallet_row
 
 from .models import OTPRecord
 from .otp import (
@@ -27,6 +31,7 @@ from .otp import (
 )
 from .serializers import (
     AdminLoginSerializer,
+    ProfileUpdateSerializer,
     SendOTPSerializer,
     SendRegisterOTPSerializer,
     VerifyLoginSerializer,
@@ -282,6 +287,15 @@ def verify_otp_login(request: Request):
     if not user:
         return envelope_response(None, message="User not found", success=False, status=404)
 
+    if user.account_status in (User.AccountStatus.SUSPENDED, User.AccountStatus.DEACTIVATED) or not user.is_active:
+        return envelope_response(
+            None,
+            message="Account suspended",
+            success=False,
+            errors={"detail": "account_suspended"},
+            status=403,
+        )
+
     return envelope_response(
         {
             "user": _user_payload(user),
@@ -331,9 +345,7 @@ def _compliance_submitted_payload(
             "full_name": user.full_name or None,
             "email": user.email or None,
             "phone": user.phone or None,
-            "date_of_birth": profile.date_of_birth.isoformat()
-            if profile.date_of_birth
-            else None,
+            "date_of_birth": _fmt_ddmmyyyy(profile.date_of_birth),
             "gender": profile.gender,
             "full_address": profile.full_address,
             "city": profile.city,
@@ -361,21 +373,42 @@ def _compliance_submitted_payload(
             "branch": profile.branch,
             "account_type": profile.account_type,
             "payout_preference": profile.payout_preference,
+            "upi_id": user.upi_id or None,
         },
         "nominee_details": {
             "nominee_name": profile.nominee_name,
             "nominee_relationship": profile.nominee_relationship,
             "nominee_phone": profile.nominee_phone,
-            "nominee_date_of_birth": profile.nominee_date_of_birth.isoformat()
-            if profile.nominee_date_of_birth
-            else None,
+            "nominee_date_of_birth": _fmt_ddmmyyyy(profile.nominee_date_of_birth),
         },
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
     }
 
 
 def _me_payload(user: User):
+    user = User.objects.select_related("sponsor").filter(pk=user.pk).first() or user
     profile = MemberComplianceProfile.objects.filter(user=user).first()
+    wallet = get_wallet_row(user)
+    cfg = get_system_config()
+    band_ladder = build_band_ladder(wallet, cfg)
+    current_band = next((b for b in band_ladder if b.get("is_current")), None)
+    ctx = team_services.build_subtree_context(user)
+    bn = BinaryNode.objects.filter(user_id=user.pk).only("position", "level").first()
+
+    used = wallet.total_earned
+    cap = cfg.earning_cap
+    used_percent = float((used / cap) * 100) if cap and cap > 0 else 0.0
+    remaining = cap - used if cap and cap > 0 else 0
+
+    pan_present = bool((user.pan_number or "").strip())
+    kyc_verified = user.kyc_status == User.KYCStatus.VERIFIED
+    if pan_present and kyc_verified:
+        tds_rate_percent = float(cfg.tds_194h_rate) * 100
+        tds_rate_reason = "PAN on file"
+    else:
+        tds_rate_percent = 20.0
+        tds_rate_reason = "PAN not available"
+
     personal_information = {
         "full_name": user.full_name or None,
         "email_address": user.email or None,
@@ -385,8 +418,9 @@ def _me_payload(user: User):
     }
     member_information = {
         "member_id": user.member_id or None,
-        "joined_date": user.created_at.date().isoformat() if user.created_at else None,
+        "joined_date": _fmt_ddmmyyyy(user.created_at.date()) if user.created_at else None,
         "address": profile.full_address if profile and profile.full_address else None,
+        "city": profile.city if profile and profile.city else None,
         "state": profile.state if profile and profile.state else None,
         "pin_code": profile.pin_code if profile and profile.pin_code else None,
         "country": profile.country if profile and profile.country else None,
@@ -394,6 +428,74 @@ def _me_payload(user: User):
     data = _user_payload(user)
     data["personal_information"] = personal_information
     data["member_information"] = member_information
+    data["display"] = {
+        "profile_initial": (user.full_name or "").strip()[:1].upper() or None,
+        "avatar_url": None,
+    }
+    data["account_status"] = {
+        "account_status": user.account_status,
+        "account_status_label": user.get_account_status_display() if user.account_status else None,
+        "kyc_status": user.kyc_status,
+        "kyc_status_label": user.get_kyc_status_display() if user.kyc_status else None,
+        "pan_submitted": pan_present,
+        "tds_rate_percent": tds_rate_percent,
+        "withdrawals_blocked": not kyc_verified,
+        "referral_link": user.referral_link or None,
+        "referral_link_active": bool(user.is_active and user.account_status == User.AccountStatus.ACTIVE),
+    }
+    data["tax_withholding"] = {
+        "tds_rate_percent": tds_rate_percent,
+        "reason": tds_rate_reason,
+    }
+    data["withdrawal_band"] = {
+        "current_band": current_band,
+        "bands": band_ladder,
+    }
+    data["earning_cap"] = {
+        "limit": str(cap),
+        "used": str(used),
+        "used_percent": round(used_percent, 2),
+        "remaining": str(max(0, remaining)),
+    }
+    data["kyc_notice"] = {
+        "message": (
+            "Complete KYC to unlock cash withdrawals."
+            if not kyc_verified
+            else None
+        ),
+    }
+    data["sponsor"] = (
+        {
+            "member_id": user.sponsor.member_id,
+            "full_name": user.sponsor.full_name,
+        }
+        if user.sponsor_id and user.sponsor
+        else None
+    )
+    data["binary_placement"] = {
+        "position": bn.position if bn else None,
+        "level": bn.level if bn else None,
+        "position_label": (
+            f"{bn.get_position_display()} (L{bn.level})" if bn and bn.position and bn.level else None
+        ),
+    }
+    weaker = team_services.suggested_leg(ctx.left_leg_count, ctx.right_leg_count)
+    data["team_legs"] = {
+        "left_leg_count": ctx.left_leg_count,
+        "right_leg_count": ctx.right_leg_count,
+        "weaker_leg": weaker,
+        "left_leg_label": "strong"
+        if ctx.left_leg_count > ctx.right_leg_count
+        else "weak"
+        if ctx.left_leg_count < ctx.right_leg_count
+        else "neutral",
+        "right_leg_label": "strong"
+        if ctx.right_leg_count > ctx.left_leg_count
+        else "weak"
+        if ctx.right_leg_count < ctx.left_leg_count
+        else "neutral",
+        "subtree_member_count": max(0, len(ctx.subtree_user_ids) - 1) if ctx.subtree_user_ids else 0,
+    }
     return data
 
 
@@ -403,11 +505,34 @@ def me(request: Request):
     user = request.user
     if request.method == "GET":
         return envelope_response(_me_payload(user))
-    for field in ["full_name", "payout_preference"]:
-        if field in request.data:
-            setattr(user, field, request.data[field])
+    ser = ProfileUpdateSerializer(data=request.data, partial=True, context={"user": user})
+    ser.is_valid(raise_exception=True)
+    data = ser.validated_data
+
+    for field in ["full_name", "email", "payout_preference"]:
+        if field in data:
+            setattr(user, field, data[field])
+
+    profile_map = {
+        "date_of_birth": "date_of_birth",
+        "gender": "gender",
+        "address": "full_address",
+        "city": "city",
+        "pin_code": "pin_code",
+        "state": "state",
+        "country": "country",
+    }
+    profile_fields = [k for k in profile_map if k in data]
+    profile = None
+    if profile_fields:
+        profile, _ = MemberComplianceProfile.objects.get_or_create(user=user)
+        for input_field in profile_fields:
+            setattr(profile, profile_map[input_field], data[input_field])
+
     user.save()
-    return envelope_response(_user_payload(user), message="Updated")
+    if profile:
+        profile.save()
+    return envelope_response(_me_payload(user), message="Updated")
 
 
 @api_view(["POST"])
@@ -430,6 +555,17 @@ def kyc_status(request: Request):
     u = request.user
     missed = user_missing_acceptances(u)
     profile = MemberComplianceProfile.objects.filter(user=u).first()
+    compliance_legal_required = LegalDocument.objects.filter(
+        is_active=True,
+        requires_acceptance_for_compliance=True,
+        category__iexact=AgreementCategory.LEGAL_DOCUMENT,
+    )
+    compliance_legal_missing = [
+        doc.id
+        for doc in compliance_legal_required
+        if accepted_version_for_document(u.id, doc.id) != doc.version
+    ]
+    is_agreement_accepted = len(compliance_legal_missing) == 0
     return envelope_response(
         {
             "kyc_status": u.kyc_status,
@@ -442,6 +578,7 @@ def kyc_status(request: Request):
             "kyc_rejection_reason": u.kyc_rejection_reason or None,
             "pan_last4": (u.pan_number or "")[-4:],
             "missing_acceptances": missed,
+            "is_agreement_accepted": is_agreement_accepted,
             "has_compliance_profile": bool(profile),
             "compliance_submission_version": u.compliance_submission_version,
             "compliance_submission": _compliance_submitted_payload(request, u, profile),
@@ -485,6 +622,14 @@ def admin_password_login(request: Request):
     )
     if not user or not user.is_staff:
         return envelope_response(None, message="Invalid credentials", success=False, status=401)
+    if user.account_status in (User.AccountStatus.SUSPENDED, User.AccountStatus.DEACTIVATED) or not user.is_active:
+        return envelope_response(
+            None,
+            message="Account suspended",
+            success=False,
+            errors={"detail": "account_suspended"},
+            status=403,
+        )
     return envelope_response({"tokens": _tokens_for(user)}, message="Admin step 1 OK")
 
 
@@ -556,6 +701,14 @@ def admin_verify_otp(request: Request):
     )
     if not user:
         return envelope_response(None, message="Forbidden", success=False, status=403)
+    if user.account_status in (User.AccountStatus.SUSPENDED, User.AccountStatus.DEACTIVATED) or not user.is_active:
+        return envelope_response(
+            None,
+            message="Account suspended",
+            success=False,
+            errors={"detail": "account_suspended"},
+            status=403,
+        )
     return envelope_response(
         {
             "tokens": _tokens_for(user),

@@ -3,6 +3,7 @@ from django.test.utils import CaptureQueriesContext
 from django.db import connection
 from rest_framework.test import APIClient
 
+from apps.agreements.models import MemberComplianceProfile
 from apps.mlm_tree.services import BinaryTreeService
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
@@ -22,6 +23,9 @@ def test_team_network_default_include(system_config):
     sponsor.save()
     sponsor.is_member = True
     sponsor.save()
+    sponsor.kyc_status = User.KYCStatus.VERIFIED
+    sponsor.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=sponsor)
     BinaryTreeService.place_member(sponsor, None)
 
     client = APIClient()
@@ -54,6 +58,9 @@ def test_team_network_include_roster_and_leg_counts(system_config):
     sponsor.save()
     sponsor.is_member = True
     sponsor.save()
+    sponsor.kyc_status = User.KYCStatus.VERIFIED
+    sponsor.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=sponsor)
     BinaryTreeService.place_member(sponsor, None)
 
     mid2, r2, l2 = allocate_member_identity()
@@ -114,6 +121,9 @@ def test_team_network_roster_pagination(system_config):
     sponsor.save()
     sponsor.is_member = True
     sponsor.save()
+    sponsor.kyc_status = User.KYCStatus.VERIFIED
+    sponsor.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=sponsor)
     BinaryTreeService.place_member(sponsor, None)
 
     mid2, r2, l2 = allocate_member_identity()
@@ -154,6 +164,9 @@ def test_referral_list_pending_has_leg_meta(system_config):
     sponsor.save()
     sponsor.is_member = True
     sponsor.save()
+    sponsor.kyc_status = User.KYCStatus.VERIFIED
+    sponsor.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=sponsor)
     BinaryTreeService.place_member(sponsor, None)
 
     client = APIClient()
@@ -179,6 +192,9 @@ def test_team_network_query_budget(system_config):
     sponsor.save()
     sponsor.is_member = True
     sponsor.save()
+    sponsor.kyc_status = User.KYCStatus.VERIFIED
+    sponsor.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=sponsor)
     BinaryTreeService.place_member(sponsor, None)
 
     for i in range(3):

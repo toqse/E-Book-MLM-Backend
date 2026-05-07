@@ -2,6 +2,14 @@ from django.conf import settings
 from django.db import models
 
 
+class AgreementCategory(models.TextChoices):
+    """Allowed agreement categories (admin create/update)."""
+
+    LEGAL_DOCUMENT = "LEGAL DOCUMENT", "Legal document"
+    KYC_IDENTITY = "KYC & IDENTITY", "KYC & Identity"
+    PURCHASE_TAX = "PURCHASE & TAX", "Purchase & Tax"
+
+
 class LegalDocument(models.Model):
     """Superadmin-managed legal / policy documents for member acceptance."""
 

@@ -27,6 +27,8 @@ def _three_level_tree():
         member_id=mid_r,
         referral_code=r_r,
         referral_link=l_r,
+        pan_number="ABCDE1234F",
+        kyc_status=User.KYCStatus.VERIFIED,
     )
     root.set_unusable_password()
     root.save()
@@ -42,6 +44,8 @@ def _three_level_tree():
         referral_code=r_s,
         referral_link=l_s,
         sponsor=root,
+        pan_number="ABCDE1234F",
+        kyc_status=User.KYCStatus.VERIFIED,
     )
     sponsor.set_unusable_password()
     sponsor.save()
@@ -57,6 +61,8 @@ def _three_level_tree():
         referral_code=r_b,
         referral_link=l_b,
         sponsor=sponsor,
+        pan_number="ABCDE1234F",
+        kyc_status=User.KYCStatus.VERIFIED,
     )
     buyer.set_unusable_password()
     buyer.save()
@@ -125,11 +131,12 @@ def test_user_earnings_overview_and_ledger(system_config):
     r = client.get("/api/v1/user/earnings/?include=overview,ledger&page_size=5")
     assert r.status_code == 200
     data = r.json()["data"]
-    assert "overview" in data
+    assert "summary" in data
     assert "ledger" in data
-    assert data["overview"]["breakdown"]["direct"]["amount"] != "0.00"
+    assert data["summary"]["income_cards"]["direct_commission_l1"]["amount"] != "0.00"
     assert data["ledger"]["total_count"] >= 1
-    assert len(data["ledger"]["results"]) >= 1
+    assert len(data["ledger"]["rows"]) >= 1
+    assert "running_balance" in data["ledger"]["rows"][0]
 
 
 @pytest.mark.django_db

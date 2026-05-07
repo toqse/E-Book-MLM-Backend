@@ -4,6 +4,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 
+from apps.common.permissions import require_kyc_verified_and_compliant
 from apps.common.responses import envelope_response
 from apps.payments.models import Order
 from apps.users.models import User
@@ -19,6 +20,9 @@ from .placement import (
 @permission_classes([IsAuthenticated])
 def tree_place_direct(request: Request):
     """Sponsor places a paid direct referral on LEFT or RIGHT leg (within manual window)."""
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     member_id = (request.data.get("member_id") or "").strip()
     leg = (request.data.get("leg") or request.data.get("position") or "").strip().upper()
     if not member_id:

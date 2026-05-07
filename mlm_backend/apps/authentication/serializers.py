@@ -1,6 +1,9 @@
+from datetime import datetime
+
 from rest_framework import serializers
 
 from apps.common.phone_utils import normalize_phone_registration
+from apps.users.models import User
 
 
 class SendOTPSerializer(serializers.Serializer):
@@ -101,3 +104,76 @@ class VerifyLoginSerializer(serializers.Serializer):
 class AdminLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField()
+
+
+class ProfileUpdateSerializer(serializers.Serializer):
+    full_name = serializers.CharField(required=False, allow_blank=False, max_length=255)
+    email = serializers.EmailField(required=False, allow_blank=False)
+    date_of_birth = serializers.CharField(required=False, allow_blank=False)
+    gender = serializers.CharField(required=False, allow_blank=False, max_length=32)
+    address = serializers.CharField(required=False, allow_blank=False)
+    city = serializers.CharField(required=False, allow_blank=False, max_length=128)
+    pin_code = serializers.CharField(required=False, allow_blank=False, max_length=16)
+    state = serializers.CharField(required=False, allow_blank=False, max_length=128)
+    country = serializers.CharField(required=False, allow_blank=False, max_length=128)
+    payout_preference = serializers.ChoiceField(
+        required=False, choices=["BANK", "UPI"]
+    )
+
+    def validate_full_name(self, value: str) -> str:
+        return value.strip()
+
+    def validate_email(self, value: str) -> str:
+        email = value.strip().lower()
+        user = self.context.get("user")
+        qs = User.objects.filter(email=email)
+        if user:
+            qs = qs.exclude(pk=user.pk)
+        if qs.exists():
+            raise serializers.ValidationError("Email already exists.")
+        return email
+
+    def validate_date_of_birth(self, value: str):
+        raw = value.strip()
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except ValueError:
+                continue
+        raise serializers.ValidationError("Use DD/MM/YYYY or YYYY-MM-DD.")
+
+    def validate_gender(self, value: str) -> str:
+        raw = (value or "").strip().lower()
+        mapping = {
+            "m": "M",
+            "male": "M",
+            "f": "F",
+            "female": "F",
+            "o": "O",
+            "other": "O",
+            "u": "U",
+            "undisclosed": "U",
+            "prefer_not_to_say": "U",
+            "prefer not to say": "U",
+        }
+        normalized = mapping.get(raw)
+        if not normalized:
+            raise serializers.ValidationError(
+                "Gender must be one of: Male, Female, Other, Prefer not to say (or M/F/O/U)."
+            )
+        return normalized
+
+    def validate_address(self, value: str) -> str:
+        return value.strip()
+
+    def validate_city(self, value: str) -> str:
+        return value.strip()
+
+    def validate_pin_code(self, value: str) -> str:
+        return value.strip()
+
+    def validate_state(self, value: str) -> str:
+        return value.strip()
+
+    def validate_country(self, value: str) -> str:
+        return value.strip()

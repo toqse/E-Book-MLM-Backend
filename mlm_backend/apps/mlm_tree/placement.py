@@ -149,6 +149,18 @@ def try_auto_place_order(order: Order) -> bool:
 
 
 def sponsor_may_manual_place(sponsor: User, buyer: User, order: Order) -> tuple[bool, str]:
+    if sponsor.kyc_status != User.KYCStatus.VERIFIED:
+        return False, "Complete compliance verification (admin-approved) to access placements."
+    try:
+        from apps.agreements.models import MemberComplianceProfile
+
+        if not MemberComplianceProfile.objects.filter(user=sponsor).exists():
+            return (
+                False,
+                "Submit compliance details and wait for admin verification to access placements.",
+            )
+    except Exception:
+        return False, "Compliance verification status unavailable; contact support."
     if not buyer.sponsor_id:
         return False, "Member has no sponsor"
     if buyer.sponsor_id != sponsor.id:

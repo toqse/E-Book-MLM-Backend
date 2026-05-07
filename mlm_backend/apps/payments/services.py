@@ -253,7 +253,6 @@ def create_checkout_order_from_cart(
 
     if total == 0 and slot_code:
         finalize_zero_rupee_order(order, user, None, slot_code)
-        CartItem.objects.filter(cart=cart_locked).delete()
         return order, None
 
     client = _client()
@@ -274,7 +273,6 @@ def create_checkout_order_from_cart(
         raise
     order.razorpay_order_id = rz_order["id"]
     order.save(update_fields=["razorpay_order_id"])
-    CartItem.objects.filter(cart=cart_locked).delete()
     return order, rz_order
 
 
@@ -286,6 +284,7 @@ def finalize_zero_rupee_order(order: Order, user: User, ebook: EBook | None, slo
     if slot_code:
         SponsorSlotService.redeem_on_order(slot_code, order, user)
     _grant_enrollment(order, user, ebook)
+    _clear_cart_items_for_paid_order(order)
     _ensure_gst_invoice(order)
     _place_and_commission(order, user)
 
@@ -350,9 +349,27 @@ def finalize_order_as_paid(order: Order, *, payment_id: str) -> Order:
         order.refund_eligible_until = timezone.now() + timedelta(days=cfg.refund_window_days)
         order.save()
         _grant_enrollment(order, order.user, order.ebook)
+        _clear_cart_items_for_paid_order(order)
         _place_and_commission(order, order.user)
         _ensure_gst_invoice(order)
     return order
+
+
+def _clear_cart_items_for_paid_order(order: Order) -> None:
+    """
+    Empty matching cart items only after successful payment.
+
+    Cart checkout creates OrderLines; direct single-ebook orders may not.
+    This is safe and idempotent (retries / double-verifies won't error).
+    """
+    from apps.cart.models import CartItem
+
+    ebook_ids = list(order.lines.values_list("ebook_id", flat=True))
+    if not ebook_ids and order.ebook_id:
+        ebook_ids = [order.ebook_id]
+    if not ebook_ids:
+        return
+    CartItem.objects.filter(cart__user_id=order.user_id, ebook_id__in=ebook_ids).delete()
 
 
 def verify_payment(order: Order, payment_id: str, signature: str):

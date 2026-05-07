@@ -1,7 +1,6 @@
 from decimal import Decimal
 
 from apps.admin_panel.utils import get_system_config
-from apps.sponsor_slots.services import SponsorSlotService
 
 
 # Cumulative earnings thresholds (₹) — aligned with PDF band table
@@ -32,19 +31,35 @@ def _band_index_for_earnings(total: Decimal) -> int:
 def on_total_earned_updated(wallet):
     idx = _band_index_for_earnings(wallet.total_earned)
     prev = wallet.current_band
+    cfg = get_system_config()
+    # Always attempt progressive sponsor-slot unlocks when earnings change.
+    try:
+        from apps.sponsor_slots.services import SponsorSlotService
+
+        SponsorSlotService.unlock_due_codes(
+            user=wallet.user, total_earned=wallet.total_earned
+        )
+    except Exception:
+        # Unlock should never break commission crediting; failures are non-critical.
+        pass
     if idx <= prev:
         return
     wallet.current_band = idx
     wallet.save(update_fields=["current_band"])
-    cfg = get_system_config()
     slot_bands = {2, 4, 6, 8}
     if idx in slot_bands:
         from apps.sponsor_slots.models import SponsorSlotBatch
+        from apps.sponsor_slots.services import SponsorSlotService
 
         if not SponsorSlotBatch.objects.filter(
             issued_to=wallet.user, band_number=idx
         ).exists():
-            SponsorSlotService.issue_batch(wallet.user, band_number=idx, cfg=cfg)
+            SponsorSlotService.issue_batch(
+                wallet.user,
+                band_number=idx,
+                cfg=cfg,
+                current_total_earned=wallet.total_earned,
+            )
 
 
 def describe_bands_status(wallet) -> list[dict]:

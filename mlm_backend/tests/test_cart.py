@@ -57,6 +57,8 @@ def test_cart_add_duplicate_returns_400(system_config):
     c.force_authenticate(user=u)
     r1 = c.post("/api/v1/user/cart/items/", {"ebook_slug": "cart-dup"}, format="json")
     assert r1.status_code == 200
+    item = r1.json()["data"]["items"][0]
+    assert "thumbnail_url" in item
     r2 = c.post("/api/v1/user/cart/items/", {"ebook_slug": "cart-dup"}, format="json")
     assert r2.status_code == 400
     assert "already in your cart" in (r2.json().get("message") or "").lower()
@@ -126,9 +128,10 @@ def test_cart_checkout_creates_lines_and_multi_enrollment(system_config, fake_ra
     lines = list(OrderLine.objects.filter(order=order).order_by("ebook_id"))
     assert len(lines) == 2
     assert {lines[0].ebook_id, lines[1].ebook_id} == {b1.pk, b2.pk}
-    assert CartItem.objects.filter(cart__user=u).count() == 0
+    assert CartItem.objects.filter(cart__user=u).count() == 2
 
     finalize_order_as_paid(order, payment_id="pay_cart_multi")
+    assert CartItem.objects.filter(cart__user=u).count() == 0
     assert Enrollment.objects.filter(user=u, order=order).count() == 2
 
 

@@ -6,6 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.admin_panel.models import SystemConfig
+from apps.agreements.models import MemberComplianceProfile
 from apps.commissions.engine import CommissionEngine
 from apps.commissions.models import CommissionLedger
 from apps.mlm_tree import placement as placement_mod
@@ -91,6 +92,9 @@ def test_open_placement_queue_and_manual_place_commissions(system_config):
     sponsor = _member("+918020020020")
     sponsor.is_member = True
     sponsor.save(update_fields=["is_member"])
+    sponsor.kyc_status = User.KYCStatus.VERIFIED
+    sponsor.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=sponsor)
     BinaryTreeService.place_member(sponsor, None)
     buyer = _member("+918020020021", sponsor=sponsor)
     order = _paid_order(buyer, suffix="a")

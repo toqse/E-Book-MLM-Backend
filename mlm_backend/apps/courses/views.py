@@ -1,10 +1,13 @@
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
-from django.db.models import Q
+from django.db.models import Count, Q
+from django.db.utils import IntegrityError
 from django.utils import timezone
+from django.utils.text import slugify
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
 
 from apps.common.permissions import IsAdminRole
 from apps.common.responses import envelope_response
@@ -75,6 +78,14 @@ def _book_detail_payload(request, b: EBook):
     u = getattr(request, "user", None)
     auth = bool(u and getattr(u, "is_authenticated", False))
     enrolled = Enrollment.objects.filter(user=u, ebook=b).exists() if auth else False
+    in_cart = False
+    if auth:
+        try:
+            from apps.cart.models import CartItem
+
+            in_cart = CartItem.objects.filter(cart__user=u, ebook=b).exists()
+        except Exception:
+            in_cart = False
     payload = {
         "id": b.id,
         "slug": b.slug,
@@ -89,6 +100,7 @@ def _book_detail_payload(request, b: EBook):
         "is_primary": b.is_primary,
         "is_active": b.is_active,
         "pdf_url": full_url if enrolled else preview_url,
+        "is_already_in_cart": in_cart,
     }
     if auth:
         payload["is_already_purchased"] = enrolled
@@ -204,6 +216,20 @@ def _apply_status_bridge(b: EBook):
     b.is_active = b.status == EBook.Status.PUBLISHED
 
 
+def _make_unique_slug(raw: str) -> str:
+    base = slugify(raw or "").strip("-")
+    if not base:
+        return ""
+    base = base[:60].rstrip("-")
+    slug = base
+    i = 2
+    while EBook.objects.filter(slug=slug).exists():
+        suffix = f"-{i}"
+        slug = f"{base[: (60 - len(suffix))].rstrip('-')}{suffix}"
+        i += 1
+    return slug
+
+
 def _validate_and_apply_book_input(request, b: EBook, *, partial: bool):
     data = request.data
     files = request.FILES
@@ -241,11 +267,17 @@ def _validate_and_apply_book_input(request, b: EBook, *, partial: bool):
     assign_text("language")
 
     if "slug" in data:
-        slug = (data.get("slug") or "").strip()
-        if not slug:
+        raw_slug = (data.get("slug") or "").strip()
+        if not raw_slug:
             errors["slug"] = "Slug may not be blank."
         else:
-            b.slug = slug
+            b.slug = raw_slug
+    elif not partial:
+        # Backward-compatible: allow admin client to omit slug and auto-generate it.
+        if "title" in data:
+            b.slug = _make_unique_slug(str(data.get("title") or ""))
+            if not b.slug:
+                errors["slug"] = "Unable to generate slug from title; please provide slug."
 
     if "pages_count" in data:
         try:
@@ -328,7 +360,52 @@ def _validate_and_apply_book_input(request, b: EBook, *, partial: bool):
 def list_ebooks(request):
     qs = EBook.objects.filter(status=EBook.Status.PUBLISHED)
     qs = _apply_course_list_filters(qs, request)
-    return envelope_response(_paginated_grouped_course_catalog(qs, request))
+    data = _paginated_grouped_course_catalog(qs, request)
+    if not getattr(request.user, "is_authenticated", False):
+        return envelope_response(data)
+
+    no_of_cart_items = 0
+    try:
+        from apps.cart.models import CartItem
+
+        no_of_cart_items = int(CartItem.objects.filter(cart__user=request.user).count())
+    except Exception:
+        no_of_cart_items = 0
+
+    # Keep the standard envelope, but add a common top-level field for authenticated users.
+    return Response(
+        {
+            "success": True,
+            "data": data,
+            "message": "Operation successful",
+            "errors": None,
+            "no_of_cart_items": no_of_cart_items,
+        },
+        status=200,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def bestsellers(request):
+    """
+    Public endpoint returning the top 3 best-selling published ebooks.
+    "Sold" is computed as the number of Enrollment rows per ebook (created on successful PAID orders).
+    """
+    qs = (
+        EBook.objects.filter(status=EBook.Status.PUBLISHED)
+        .annotate(sold_count=Count("enrollments"))
+        .order_by("-sold_count", "-id")
+    )
+    top = list(qs[:3])
+    data = [
+        {
+            **_public_catalog_book_payload(request, b, enrolled_book_ids=None),
+            "sold_count": int(getattr(b, "sold_count", 0) or 0),
+        }
+        for b in top
+    ]
+    return envelope_response({"results": data, "count": len(data)})
 
 
 @api_view(["GET"])
@@ -409,7 +486,17 @@ def admin_course_list(request):
     errors = _validate_and_apply_book_input(request, b, partial=False)
     if errors:
         return envelope_response(None, message="Validation failed", success=False, errors=errors, status=400)
-    b.save()
+    try:
+        b.save()
+    except IntegrityError as e:
+        # Commonly triggered by missing/duplicate slug or other DB constraints.
+        return envelope_response(
+            None,
+            message="Unable to create course",
+            success=False,
+            errors={"detail": str(e)},
+            status=400,
+        )
     return envelope_response(_book_payload(request, b), message="Created", status=201)
 
 

@@ -21,6 +21,7 @@ class SponsorSlotBatch(models.Model):
 
 class SponsorSlotCode(models.Model):
     class Status(models.TextChoices):
+        LOCKED = "LOCKED", "Locked"
         ACTIVE = "ACTIVE", "Active"
         REDEEMED = "REDEEMED", "Redeemed"
         EXPIRED = "EXPIRED", "Expired"
@@ -61,6 +62,14 @@ class SponsorSlotCode(models.Model):
         on_delete=models.SET_NULL,
         related_name="sponsor_redemptions",
     )
+    unlock_at_total_earned = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Unlock this code once issuer wallet.total_earned reaches this amount.",
+    )
+    unlocked_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField()
     unique_ips_attempted = models.JSONField(default=list, blank=True)
     is_flagged = models.BooleanField(default=False)

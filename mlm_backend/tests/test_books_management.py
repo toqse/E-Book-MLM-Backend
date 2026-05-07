@@ -2,6 +2,7 @@ import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APIClient
 
+from apps.cart.models import Cart, CartItem
 from apps.courses.models import EBook, Enrollment
 from apps.payments.models import Order
 from apps.users.models import User
@@ -233,6 +234,8 @@ def test_course_detail_pdf_url_by_access_level_slug_and_id():
     data_id_anon = resp_id_anon.json()["data"]
     assert "/ebooks/preview/" in data_slug_anon["pdf_url"]
     assert "/ebooks/preview/" in data_id_anon["pdf_url"]
+    assert data_slug_anon["is_already_in_cart"] is False
+    assert data_id_anon["is_already_in_cart"] is False
     assert "is_already_purchased" not in data_slug_anon
     assert "is_already_purchased" not in data_id_anon
 
@@ -247,6 +250,8 @@ def test_course_detail_pdf_url_by_access_level_slug_and_id():
     d_id_non = resp_id_non.json()["data"]
     assert "/ebooks/preview/" in d_slug_non["pdf_url"]
     assert "/ebooks/preview/" in d_id_non["pdf_url"]
+    assert d_slug_non["is_already_in_cart"] is False
+    assert d_id_non["is_already_in_cart"] is False
     assert d_slug_non["is_already_purchased"] is False
     assert d_id_non["is_already_purchased"] is False
 
@@ -270,6 +275,8 @@ def test_course_detail_pdf_url_by_access_level_slug_and_id():
     d_id_buy = resp_id_buy.json()["data"]
     assert "/ebooks/full/" in d_slug_buy["pdf_url"]
     assert "/ebooks/full/" in d_id_buy["pdf_url"]
+    assert d_slug_buy["is_already_in_cart"] is False
+    assert d_id_buy["is_already_in_cart"] is False
     assert d_slug_buy["is_already_purchased"] is True
     assert d_id_buy["is_already_purchased"] is True
 
@@ -325,6 +332,7 @@ def test_courses_list_grouped_by_category_full_book_payloads():
     anon = APIClient()
     anon_resp = anon.get("/api/v1/courses/")
     assert anon_resp.status_code == 200
+    assert "no_of_cart_items" not in anon_resp.json()
     groups = anon_resp.json()["data"]["results"]
     assert {g["category"] for g in groups} == {"Business", "Trading"}
     for g in groups:
@@ -345,11 +353,14 @@ def test_courses_list_grouped_by_category_full_book_payloads():
         status=Order.Status.PAID,
     )
     Enrollment.objects.create(user=buyer, ebook=owned, order=order, is_retail=False)
+    cart = Cart.objects.create(user=buyer)
+    CartItem.objects.create(cart=cart, ebook=owned)
 
     auth_client = APIClient()
     auth_client.force_authenticate(user=buyer)
     auth_resp = auth_client.get("/api/v1/courses/")
     assert auth_resp.status_code == 200
+    assert auth_resp.json()["no_of_cart_items"] == 1
     auth_by_slug = {}
     for g in auth_resp.json()["data"]["results"]:
         for b in g["books"]:

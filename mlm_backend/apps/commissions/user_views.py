@@ -11,7 +11,8 @@ from apps.wallet.services.member_money import (
     get_wallet_row,
 )
 
-from .models import CommissionLedger, MilestoneRecord
+from .models import CommissionLedger
+from .services import build_user_milestones_dashboard
 
 
 @api_view(["GET"])
@@ -73,16 +74,7 @@ def user_commissions_summary(request: Request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_milestones(request):
-    qs = MilestoneRecord.objects.filter(user=request.user)
-    data = [
-        {
-            "referrals": x.milestone_referrals,
-            "bonus": str(x.net_bonus),
-            "status": x.status,
-        }
-        for x in qs
-    ]
-    return envelope_response({"history": data})
+    return envelope_response(build_user_milestones_dashboard(request.user))
 
 
 @api_view(["GET"])

@@ -16,6 +16,10 @@ CACHES = {
     }
 }
 
+# Keep OTP limiter deterministic in tests (base loads .env).
+OTP_SEND_MAX_PER_WINDOW = 3
+OTP_SEND_WINDOW_SECONDS = 600
+
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 

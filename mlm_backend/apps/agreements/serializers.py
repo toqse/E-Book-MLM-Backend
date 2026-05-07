@@ -1,7 +1,7 @@
 import re
 from rest_framework import serializers
 
-from apps.agreements.models import LegalDocument, MemberComplianceProfile
+from apps.agreements.models import AgreementCategory, LegalDocument, MemberComplianceProfile
 from apps.common.phone_utils import normalize_phone_registration
 
 
@@ -12,6 +12,7 @@ IFSC_RE = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$")
 
 class LegalDocumentPublicSerializer(serializers.ModelSerializer):
     pdf_file_url = serializers.SerializerMethodField()
+    is_agreement_accepted = serializers.SerializerMethodField()
 
     class Meta:
         model = LegalDocument
@@ -27,6 +28,7 @@ class LegalDocumentPublicSerializer(serializers.ModelSerializer):
             "pdf_url",
             "pdf_file_url",
             "requires_acceptance_for_compliance",
+            "is_agreement_accepted",
         ]
 
     def get_pdf_file_url(self, obj):
@@ -38,12 +40,31 @@ class LegalDocumentPublicSerializer(serializers.ModelSerializer):
                 return obj.pdf_file.url
         return None
 
+    def get_is_agreement_accepted(self, obj) -> bool:
+        accepted_versions = self.context.get("accepted_versions") or {}
+        accepted = accepted_versions.get(obj.id)
+        return bool(accepted and accepted == obj.version)
+
 
 class LegalDocumentAdminSerializer(serializers.ModelSerializer):
     class Meta:
         model = LegalDocument
         fields = "__all__"
         read_only_fields = ("created_at", "updated_at")
+
+    def validate_category(self, value):
+        if value is None:
+            return value
+        raw = (value or "").strip()
+        if not raw:
+            raise serializers.ValidationError("Category cannot be empty.")
+        for choice in AgreementCategory.values:
+            if raw.casefold() == choice.casefold():
+                return choice
+        allowed = ", ".join(AgreementCategory.values)
+        raise serializers.ValidationError(
+            f"Category must be one of: {allowed}."
+        )
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -61,6 +82,12 @@ class LegalDocumentAdminSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         """Allow HTML-only, or uploaded PDF file."""
         inst = self.instance
+        if inst is None:
+            cat = attrs.get("category", "")
+            if not (cat or "").strip():
+                raise serializers.ValidationError(
+                    {"category": "This field is required."}
+                )
         pdf_file = attrs.get("pdf_file", inst.pdf_file if inst else None)
         content = attrs.get("content_html", (inst.content_html if inst else "") or "")
         if not (content or pdf_file):

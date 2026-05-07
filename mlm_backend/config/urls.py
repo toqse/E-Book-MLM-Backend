@@ -8,6 +8,7 @@ from apps.authentication import views as auth_views
 from apps.cart import views as cart_views
 from apps.commissions import user_views as comm_views
 from apps.courses import views as course_views
+from apps.banners import views as banner_views
 from apps.payments import views as pay_views
 from apps.sponsor_slots import views as slot_views
 from apps.mlm_tree import admin_placement_views as mlm_placement_admin
@@ -29,6 +30,10 @@ urlpatterns = [
     path("api/v1/auth/bank/", auth_views.bank_update),
     path("api/v1/auth/compliance/submit/", agreement_views.compliance_submit),
     path("api/v1/agreements/", agreement_views.legal_documents_public_list),
+    path(
+        "api/v1/agreements/compliance-legal/",
+        agreement_views.legal_documents_compliance_legal_list,
+    ),
     path("api/v1/agreements/send-otp/", agreement_views.agreement_send_otp),
     path("api/v1/agreements/verify/", agreement_views.agreement_verify),
     path("api/v1/auth/validate-referral/", auth_views.validate_referral),
@@ -40,6 +45,7 @@ urlpatterns = [
     path("api/v1/user/referral/", user_views.referral_me),
     path("api/v1/user/referral/stats/", user_views.referral_stats),
     path("api/v1/user/referral/list/", user_views.referral_list),
+    path("api/v1/user/dashboard/", user_views.user_dashboard),
     path("api/v1/user/team/network/", user_views.team_network),
     path("api/v1/user/team/network/roster/", user_views.team_network_roster),
     path("api/v1/user/tree/", user_views.tree_me),
@@ -77,10 +83,18 @@ urlpatterns = [
     path("api/v1/user/wallet/bands/", wallet_views.wallet_bands),
     path("api/v1/user/wallet/withdraw/", wallet_views.wallet_withdraw),
     path("api/v1/user/wallet/withdrawals/", wallet_views.wallet_withdrawals_history),
+    path(
+        "api/v1/user/wallet/withdrawals/export/",
+        wallet_views.wallet_withdrawals_export,
+    ),
     path("api/v1/admin/withdrawals/", wallet_views.admin_withdrawals),
     path("api/v1/admin/withdrawals/pending/", wallet_views.admin_withdrawals_pending),
     path("api/v1/admin/withdrawals/<int:pk>/approve/", wallet_views.admin_withdrawal_approve),
     path("api/v1/admin/withdrawals/<int:pk>/reject/", wallet_views.admin_withdrawal_reject),
+    path(
+        "api/v1/admin/withdrawals/<int:pk>/mark-paid/",
+        wallet_views.admin_withdrawal_mark_paid,
+    ),
     path("api/v1/admin/withdrawals/batch-process/", wallet_views.admin_withdrawals_batch),
     path("api/v1/admin/withdrawals/export/", wallet_views.admin_withdrawals_export),
     # Sponsor slots
@@ -92,6 +106,7 @@ urlpatterns = [
     path("api/v1/admin/sponsor-slots/<str:code>/expire/", slot_views.admin_expire_code),
     # Courses
     path("api/v1/courses/", course_views.list_ebooks),
+    path("api/v1/courses/bestsellers/", course_views.bestsellers),
     path("api/v1/courses/<int:pk>/", course_views.ebook_detail_by_id),
     path("api/v1/courses/<slug:slug>/", course_views.ebook_detail),
     path("api/v1/user/courses/enrolled/", course_views.my_enrollments),
@@ -101,6 +116,10 @@ urlpatterns = [
     path("api/v1/admin/courses/", course_views.admin_course_list),
     path("api/v1/admin/courses/<int:pk>/", course_views.admin_course_detail),
     path("api/v1/admin/courses/enrollments/", course_views.admin_enrollments),
+    # Banners (public + admin)
+    path("api/v1/banners/", banner_views.public_banners),
+    path("api/v1/admin/banners/", banner_views.admin_banners),
+    path("api/v1/admin/banners/<int:pk>/", banner_views.admin_banner_detail),
     # Payments
     path("api/v1/user/cart/", cart_views.cart_root),
     path("api/v1/user/cart/items/", cart_views.cart_add_item),
@@ -124,11 +143,16 @@ urlpatterns = [
     path("api/v1/admin/users/", adminv.admin_users_list),
     path("api/v1/admin/users/<int:pk>/", adminv.admin_users_detail),
     path("api/v1/admin/users/<int:pk>/suspend/", adminv.admin_user_suspend),
+    path("api/v1/admin/users/<int:pk>/unsuspend/", adminv.admin_user_unsuspend),
     path("api/v1/admin/users/kyc-queue/", adminv.kyc_queue),
     path("api/v1/admin/compliance-queue/", adminv.compliance_queue),
     path("api/v1/admin/users/<int:pk>/kyc/verify/", adminv.kyc_verify),
     path(
         "api/v1/admin/users/<int:pk>/compliance/approve/",
+        adminv.compliance_approve,
+    ),
+    path(
+        "api/v1/admin/users/compliance/approve/",
         adminv.compliance_approve,
     ),
     path(

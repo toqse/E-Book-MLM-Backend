@@ -31,6 +31,12 @@ def _env_positive_int(key: str, default: int) -> int:
     return n if n > 0 else default
 
 
+# Upload size limits (Django defaults are small for large PDFs).
+MAX_UPLOAD_MB = _env_positive_int("MAX_UPLOAD_MB", 100)
+_MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = _MAX_UPLOAD_BYTES
+FILE_UPLOAD_MAX_MEMORY_SIZE = _MAX_UPLOAD_BYTES
+
 # OTP send burst limit per phone/email (cache-backed; same window as OTP_SEND_WINDOW_SECONDS).
 OTP_SEND_MAX_PER_WINDOW = _env_positive_int("OTP_SEND_MAX_PER_WINDOW", 3)
 OTP_SEND_WINDOW_SECONDS = _env_positive_int("OTP_SEND_WINDOW_SECONDS", 600)
@@ -62,6 +68,8 @@ INSTALLED_APPS = [
     "apps.notifications",
     "apps.audit",
     "apps.agreements",
+    "apps.tds",
+    "apps.banners",
 ]
 
 MIDDLEWARE = [
@@ -119,7 +127,7 @@ AUTH_USER_MODEL = "users.User"
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "apps.common.auth.JWTAuthenticationWithAccountStatus",
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
@@ -137,6 +145,8 @@ REST_FRAMEWORK = {
         "anon": "30/min",
     },
     "EXCEPTION_HANDLER": "apps.common.exceptions.envelope_exception_handler",
+    # Ensure consistent date rendering across API responses (DRF DateField).
+    "DATE_FORMAT": "%d/%m/%Y",
 }
 
 ACCESS_MIN = max(1, int(os.environ.get("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", "60")))

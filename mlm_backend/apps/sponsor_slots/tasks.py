@@ -9,7 +9,8 @@ from .models import SponsorSlotCode
 def expire_sponsor_slots():
     now = timezone.now()
     qs = SponsorSlotCode.objects.filter(
-        status=SponsorSlotCode.Status.ACTIVE, expires_at__lt=now
+        status__in=(SponsorSlotCode.Status.ACTIVE, SponsorSlotCode.Status.LOCKED),
+        expires_at__lt=now,
     )
     qs.update(status=SponsorSlotCode.Status.EXPIRED)
     return qs.count()

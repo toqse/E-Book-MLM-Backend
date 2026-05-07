@@ -24,6 +24,9 @@ def my_slots(request):
                         "code": c.code,
                         "status": c.status,
                         "expires_at": c.expires_at.isoformat(),
+                        "unlock_at_total_earned": str(c.unlock_at_total_earned)
+                        if c.unlock_at_total_earned is not None
+                        else None,
                     }
                     for c in b.codes.all()
                 ],

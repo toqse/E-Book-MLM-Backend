@@ -19,7 +19,12 @@ from apps.authentication.otp import (
 from apps.common.client_ip import get_client_ip
 from apps.common.permissions import IsSuperAdmin
 from apps.common.responses import envelope_response
-from .models import LegalDocument, MemberComplianceProfile
+from .models import (
+    AgreementCategory,
+    LegalDocument,
+    MemberComplianceProfile,
+    UserAgreementAcceptance,
+)
 from .serializers import (
     AgreementOTPSendSerializer,
     AgreementOTPVerifySerializer,
@@ -62,6 +67,37 @@ def legal_documents_public_list(request: Request):
     qs = qs.order_by("category", "name")
     ser = LegalDocumentPublicSerializer(
         qs, many=True, context={"request": request}
+    )
+    return envelope_response({"results": ser.data})
+
+
+@api_view(["GET"])
+@permission_classes([permissions.IsAuthenticated])
+def legal_documents_compliance_legal_list(request: Request):
+    """Active agreements that are legal documents and require compliance acceptance."""
+    qs = LegalDocument.objects.filter(
+        is_active=True,
+        requires_acceptance_for_compliance=True,
+        category__iexact=AgreementCategory.LEGAL_DOCUMENT,
+    ).order_by("name")
+    doc_ids = list(qs.values_list("id", flat=True))
+    accepted_versions: dict[int, str] = {}
+    if doc_ids:
+        rows = (
+            UserAgreementAcceptance.objects.filter(
+                user_id=request.user.id,
+                document_id__in=doc_ids,
+            )
+            .order_by("document_id", "-accepted_at")
+            .values_list("document_id", "version_accepted")
+        )
+        for document_id, version_accepted in rows:
+            if document_id not in accepted_versions:
+                accepted_versions[document_id] = version_accepted
+    ser = LegalDocumentPublicSerializer(
+        qs,
+        many=True,
+        context={"request": request, "accepted_versions": accepted_versions},
     )
     return envelope_response({"results": ser.data})
 

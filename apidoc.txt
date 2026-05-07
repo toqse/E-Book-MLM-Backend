@@ -56,9 +56,11 @@ FLOWS (high level)
    - Access token TTL: JWT_ACCESS_TOKEN_LIFETIME_MINUTES (default 60) in django-rest-framework-simplejwt.
    - No refresh token endpoint; login/register again after expiry for a new token.
    - POST /api/v1/auth/logout/ — Bearer optional; discard access token client-side after call.
+   - Suspended/deactivated accounts: Bearer access tokens are rejected while the account is suspended (tokens become valid again after unsuspend).
 
 4) Compliance (agreements OTP + extended KYC/bank/nominee)
    - GET /api/v1/agreements/ (Bearer) — active legal documents (content_html + PDF URL when present); optional category filter.
+   - GET /api/v1/agreements/compliance-legal/ (Bearer) — subset: active documents with category LEGAL DOCUMENT and requires_acceptance_for_compliance=true only.
    - POST /api/v1/agreements/send-otp/ — JSON { "document_ids": [int, ...] }; OTP tied to JWT user identity only.
    - POST /api/v1/agreements/verify/ — JSON { "document_ids", "otp_code" }; records UserAgreementAcceptance + client IP.
   - POST /api/v1/auth/compliance/submit/ — multipart form: identity, address, nominee, bank, payout; files pan_document,
@@ -161,10 +163,51 @@ POST /api/v1/auth/logout/
 
 GET/PATCH /api/v1/auth/me/
   Auth: Bearer.
-  GET — Success data: same user stub as verify (id, member_id, full_name, phone, email,
-    referral_code, is_member, role).
-  PATCH — Body may include full_name and/or payout_preference (passed through to User).
-  Success data: updated user stub; message "Updated"
+  GET — Success data: user stub plus profile blocks for the profile screen:
+    - Base user: id, member_id, full_name, phone, email, referral_code, is_member, role
+    - personal_information: full_name, email_address, mobile_number, date_of_birth (DD/MM/YYYY), gender
+    - member_information: member_id, joined_date (ISO), address, city, state, pin_code, country
+    - display: profile_initial, avatar_url
+    - account_status: account_status (+ label), kyc_status (+ label), pan_submitted, withdrawals_blocked,
+      tds_rate_percent, referral_link, referral_link_active
+    - tax_withholding: tds_rate_percent, reason
+    - withdrawal_band: current_band, bands (band ladder rows)
+    - earning_cap: limit, used, used_percent, remaining
+    - kyc_notice: message (or null)
+    - sponsor: { member_id, full_name } or null
+    - binary_placement: position, level, position_label
+    - team_legs: left_leg_count, right_leg_count, weaker_leg, left_leg_label, right_leg_label, subtree_member_count
+  PATCH — Edit profile fields (partial update).
+    Content-Type: application/json
+    Body fields:
+      - full_name (string, optional): member display name.
+      - email (string, optional): unique email for member login/profile.
+      - date_of_birth (string, optional): DD/MM/YYYY (also accepts YYYY-MM-DD).
+      - gender (string, optional): Male/Female/Other/Prefer not to say (or M/F/O/U).
+      - address (string, optional): maps to compliance full_address.
+      - city (string, optional)
+      - pin_code (string, optional)
+      - state (string, optional)
+      - country (string, optional)
+      - payout_preference (string, optional): "BANK" or "UPI".
+    Example body:
+      {
+        "full_name": "Unnikrishnan K",
+        "email": "unnikrishnan@example.com",
+        "date_of_birth": "17/08/1996",
+        "gender": "Male",
+        "address": "44, MG Road, Ernakulam",
+        "city": "Kochi",
+        "pin_code": "682001",
+        "state": "Kerala",
+        "country": "India",
+        "payout_preference": "UPI"
+      }
+    Notes:
+      - Send only the fields you want to update.
+      - Name/email update on User; DOB/address fields update MemberComplianceProfile.
+      - If neither field is sent, response still returns current profile payload.
+  Success data: same shape as GET; message "Updated"
 
 POST /api/v1/auth/kyc/submit/
   Deprecated: returns 410 Gone — use POST /api/v1/auth/compliance/submit/.
@@ -215,6 +258,11 @@ GET /api/v1/agreements/
     ]
   }
 
+GET /api/v1/agreements/compliance-legal/
+  Auth: Bearer.
+  No query params. Returns the same envelope shape as GET /api/v1/agreements/ but only rows where:
+    is_active=true, requires_acceptance_for_compliance=true, and category is LEGAL DOCUMENT (case-insensitive).
+
 POST /api/v1/agreements/send-otp/
   Auth: Bearer.
   Body (JSON): { "document_ids": [ <active doc ids that require acceptance> ] }
@@ -235,20 +283,32 @@ GET /api/v1/admin/agreements/
 
 POST /api/v1/admin/agreements/
   Auth: IsSuperAdmin.
-  Body (JSON or multipart): name (required); category; document_type; year; description; content_html;
-    version (default "1.0"); pdf_file (upload); requires_acceptance_for_compliance; is_active.
+  Body (JSON or multipart): name (required); category (required on create; must be one of:
+    "LEGAL DOCUMENT", "KYC & IDENTITY", "PURCHASE & TAX" — case-insensitive, stored as canonical casing);
+    document_type; year; description; content_html; version (default "1.0"); pdf_file (upload);
+    requires_acceptance_for_compliance; is_active.
   At least one of content_html or pdf_file required on create/update.
+  PATCH: category, when sent, must be one of the same three values (cannot be empty).
 
 GET/PATCH/DELETE /api/v1/admin/agreements/<id>/
   Auth: IsSuperAdmin.
   PATCH partial update. DELETE is soft (is_active=false).
+  If PATCH includes category, it must be one of: LEGAL DOCUMENT, KYC & IDENTITY, PURCHASE & TAX (same rules as POST).
 
 GET /api/v1/admin/compliance-queue/
   Auth: IsSupportAdmin.
   Returns rich pending submissions: profile fields, nominee, bank echoes, signed media URLs when DEBUG/media served.
 
 POST /api/v1/admin/users/<id>/compliance/approve/
-  Auth: IsSupportAdmin. Requires MemberComplianceProfile exists; sets kyc_status VERIFIED; kyc_reviewed_at now.
+  Auth: IsSupportAdmin.
+  Accepts optional body to approve single or bulk:
+    - { "user_id": 123 }  OR  { "user_ids": [123, 456] }
+  When body ids omitted, falls back to <id> in URL (backward compatible).
+  Requires MemberComplianceProfile exists per user; sets kyc_status VERIFIED; kyc_reviewed_at now.
+  For bulk, returns { approved_ids: [...], failed: [{id, reason}...] }.
+
+POST /api/v1/admin/users/compliance/approve/
+  Same as above, but without <id> in URL (preferred for bulk).
 
 POST /api/v1/admin/users/<id>/compliance/reject/
   Auth: IsSupportAdmin. Body JSON { "reason": "..." } — sets REJECTED and stores reason.
@@ -302,6 +362,9 @@ GET /api/v1/user/referral/list/
     When true: only direct referrals who (a) have at least one PAID non-retail
     (MLM) order and (b) have no binary_node yet — i.e. purchased a book but
     binary placement did not succeed or has not completed.
+  KYC gate (when pending_placement=true):
+    Caller must have kyc_status VERIFIED and a MemberComplianceProfile on file.
+    Errors: 403 — { errors: { detail: "kyc_required" | "compliance_profile_required" } }.
   Success data: {
     "results": [
       { "member_id", "full_name", "created_at",
@@ -316,6 +379,18 @@ GET /api/v1/user/referral/list/
 
 MODULE: User — Binary tree (/api/v1/user/tree*)
 --------------------------------------------------------------------------------
+GET /api/v1/user/team/network/
+  Auth: Bearer.
+  Query: include — optional comma-separated list: summary,pending,tree,roster (default summary,pending,tree).
+  KYC gate (when include contains \"pending\" or \"roster\"):
+    Caller must have kyc_status VERIFIED and a MemberComplianceProfile on file.
+    Errors: 403 — { errors: { detail: \"kyc_required\" | \"compliance_profile_required\" } }.
+
+GET /api/v1/user/team/network/roster/
+  Auth: Bearer.
+  KYC gate: Caller must have kyc_status VERIFIED and a MemberComplianceProfile on file.
+  Errors: 403 — { errors: { detail: \"kyc_required\" | \"compliance_profile_required\" } }.
+
 GET /api/v1/user/tree/
   Auth: Bearer.
   Success data: If user has no binary node: { "root": null }.
@@ -350,6 +425,9 @@ GET /api/v1/user/tree/level/<n>/
 
 POST /api/v1/user/tree/place-direct/
   Auth: Bearer. Caller must be the direct sponsor of the buyer.
+  KYC gate:
+    Caller must have kyc_status VERIFIED and a MemberComplianceProfile on file.
+    Errors: 403 — { errors: { detail: "kyc_required" | "compliance_profile_required" } }.
   Body: { "member_id": "<buyer member_id>", "leg": "LEFT" | "RIGHT" } (alias: position).
   Rules: buyer has a PAID non-retail order in PENDING (or FAILED after auto error)
     placement queue, no binary_node yet, and current time is on or before
@@ -413,28 +491,91 @@ GET /api/v1/user/earnings/
     "ledger", or "overview,ledger" or "all" (both). Use "ledger" only to skip overview.
   Query: period — optional: today | 7d | 30d | fy | all (default all). Filters ledger.
   Query: type — optional: all | direct | passive | milestone | reversed | pending.
-  Query: page (default 1), page_size (default 20, max 100) for ledger section.
+  Query: page (default 1), page_size (default 20, max 100) for the ledger table section.
+    Pagination applies to `data.ledger.rows` only: `len(rows)` <= `page_size`, while
+    `data.ledger.total_count` is the total count across the active `period` + `type` filters.
   Success data (subset keys omitted when include excludes that section):
-    "overview": {
-      "lifetime_total", "breakdown" { direct, passive, milestone, slots } each with
-        amount string and unit hints (units, unit_amount, codes_redeemed for slots),
-      "wallet" { cash_balance, total_earned, total_withdrawn, on_hold, tds_fy, reversed },
-      "cap" { limit, used, used_percent, remaining },
-      "kyc" { status, withdrawals_blocked },
-      "rates" { direct_commission, upline_commission, earning_cap,
-        is_repurchase_commission_allowed (bool, mirrors SystemConfig; default false) },
-      "fy_label"
+    "summary": {
+      "hero": {
+        "title", "subtitle", "lifetime_earnings",
+        "breakdown_inline" { direct, passive, milestone, slots },
+        "cap_progress" { used_percent, used_amount, cap_amount, remaining_amount },
+        "available_in_wallet"
+      },
+      "wallet_cards": {
+        "withdrawn_all_time", "available_to_withdraw", "on_pay_hold",
+        "tds_deducted_fy", "reversed_referrals"
+      },
+      "income_cards": {
+        "direct_commission_l1" { amount, units, unit_amount },
+        "tree_passive_l2_l4" { amount, units, unit_amount },
+        "milestone_bonuses" { amount },
+        "sponsor_slot_value" { amount, codes_redeemed, unit_amount }
+      },
+      "band_strip": {
+        "current_band", "current_band_number", "message", "next_band"
+      },
+      "rules_strip": { "title", "message" },
+      "fy_label", "kyc_status"
+    },
+    "filters": {
+      "selected_period", "selected_type",
+      "period_options": [today, 7d, 30d, fy, all],
+      "type_options": [all, direct, passive, milestone, pending, reversed]
     },
     "ledger": {
-      "results": [ unified rows ],
+      "rows": [ unified rows ],
       "total_count", "page", "page_size"
     }
-  Ledger row fields: id, kind (COMMISSION|MILESTONE), at, display_type, level,
-    description, triggered_by { member_id, full_name }|null, via_downline, gross,
-    tds, net, status, order_id.
-  Notes: on_hold = sum of credited commission net still under Order.refund_eligible_until.
+  Ledger row fields: id, entry_kind (COMMISSION|MILESTONE), at, date, time, type,
+    level, description, triggered_by { member_id, full_name }|null, via_downline,
+    gross, tds_deducted, net_credited, running_balance, status, order_id.
+  Notes: on_pay_hold = sum of credited commission net still under Order.refund_eligible_until.
+    running_balance is emitted per returned row in descending time order.
     Per-line tds may be 0 until engine writes tds_deducted. Slots amount =
     count(REDEEMED sponsor codes issued to you) × ₹100 display unit.
+    `page` and `page_size` are clamped server-side: `page` >= 1, `page_size` in [1..100].
+
+
+MODULE: User — Dashboard (member home)
+--------------------------------------------------------------------------------
+GET /api/v1/user/dashboard/
+  Auth: Bearer.
+  Purpose: single request for the member dashboard home screen (tiles + charts + recent activity).
+  Success data: {
+    "profile": { "full_name", "member_id" },
+    "tiles": {
+      "total_earnings": "<decimal string>",            # lifetime (wallet.total_earned)
+      "direct_referrals": <int>,
+      "available_balance": "<decimal string>",         # wallet.cash_balance
+      "milestones": { "current": <int>, "total": <int>, "next_target": <int|null> }
+    },
+    "earnings_cap": {
+      "used_amount": "<decimal string>",
+      "cap_amount": "<decimal string>",
+      "used_percent": <float>,
+      "remaining_amount": "<decimal string>"
+    },
+    "earnings_breakdown": { "direct", "passive", "milestone", "slots" },    # all decimal strings
+    "wallet": {                                   # same shape as GET /api/v1/user/payouts/ "wallet"
+      "cash_balance", "total_earned", "total_withdrawn", "total_tds_deducted",
+      "fy_label", "band_cash_withdrawn_fy", "current_band",
+      "withdrawals_blocked", "kyc_status"
+    },
+    "recent_activity": [
+      {
+        "kind": "EARNINGS"|"WALLET"|"WITHDRAWAL"|"REFERRAL",
+        "title": "<string>",
+        "subtitle": "<string|null>",
+        "amount": "<decimal string|null>",
+        "at": "<ISO8601 datetime>",
+        "meta": { ... }
+      }, ...
+    ]
+  }
+  Notes:
+    - recent_activity merges (bounded) earnings ledger, wallet movements, withdrawals updates, and new direct referrals.
+    - milestones are based on platform thresholds (see commissions engine milestones table).
 
 MODULE: User — Payouts bundle (preferred for Withdrawals UI)
 --------------------------------------------------------------------------------
@@ -469,7 +610,32 @@ GET /api/v1/user/commissions/summary/
     (tree_passive = passive upline L2–L4 credited net; aligned with earnings overview).
 
 GET /api/v1/user/commissions/milestones/
-  Success data: { "history": [ { "referrals", "bonus", "status" }, ... ] }
+  Auth: Bearer.
+  Success data (envelope `data`): full milestones dashboard for the Milestones UI plus legacy-compatible `history` rows.
+  Top-level keys:
+    - user: { member_id, full_name, referral_code, referral_link }
+    - qualifying_referrals: { count (direct_referral_count), definition (string; engine qualification rules) }
+    - config_snapshot: { earning_cap, product_base_price, tds_194r_rate_percent, tds_cash_trigger } — decimal strings
+    - summary:
+        milestones_completed: { current, total } — current = tiers with a CREDITED MilestoneRecord
+        bonus_earned_so_far — sum of net_bonus (credited) for the user
+        remaining_potential_bonus_gross — sum of configured tier gross bonuses for tiers with no MilestoneRecord yet
+        tds: { milestone_tds_deducted_total, fy_milestone_gross_total, section "194R", trigger_threshold,
+               rate_percent, note } — milestone records include tds_deducted when withholding is enabled
+    - policy: { all_or_nothing, bonuses_count_toward_earning_cap, tds_section_194r (string) }
+    - cap_context: { limit, used, remaining } — earning cap vs wallet.total_earned
+    - cap_impact: { milestone_bonus_sum_gross, milestone_bonus_sum_percent_of_cap } — sum of all tier gross bonuses vs cap
+    - tiers: array of 5 objects (T1–T5), each:
+        tier, index, threshold, bonus_gross, status (UNLOCKED | IN_PROGRESS | LOCKED | MISSED_OR_BLOCKED),
+        status_reason (e.g. no_record_at_threshold when count reached threshold but no payout record),
+        progress: { current_referrals, target_referrals, percent_toward_tier },
+        remaining_to_threshold, amounts: { bonus_gross, tds_deducted, net_credited },
+        earned_at (ISO or null), record_id
+    - history: [ { referrals, bonus, status, bonus_gross, tds_deducted, earned_at }, ... ] — legacy keys retained; extra fields additive
+  Notes:
+    - Tier thresholds/bonuses match `apps.commissions.milestone_tiers.MILESTONES` (single source with payout engine).
+    - MISSED_OR_BLOCKED: user’s direct_referral_count reached the threshold but no MilestoneRecord exists (e.g. capped at hit time).
+    - FY for fy_milestone_gross_total: India financial year from April 1 (Asia/Kolkata when USE_TZ).
 
 GET /api/v1/user/commissions/tds/
   Success data: { "total_tds", "fy_band_cash" } as strings from Wallet.
@@ -523,40 +689,81 @@ GET /api/v1/user/wallet/bands/
   }
 
 POST /api/v1/user/wallet/withdraw/
-  Body: { "band": <int>, "amount": "<decimal string>" }
-  Validates amount > 0 and ≤ cash_balance; creates WithdrawalRequest.
-  Success data: { "withdrawal_id", "status" }
-  Errors: 400 "Invalid amount"
+  Body: { "band": <int>, "amount": "<decimal string>", "method"?: "BANK"|"UPI" }
+  Note:
+    - "band" is required to enforce the active withdrawal band rules (cash vs slot bands).
+    - Client should send the user's current band shown in the UI (from GET /api/v1/user/payouts/ -> wallet.current_band
+      or legacy GET /api/v1/user/wallet/ -> current_band).
+  Validates:
+    - KYC VERIFIED
+    - payout method details exist (BANK: bank_account_number+bank_ifsc, UPI: upi_id)
+    - band must equal wallet.current_band and be a cash band (1,3,5,7,9)
+    - amount >= 200 and ≤ available_balance (cash_balance minus locked cooling-period credits)
+  Side effects:
+    - Creates WithdrawalRequest (PENDING)
+    - Applies Sec 194H TDS at request-time (PAN: 2%, else 20%) using cumulative-FY threshold
+    - Reserves funds: cash_balance decreases by gross; wallet totals updated; ledger row created
+  Success data: {
+    "id", "status", "band", "amount_requested", "tds_amount", "tds_section", "net_payable",
+    "payout_method", "payout_destination_hint", "created_at"
+  }
+  Errors:
+    - 403 kyc_required / missing_payout_method / account_suspended
+    - 400 invalid_amount / min_withdrawal / insufficient_available_balance / band_mismatch / slot_band / invalid_band / invalid_payout_method
 
 GET /api/v1/user/wallet/withdrawals/
+  Query (optional): status, page, page_size, from, to
   Success data: {
-    "results": [ { "id", "band", "amount", "net_payable", "tds_amount", "tds_section",
-      "status", "created_at", "updated_at" }, ... max 50 ]
+    "count", "page", "page_size",
+    "results": [
+      { "id", "band", "amount_requested", "tds_amount", "tds_section", "net_payable",
+        "status", "payout_method", "payout_destination_hint", "utr_number", "reject_reason",
+        "approved_at", "paid_at", "created_at", "updated_at"
+      }, ...
+    ]
   }
+
+GET /api/v1/user/wallet/withdrawals/export/
+  CSV attachment. Same filters as withdrawals list (status, from, to).
 
 
 MODULE: Admin — Withdrawals (/api/v1/admin/withdrawals*)
 --------------------------------------------------------------------------------
 GET /api/v1/admin/withdrawals/
   Auth: Bearer + IsFinanceAdmin.
-  Success data: { "results": [ { "id", "status" }, ... max 200 ] }
+  Query (optional): status, q (member_id or phone), page, page_size, from, to
+  Success data: {
+    "count", "page", "page_size",
+    "results": [
+      { "id", "member": { "member_id", "full_name", "phone", "kyc_status" },
+        "band", "status", "amount_requested", "tds_amount", "tds_section", "net_payable",
+        "payout_method", "payout_destination_hint",
+        "utr_number", "reject_reason", "approved_at", "paid_at", "created_at", "updated_at"
+      }, ...
+    ]
+  }
 
 GET /api/v1/admin/withdrawals/pending/
   Success data: { "results": [ withdrawal ids ] }
 
 POST /api/v1/admin/withdrawals/<id>/approve/
-  Success data: { "id", "status" } (status APPROVED)
+  Success data: { "id", "status", "approved_at" } (status APPROVED)
   Errors: 404.
 
 POST /api/v1/admin/withdrawals/<id>/reject/
   Body: optional { "reason": "..." } (stored as reject_reason).
-  Success data: { "ok": true }; status REJECTED.
+  Success data: { "id", "status" }; status REJECTED.
+  Notes: reverses reserved wallet funds + TDS totals and writes an ADJUSTMENT wallet transaction.
+
+POST /api/v1/admin/withdrawals/<id>/mark-paid/
+  Body: { "utr_number": "...", "paid_at"?: "<ISO datetime>" }
+  Success: { "id", "status", "utr_number", "paid_at" } (status PAID)
 
 POST /api/v1/admin/withdrawals/batch-process/
   Demo stub: { "processed": 0 }
 
 GET /api/v1/admin/withdrawals/export/
-  Plain CSV — headers id,status (no envelope).
+  Plain CSV attachment (no envelope). Supports filters: status, q, from, to.
 
 
 MODULE: Sponsor slots
@@ -593,6 +800,51 @@ POST /api/v1/admin/sponsor-slots/<code>/expire/
   Success: { "ok": true }; status set EXPIRED. 404 if unknown code.
 
 
+MODULE: Banners (home page)
+--------------------------------------------------------------------------------
+GET /api/v1/banners/
+  Auth: None (public / token-less).
+  Success data: {
+    "results": [
+      { "id", "title", "image_url", "link_url", "sort_order", "is_active", "created_at", "updated_at" },
+      ...
+    ]
+  }
+  Notes:
+    - Returns only active banners (is_active=true).
+    - Ordered by sort_order asc, then id desc.
+
+GET /api/v1/admin/banners/
+  Auth: Bearer + IsAdminRole.
+  Success data: { "results": [ <same banner object as above>, ... ] }
+
+POST /api/v1/admin/banners/
+  Auth: Bearer + IsAdminRole.
+  Content-Type: multipart/form-data.
+  Body:
+    - image (file) — required
+    - title (string) — optional
+    - link_url (string) — optional (URL)
+    - sort_order (int) — optional (default 0)
+    - is_active (bool) — optional (default true)
+  Success: returns created banner object.
+  Errors: 400 validation failed.
+
+GET /api/v1/admin/banners/<id>/
+  Auth: Bearer + IsAdminRole.
+  Success: returns banner object; 404 if not found.
+
+PATCH /api/v1/admin/banners/<id>/
+  Auth: Bearer + IsAdminRole.
+  Content-Type: multipart/form-data (when updating image) OR application/json (for metadata only).
+  Body: any of { image, title, link_url, sort_order, is_active }
+  Success: returns updated banner object; 404 if not found.
+
+DELETE /api/v1/admin/banners/<id>/
+  Auth: Bearer + IsAdminRole.
+  Success: { "deleted": true }; 404 if not found.
+
+
 MODULE: Courses & e-books
 --------------------------------------------------------------------------------
 GET /api/v1/courses/
@@ -610,6 +862,8 @@ GET /api/v1/courses/
     "count": <matching published books (pagination is over this flattened set)>,
     "page", "page_size", "total_pages"
   }
+  When Bearer is present, the top-level response envelope also includes:
+    - no_of_cart_items: <int> (count of items in the authenticated user's cart)
   Rows are ordered by category (ascending), then by book id descending within each category. Pagination slices that
     flat ordering, then merges consecutive rows of the same category in the page slice.
   pdf_url is not included on list items; use GET /courses/<slug>/ or /courses/<id>/ for pdf_url.
@@ -844,18 +1098,81 @@ GET /api/v1/admin/dashboard/
   }
 
 GET /api/v1/admin/users/
+  Auth: IsAdminRole.
+  Pagination (query params):
+    - page (default 1)
+    - page_size (default 20, max 100)
+  Filtering (query params):
+    - q: search across full_name, member_id, phone, email
+    - account_status: ACTIVE|SUSPENDED|CAPPED|DEACTIVATED
+    - kyc_status: PENDING|VERIFIED|REJECTED
+    - state: compliance profile state (case-insensitive exact)
+    - band: wallet current band (int)
+    - has_cap_reached: true|false (wallet total_earned >= earning_cap from system config)
   Success: {
     "results": [
-      { "id", "member_id", "full_name", "role", "account_status" }, ... max 100
-    ]
+      {
+        "id", "member_id", "full_name", "email", "phone",
+        "address", "city", "pincode", "state",
+        "kyc_status", "account_status",
+        "band",
+        "cap_progress": { "used", "total", "percent" },
+        "earnings",
+        "refs"
+      }, ...
+    ],
+    "count": <int>,
+    "page": <int>,
+    "page_size": <int>,
+    "total_pages": <int>,
+    "tab_counts": { "all", "kyc_pending", "capped", "suspended" }
   }
 
+GET /api/v1/admin/users/<id>/
+  Auth: IsAdminRole.
+  Success: user profile + compliance snapshot + wallet summary + cap_progress.
+
 PATCH /api/v1/admin/users/<id>/
-  Body: optional any of role, account_status, kyc_status.
+  Auth: IsAdminRole.
+  Body: JSON; send any subset of:
+    Status fields (User):
+      - role: SUPER_ADMIN|FINANCE|SUPPORT|MEMBER
+      - account_status: ACTIVE|CAPPED|SUSPENDED|DEACTIVATED
+      - kyc_status: PENDING|VERIFIED|REJECTED
+    Personal fields (User):
+      - full_name (string)
+      - phone (string; must be unique)
+      - email (string; must be unique; stored lowercased)
+      - pan_number (string)
+      - aadhaar_number (string)
+      - bank_account_number (string)
+      - bank_ifsc (string)
+      - upi_id (string)
+    Compliance/KYC fields (MemberComplianceProfile; profile auto-created if missing):
+      - date_of_birth (YYYY-MM-DD or null)
+      - gender
+      - full_address, city, pin_code, state, country
+      - pan_number, name_on_pan
+      - aadhar_number, name_on_aadhar
+      - nominee_name, nominee_relationship, nominee_phone, nominee_date_of_birth (YYYY-MM-DD or null)
+      - account_holder_name, account_number, bank_name, ifsc, branch, account_type, payout_preference
+  Notes:
+    - This endpoint edits text fields only. Document uploads remain part of multipart compliance submit flow.
+  Success: { "ok": true }; 404.
+
+DELETE /api/v1/admin/users/<id>/
+  Auth: IsAdminRole.
+  Hard-deletes the member user (staff/non-member deletion forbidden).
   Success: { "ok": true }; 404.
 
 POST /api/v1/admin/users/<id>/suspend/
+  Auth: IsAdminRole.
   Sets account_status SUSPENDED.
+  Success: { "ok": true }
+
+POST /api/v1/admin/users/<id>/unsuspend/
+  Auth: IsAdminRole.
+  Sets account_status ACTIVE (only when current status is SUSPENDED).
   Success: { "ok": true }
 
 GET /api/v1/admin/users/kyc-queue/

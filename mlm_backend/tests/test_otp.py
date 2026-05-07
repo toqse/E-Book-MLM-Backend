@@ -350,3 +350,120 @@ def test_me_includes_personal_and_member_info_blocks():
     assert data["member_information"]["state"] == "Kerala"
     assert data["member_information"]["pin_code"] == "682001"
     assert data["member_information"]["country"] == "India"
+
+    assert data["display"]["profile_initial"] == "M"
+    assert data["display"]["avatar_url"] is None
+
+    assert data["account_status"]["account_status"] == User.AccountStatus.ACTIVE
+    assert data["account_status"]["kyc_status"] == User.KYCStatus.PENDING
+    assert data["account_status"]["pan_submitted"] is False
+    assert data["account_status"]["withdrawals_blocked"] is True
+    assert data["account_status"]["referral_link"] == "http://localhost:3000/join?ref=MBR301"
+    assert data["account_status"]["referral_link_active"] is True
+
+    assert "tds_rate_percent" in data["tax_withholding"]
+    assert "reason" in data["tax_withholding"]
+
+    assert "current_band" in data["withdrawal_band"]
+    assert isinstance(data["withdrawal_band"]["bands"], list)
+
+    assert "limit" in data["earning_cap"]
+    assert "used" in data["earning_cap"]
+    assert "used_percent" in data["earning_cap"]
+    assert "remaining" in data["earning_cap"]
+
+    assert "message" in data["kyc_notice"]
+
+    assert data["sponsor"] is None
+
+    assert data["binary_placement"]["position"] is None
+    assert data["binary_placement"]["level"] is None
+
+    assert data["team_legs"]["left_leg_count"] == 0
+    assert data["team_legs"]["right_leg_count"] == 0
+    assert data["team_legs"]["weaker_leg"] in ("LEFT", "RIGHT")
+
+
+@pytest.mark.django_db
+def test_me_patch_updates_user_and_compliance_profile_fields():
+    u = User.objects.create_user(
+        login_identifier="+919444444445",
+        password="pw",
+        phone="+919444444445",
+        email="before@test.dev",
+        full_name="Before Name",
+        member_id="MBR000302",
+        referral_code="MBR302",
+        referral_link="http://localhost:3000/join?ref=MBR302",
+        role=User.Role.MEMBER,
+        is_staff=False,
+    )
+    client = APIClient()
+    client.force_authenticate(user=u)
+    payload = {
+        "full_name": "After Name",
+        "email": "after@test.dev",
+        "date_of_birth": "17/08/1996",
+        "gender": "Male",
+        "address": "44, MG Road, Ernakulam",
+        "city": "Kochi",
+        "pin_code": "682001",
+        "state": "Kerala",
+        "country": "India",
+    }
+    resp = client.patch("/api/v1/auth/me/", payload, format="json")
+    assert resp.status_code == 200, resp.content
+    data = resp.json()["data"]
+    assert data["personal_information"]["full_name"] == "After Name"
+    assert data["personal_information"]["email_address"] == "after@test.dev"
+    assert data["personal_information"]["date_of_birth"] == "17/08/1996"
+    assert data["personal_information"]["gender"] == "Male"
+    assert data["member_information"]["address"] == "44, MG Road, Ernakulam"
+    assert data["member_information"]["state"] == "Kerala"
+    assert data["member_information"]["pin_code"] == "682001"
+    assert data["member_information"]["country"] == "India"
+
+    u.refresh_from_db()
+    assert u.full_name == "After Name"
+    assert u.email == "after@test.dev"
+    profile = MemberComplianceProfile.objects.get(user=u)
+    assert profile.date_of_birth.isoformat() == "1996-08-17"
+    assert profile.gender == MemberComplianceProfile.Gender.M
+    assert profile.full_address == "44, MG Road, Ernakulam"
+    assert profile.city == "Kochi"
+    assert profile.pin_code == "682001"
+    assert profile.state == "Kerala"
+    assert profile.country == "India"
+
+
+@pytest.mark.django_db
+def test_me_patch_rejects_duplicate_email():
+    taken = User.objects.create_user(
+        login_identifier="+919444444446",
+        password="pw",
+        phone="+919444444446",
+        email="taken@test.dev",
+        full_name="Taken User",
+        member_id="MBR000303",
+        referral_code="MBR303",
+        referral_link="http://localhost:3000/join?ref=MBR303",
+        role=User.Role.MEMBER,
+        is_staff=False,
+    )
+    user = User.objects.create_user(
+        login_identifier="+919444444447",
+        password="pw",
+        phone="+919444444447",
+        email="owner@test.dev",
+        full_name="Owner User",
+        member_id="MBR000304",
+        referral_code="MBR304",
+        referral_link="http://localhost:3000/join?ref=MBR304",
+        role=User.Role.MEMBER,
+        is_staff=False,
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+    resp = client.patch("/api/v1/auth/me/", {"email": taken.email}, format="json")
+    assert resp.status_code == 400, resp.content
+    assert "email" in (resp.json().get("errors") or {})

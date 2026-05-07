@@ -1,17 +1,57 @@
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
 from django.db.models import Exists, OuterRef, Sum
+from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 
-from apps.common.permissions import IsAdminRole
+from apps.common.permissions import IsAdminRole, require_kyc_verified_and_compliant
 from apps.common.responses import envelope_response
+from apps.commissions.milestone_tiers import MILESTONES
 from apps.commissions.models import CommissionLedger
 from apps.mlm_tree.models import BinaryNode
 from apps.mlm_tree.placement import get_pending_placement_order
 from apps.payments.models import Order
+from apps.wallet.models import WalletTransaction, WithdrawalRequest
+from apps.wallet.services.member_money import build_earnings_response, build_payouts_bundle
 
 from . import team_services
 from .models import User
+
+
+def _iso(dt: datetime) -> str:
+    if timezone.is_aware(dt):
+        return dt.isoformat()
+    if timezone.is_naive(dt) and timezone.get_current_timezone():
+        try:
+            return timezone.make_aware(dt, timezone.get_current_timezone()).isoformat()
+        except Exception:
+            return dt.isoformat()
+    return dt.isoformat()
+
+
+def _fmt_money(v: Any) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return str(v)
+    return str(v)
+
+
+def _activity_row(*, at: datetime, kind: str, title: str, subtitle: str | None, amount: Any, meta: dict):
+    return {
+        "kind": kind,
+        "title": title,
+        "subtitle": subtitle,
+        "amount": _fmt_money(amount),
+        "at": _iso(at),
+        "meta": meta,
+    }
 
 
 def _truthy_query_param(value: str | None) -> bool:
@@ -61,6 +101,9 @@ def referral_list(request: Request):
     qs = request.user.direct_referrals.all().order_by("-id")
     pending = _truthy_query_param(request.query_params.get("pending_placement"))
     if pending:
+        blocked = require_kyc_verified_and_compliant(request)
+        if blocked is not None:
+            return blocked
         mlm_paid_order = Order.objects.filter(
             user_id=OuterRef("pk"),
             status=Order.Status.PAID,
@@ -111,6 +154,10 @@ def team_network(request: Request):
     viewer = request.user
     ctx = team_services.build_subtree_context(viewer)
     include = team_services.parse_include(request.query_params.get("include"))
+    if "pending" in include or "roster" in include:
+        blocked = require_kyc_verified_and_compliant(request)
+        if blocked is not None:
+            return blocked
     max_depth = team_services.parse_max_depth(
         request.query_params.get("tree_max_depth"),
         default=3,
@@ -177,6 +224,9 @@ def team_network(request: Request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def team_network_roster(request: Request):
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     viewer = request.user
     ctx = team_services.build_subtree_context(viewer)
     page = _parse_int(request.query_params.get("page"), 1, min_v=1, max_v=10_000)
@@ -302,6 +352,141 @@ def tree_downlines(request: Request):
 @permission_classes([IsAuthenticated])
 def tree_level_n(request: Request, n: int):
     return envelope_response({"level": n, "members": []})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def user_dashboard(request: Request):
+    """
+    Member dashboard bundle: tiles + cap/breakdown + unified recent activity.
+    """
+    u: User = request.user
+
+    earnings = build_earnings_response(
+        u,
+        include_raw="overview",
+        period="all",
+        ledger_type="all",
+        page=1,
+        page_size=1,
+    )
+    payouts = build_payouts_bundle(u, include_movements=True)
+
+    direct_referrals = int(getattr(u, "direct_referral_count", 0) or 0)
+    thresholds = [int(t[0]) for t in MILESTONES]
+    milestones_total = len(thresholds)
+    milestones_current = sum(1 for t in thresholds if direct_referrals >= t)
+    next_target = next((t for t in thresholds if direct_referrals < t), None)
+
+    summary = (earnings or {}).get("summary") or {}
+    hero = summary.get("hero") or {}
+    cap_progress = hero.get("cap_progress") or {}
+    breakdown_inline = hero.get("breakdown_inline") or {}
+
+    # Recent activity: merge-sort across bounded sources.
+    feed_limit = 20
+    activity: list[dict[str, Any]] = []
+
+    # (1) Earnings / milestone ledger (commissions + milestones) via existing builder.
+    ledger = build_earnings_response(
+        u,
+        include_raw="ledger",
+        period="30d",
+        ledger_type="all",
+        page=1,
+        page_size=10,
+    ).get("ledger", {})
+    for row in (ledger.get("rows") or [])[:10]:
+        try:
+            at = timezone.datetime.fromisoformat(row.get("at"))
+        except Exception:
+            at = timezone.now()
+        activity.append(
+            _activity_row(
+                at=at,
+                kind="EARNINGS",
+                title=str(row.get("type") or "Earnings"),
+                subtitle=str(row.get("description") or "") or None,
+                amount=row.get("net_credited"),
+                meta={
+                    "entry_kind": row.get("entry_kind"),
+                    "status": row.get("status"),
+                    "order_id": row.get("order_id"),
+                },
+            )
+        )
+
+    # (2) Wallet movements
+    for tx in WalletTransaction.objects.filter(user=u).order_by("-created_at").only(
+        "tx_type", "amount", "reference", "created_at"
+    )[:10]:
+        title = "Wallet credit" if tx.tx_type == WalletTransaction.TxType.CREDIT else "Wallet debit"
+        activity.append(
+            _activity_row(
+                at=tx.created_at,
+                kind="WALLET",
+                title=title,
+                subtitle=tx.reference or None,
+                amount=tx.amount,
+                meta={"tx_type": tx.tx_type, "reference": tx.reference},
+            )
+        )
+
+    # (3) Withdrawals status changes
+    for wr in WithdrawalRequest.objects.filter(user=u).order_by("-updated_at").only(
+        "id", "status", "net_payable", "updated_at", "created_at", "reject_reason"
+    )[:10]:
+        activity.append(
+            _activity_row(
+                at=wr.updated_at or wr.created_at,
+                kind="WITHDRAWAL",
+                title=f"Withdrawal {wr.status.lower()}",
+                subtitle=(wr.reject_reason or None) if wr.status == WithdrawalRequest.Status.REJECTED else None,
+                amount=wr.net_payable,
+                meta={"withdrawal_id": wr.id, "status": wr.status},
+            )
+        )
+
+    # (4) New direct referrals joined (most recent)
+    for r in u.direct_referrals.all().order_by("-created_at").only("member_id", "full_name", "created_at")[:10]:
+        activity.append(
+            _activity_row(
+                at=r.created_at,
+                kind="REFERRAL",
+                title="New referral joined",
+                subtitle=f"{r.full_name} ({r.member_id})",
+                amount=None,
+                meta={"member_id": r.member_id, "full_name": r.full_name},
+            )
+        )
+
+    activity.sort(key=lambda x: x.get("at") or "", reverse=True)
+    activity = activity[:feed_limit]
+
+    data = {
+        "profile": {"full_name": u.full_name, "member_id": u.member_id},
+        "tiles": {
+            "total_earnings": hero.get("lifetime_earnings"),
+            "direct_referrals": direct_referrals,
+            "available_balance": ((payouts.get("wallet") or {}).get("available_balance")),
+            "milestones": {"current": milestones_current, "total": milestones_total, "next_target": next_target},
+        },
+        "earnings_cap": {
+            "used_amount": cap_progress.get("used_amount"),
+            "cap_amount": cap_progress.get("cap_amount"),
+            "used_percent": cap_progress.get("used_percent"),
+            "remaining_amount": cap_progress.get("remaining_amount"),
+        },
+        "earnings_breakdown": {
+            "direct": breakdown_inline.get("direct"),
+            "passive": breakdown_inline.get("passive"),
+            "milestone": breakdown_inline.get("milestone"),
+            "slots": breakdown_inline.get("slots"),
+        },
+        "wallet": payouts.get("wallet"),
+        "recent_activity": activity,
+    }
+    return envelope_response(data)
 
 
 @api_view(["GET"])
