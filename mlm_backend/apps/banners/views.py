@@ -1,5 +1,6 @@
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
 
 from apps.common.permissions import IsAdminRole
 from apps.common.responses import envelope_response
@@ -75,7 +76,21 @@ def _validate_and_apply_banner_input(request, b: Banner, *, partial: bool):
 @permission_classes([AllowAny])
 def public_banners(request):
     qs = Banner.objects.filter(is_active=True).order_by("sort_order", "-id")
-    return envelope_response({"results": [_banner_payload(request, b) for b in qs]})
+    user = getattr(request, "user", None)
+    if getattr(user, "is_authenticated", False):
+        loginned_user = (getattr(user, "full_name", None) or str(user)).strip() or "Guest User"
+    else:
+        loginned_user = "Guest User"
+
+    return Response(
+        {
+            "success": True,
+            "data": {"results": [_banner_payload(request, b) for b in qs]},
+            "message": "Operation successful",
+            "errors": None,
+            "loginned_user": loginned_user,
+        }
+    )
 
 
 @api_view(["GET", "POST"])

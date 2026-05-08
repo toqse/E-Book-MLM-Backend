@@ -794,6 +794,7 @@ def system_config_view(request):
                 "placement_manual_window_hours": cfg.placement_manual_window_hours,
                 "auto_placement_strategy": cfg.auto_placement_strategy,
                 "is_repurchase_commission_allowed": cfg.is_repurchase_commission_allowed,
+                "auto_process_milestone_bonuses": cfg.auto_process_milestone_bonuses,
             }
         )
     for field in [
@@ -806,11 +807,12 @@ def system_config_view(request):
         "placement_manual_window_hours",
         "auto_placement_strategy",
         "is_repurchase_commission_allowed",
+        "auto_process_milestone_bonuses",
     ]:
         if field not in request.data:
             continue
         val = request.data[field]
-        if field == "is_repurchase_commission_allowed":
+        if field in ("is_repurchase_commission_allowed", "auto_process_milestone_bonuses"):
             setattr(
                 cfg,
                 field,

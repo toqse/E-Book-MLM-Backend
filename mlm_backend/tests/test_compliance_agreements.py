@@ -295,6 +295,47 @@ def test_admin_agreement_crud_superadmin():
 
 
 @pytest.mark.django_db
+def test_admin_agreements_list_supports_category_filter_and_normalization():
+    su = User.objects.create_superuser(
+        "admin2@test.dev",
+        "pw",
+        full_name="Admin 2",
+        email="admin2@test.dev",
+    )
+    client = APIClient()
+    client.force_authenticate(user=su)
+
+    LegalDocument.objects.create(
+        name="KYC Policy",
+        category="KYC & IDENTITY",
+        document_type="policy",
+        year=2026,
+        description="d",
+        content_html="<p>a</p>",
+        version="1.0",
+        is_active=True,
+        requires_acceptance_for_compliance=False,
+    )
+    LegalDocument.objects.create(
+        name="Legal Policy",
+        category="LEGAL DOCUMENT",
+        document_type="policy",
+        year=2026,
+        description="d",
+        content_html="<p>b</p>",
+        version="1.0",
+        is_active=True,
+        requires_acceptance_for_compliance=False,
+    )
+
+    filtered = client.get("/api/v1/admin/agreements/", {"category": "KYC and IDENTITY"})
+    assert filtered.status_code == 200
+    rows = filtered.json()["data"]["results"]
+    assert len(rows) == 1
+    assert rows[0]["category"] == "KYC & IDENTITY"
+
+
+@pytest.mark.django_db
 def test_agreements_list_supports_category_filter():
     u = _member_user("+919887766500")
     client = APIClient()

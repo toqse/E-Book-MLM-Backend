@@ -123,8 +123,10 @@ def create_checkout_order(
     if sponsor_code:
         slot_code = SponsorSlotService.validate_code(sponsor_code.strip(), redeemer=user)
         if slot_code:
-            discount = total
-            total = Decimal("0")
+            # Sponsor slot discounts ONE ebook purchase.
+            # Single-ebook checkout includes gateway too.
+            discount = min(total, (base + gst + gateway).quantize(Decimal("0.01")))
+            total = (total - discount).quantize(Decimal("0.01"))
 
     bill = billing or normalize_billing_from_payload(None)
     order = Order.objects.create(
@@ -219,8 +221,16 @@ def create_checkout_order_from_cart(
     if sponsor_code:
         slot_code = SponsorSlotService.validate_code(sponsor_code.strip(), redeemer=user)
         if slot_code:
-            discount = total
-            total = Decimal("0")
+            # Sponsor slot discounts ONE ebook purchase in the cart.
+            # If the cart contains only ONE ebook, discount includes gateway too (net payable becomes 0).
+            # If the cart contains multiple ebooks, gateway remains payable once per order.
+            first_ebook_base = Decimal(str(ebooks[0].price)).quantize(Decimal("0.01"))
+            first_ebook_gst = (first_ebook_base * gst_rate).quantize(Decimal("0.01"))
+            unit_discount = (first_ebook_base + first_ebook_gst).quantize(Decimal("0.01"))
+            if len(ebooks) == 1:
+                unit_discount = (unit_discount + gateway).quantize(Decimal("0.01"))
+            discount = min(total, unit_discount)
+            total = (total - discount).quantize(Decimal("0.01"))
 
     bill = billing or normalize_billing_from_payload(None)
     first_ebook = ebooks[0]

@@ -78,7 +78,7 @@ def test_finalize_order_creates_gst_invoice_pdf(system_config):
 
 
 @pytest.mark.django_db
-def test_user_orders_lists_pdf_url(system_config):
+def test_user_orders_lists_invoice_url(system_config):
     user = User.objects.create_user(
         login_identifier="+919666666666",
         password="pw",
@@ -128,8 +128,15 @@ def test_user_orders_lists_pdf_url(system_config):
     assert hit["purchased_at"] is not None
     assert hit["ebook_title"] == "List Book"
     assert hit["thumbnail_url"] is None
-    assert hit["pdf_url"] is not None
-    assert hit["pdf_url"].startswith("http://testserver/media/")
+    assert hit["invoice_url"] is not None
+    assert hit["invoice_url"].startswith("http://testserver/api/v1/user/orders/")
+
+    # Invoice endpoint should force a download (Content-Disposition: attachment)
+    r2 = client.get(hit["invoice_url"])
+    assert r2.status_code == 200, r2.content
+    assert r2["Content-Type"].startswith("application/pdf")
+    disp = r2.get("Content-Disposition") or ""
+    assert "attachment" in disp.lower()
 
 
 @pytest.mark.django_db

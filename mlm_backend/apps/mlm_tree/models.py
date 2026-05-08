@@ -23,6 +23,10 @@ class BinaryNode(models.Model):
         max_length=10, choices=Position.choices, null=True, blank=True
     )
     level = models.PositiveIntegerField(default=1)
+    # Cached subtree sizes (node counts) for fast weak-leg reporting and lists.
+    # These counts exclude the node itself: they represent the size of the left/right child subtrees.
+    left_subtree_size = models.PositiveIntegerField(default=0, db_index=True)
+    right_subtree_size = models.PositiveIntegerField(default=0, db_index=True)
     left_child = models.OneToOneField(
         "self",
         null=True,

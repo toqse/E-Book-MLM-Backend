@@ -15,6 +15,7 @@ from apps.commissions.tasks import process_commission_task
 from apps.payments.models import Order
 from apps.users.models import User
 
+from .models import BinaryNode
 from .services import BinaryTreeService
 
 
@@ -180,6 +181,83 @@ def sponsor_may_manual_place(sponsor: User, buyer: User, order: Order) -> tuple[
     return True, ""
 
 
+def admin_may_change_placement_in_cooloff(order: Order) -> tuple[bool, str]:
+    """
+    Admin placement changes are allowed only inside the refund/cool-off window.
+    Falls back to paid_at + cfg.refund_window_days when refund_eligible_until is missing.
+    """
+    if not order or order.status != Order.Status.PAID:
+        return False, "Order is not paid"
+    cfg = get_system_config()
+    now = timezone.now()
+    cutoff = order.refund_eligible_until
+    if cutoff is None and order.paid_at:
+        cutoff = order.paid_at + timedelta(days=cfg.refund_window_days)
+    if cutoff is None:
+        return False, "Cool-off window unavailable for this order"
+    if now > cutoff:
+        return False, "Cool-off period ended"
+    return True, ""
+
+
+@transaction.atomic
+def admin_place_under_parent(
+    *,
+    order: Order,
+    parent_user: User,
+    leg: str,
+    actor: User,
+    audit_action: str = "placement.admin_place",
+) -> None:
+    """
+    Place (or move) the buyer under a specific parent member on the given leg.
+    Leaf-only moves are supported via admin_reverse_placement.
+    """
+    leg = (leg or "").strip().upper()
+    if leg not in (BinaryNode.Position.LEFT, BinaryNode.Position.RIGHT):
+        raise ValueError("leg must be LEFT or RIGHT")
+    buyer = order.user
+    if buyer.id == parent_user.id:
+        raise ValueError("Parent cannot be the buyer")
+    # Ensure parent exists in tree.
+    if not BinaryNode.objects.filter(user_id=parent_user.pk).exists():
+        BinaryTreeService.place_member_auto(parent_user, None, None)
+    parent_node = BinaryNode.objects.select_for_update().get(user_id=parent_user.pk)
+    # If buyer already placed, reverse first (leaf-only).
+    if hasattr(buyer, "binary_node"):
+        admin_reverse_placement(order=order, actor=actor)
+        order.refresh_from_db()
+    # Place buyer under selected parent leg (spill inside that leg).
+    target_parent, target_pos = BinaryTreeService._find_slot_prefer_leg(parent_node, leg)
+    BinaryTreeService._attach_under_parent(buyer, target_parent, target_pos)
+    order.placement_status = Order.PlacementStatus.PLACED_ADMIN
+    order.placement_resolved_at = timezone.now()
+    order.placement_leg_requested = leg
+    order.placement_failure_reason = None
+    order.save(
+        update_fields=[
+            "placement_status",
+            "placement_resolved_at",
+            "placement_leg_requested",
+            "placement_failure_reason",
+        ]
+    )
+    finalize_commissions_for_buyer(buyer)
+    write_audit(
+        audit_action,
+        actor=actor,
+        target_type="Order",
+        target_id=str(order.id),
+        payload={
+            "buyer_id": buyer.id,
+            "member_id": buyer.member_id,
+            "parent_user_id": parent_user.id,
+            "parent_member_id": parent_user.member_id,
+            "leg": leg,
+        },
+    )
+
+
 @transaction.atomic
 def admin_reverse_placement(*, order: Order, actor: User) -> None:
     buyer = order.user
@@ -194,14 +272,8 @@ def admin_reverse_placement(*, order: Order, actor: User) -> None:
         is_retail_purchase=False,
     ):
         CommissionEngine.reverse_commissions(o)
-    parent = node.parent
-    if parent:
-        if parent.left_child_id == node.id:
-            parent.left_child = None
-            parent.save(update_fields=["left_child"])
-        elif parent.right_child_id == node.id:
-            parent.right_child = None
-            parent.save(update_fields=["right_child"])
+    # Detach from parent + maintain cached subtree sizes.
+    BinaryTreeService.detach_leaf(node)
     node.delete()
     cfg = get_system_config()
     order.placement_status = Order.PlacementStatus.PENDING

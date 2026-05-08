@@ -8,7 +8,11 @@ from apps.common.responses import envelope_response
 from apps.payments.models import Order
 from apps.users.models import User
 
-from .placement import admin_reverse_placement, complete_placement_for_order
+from .placement import (
+    admin_may_change_placement_in_cooloff,
+    admin_reverse_placement,
+    complete_placement_for_order,
+ )
 
 
 @api_view(["GET"])
@@ -49,6 +53,9 @@ def admin_placement_reverse(request: Request, order_id: int):
     order = Order.objects.filter(pk=order_id).select_related("user").first()
     if not order:
         return envelope_response(None, message="Order not found", success=False, status=404)
+    ok, err = admin_may_change_placement_in_cooloff(order)
+    if not ok:
+        return envelope_response(None, message=err, success=False, status=400)
     try:
         with transaction.atomic():
             Order.objects.select_for_update().filter(pk=order.pk).first()
@@ -64,6 +71,9 @@ def admin_placement_reassign(request: Request, order_id: int):
     order = Order.objects.filter(pk=order_id).select_related("user").first()
     if not order:
         return envelope_response(None, message="Order not found", success=False, status=404)
+    ok, err = admin_may_change_placement_in_cooloff(order)
+    if not ok:
+        return envelope_response(None, message=err, success=False, status=400)
     leg = (request.data.get("leg") or "").strip().upper() or None
     strategy = (request.data.get("strategy") or "").strip().upper() or None
     if leg and leg not in ("LEFT", "RIGHT"):

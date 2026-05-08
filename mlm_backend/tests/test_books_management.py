@@ -296,6 +296,7 @@ _CATALOG_BOOK_KEYS = {
     "is_active",
 }
 _CATALOG_BOOK_KEYS_AUTHENTICATED = _CATALOG_BOOK_KEYS | {"is_already_purchased"}
+_CATALOG_BOOK_KEYS_ENROLLED = _CATALOG_BOOK_KEYS_AUTHENTICATED | {"pdf_url"}
 
 
 @pytest.mark.django_db
@@ -411,8 +412,9 @@ def test_my_enrolled_list_matches_public_catalog_shape_and_dedupes_ebooks():
     flat = _flatten_courses_catalog_results(d["results"])
     assert len(flat) == 2
     for b in flat:
-        assert set(b.keys()) == _CATALOG_BOOK_KEYS_AUTHENTICATED
+        assert set(b.keys()) == _CATALOG_BOOK_KEYS_ENROLLED
         assert b["is_already_purchased"] is True
+        assert b["pdf_url"]
 
     filtered = client.get("/api/v1/user/courses/enrolled/", {"category": "health"})
     assert filtered.json()["data"]["count"] == 1

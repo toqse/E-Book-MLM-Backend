@@ -215,6 +215,16 @@ class CommissionEngine:
                 user=sponsor, milestone_referrals=threshold
             ).exists():
                 continue
+            if not getattr(cfg, "auto_process_milestone_bonuses", True):
+                MilestoneRecord.objects.create(
+                    user=sponsor,
+                    milestone_referrals=threshold,
+                    bonus_amount=bonus,
+                    tds_deducted=Decimal("0"),
+                    net_bonus=Decimal("0"),
+                    status="PENDING",
+                )
+                return
             if sponsor.kyc_status != User.KYCStatus.VERIFIED:
                 MilestoneRecord.objects.create(
                     user=sponsor,

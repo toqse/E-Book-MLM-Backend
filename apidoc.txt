@@ -76,8 +76,8 @@ FLOWS (high level)
    - Purchase (direct buy): POST /api/v1/payments/create-order/ (Bearer) — ebook_id or ebook_slug (optional; both → id wins), sponsor_code / sponsor_slot_code, is_retail, optional billing_* snapshot fields for the GST invoice
    - Zero-amount path when valid sponsor slot; else Razorpay order (amount_paise, razorpay_order_id, key_id).
    - POST /api/v1/payments/verify/ (Bearer) — order_id + Razorpay payment id/signature; on success order is PAID, enrollment + GST invoice PDF generated when applicable
-   - GET /api/v1/user/orders/ (Bearer) — recent orders with amount_paid; PAID rows may include pdf_url (absolute URL to invoice PDF when available)
-   - GET /api/v1/user/orders/<id>/invoice/ (Bearer) — invoice_number + pdf_url for that order
+   - GET /api/v1/user/orders/ (Bearer) — payment-completed orders (PAID) i.e. purchased books history; may include invoice_url (absolute URL to download invoice PDF when available)
+   - GET /api/v1/user/orders/<id>/invoice/ (Bearer OR signed token) — downloads invoice PDF (Content-Disposition: attachment)
    - GET /api/v1/user/courses/enrolled/ — same grouped shape as GET /courses/ for published books you are enrolled in; optional category/language/search and pagination
    - GET /api/v1/user/courses/enrolled/<slug>/ | /enrolled/<id>/ — same body as GET /courses/<slug>|<id>/ (pdf_url + is_already_purchased); 403 if not enrolled
    - GET /api/v1/user/courses/<slug>/download/ — URL + expires_at (SAS in production)
@@ -280,6 +280,8 @@ MODULE: Admin agreements & compliance (/api/v1/admin/…)
 GET /api/v1/admin/agreements/
   Auth: Bearer + IsSuperAdmin.
   Lists all LegalDocument rows (inactive included).
+  Query (optional): category (case-insensitive exact match on document category).
+    Note: accepts loose alias like "KYC and IDENTITY" and normalizes to "KYC & IDENTITY" before filtering.
 
 POST /api/v1/admin/agreements/
   Auth: IsSuperAdmin.
@@ -468,6 +470,7 @@ GET /api/v1/admin/placements/pending/
 
 POST /api/v1/admin/placements/<order_id>/reverse/
   Auth: Bearer + IsAdminRole.
+  Cool-off: allowed only while now <= order.refund_eligible_until (refund window).
   Leaf-only: buyer must have a binary node with no left/right children.
   Reverses all credited commissions on that buyer’s PAID MLM orders, removes
     the binary node, resets this order’s placement to PENDING with a new
@@ -476,11 +479,99 @@ POST /api/v1/admin/placements/<order_id>/reverse/
 
 POST /api/v1/admin/placements/<order_id>/reassign/
   Auth: Bearer + IsAdminRole.
+  Cool-off: allowed only while now <= order.refund_eligible_until (refund window).
   Body: either "leg": "LEFT"|"RIGHT" (manual under sponsor) or "strategy":
     "LEFT_FIRST"|"RIGHT_FIRST"|"LONG_LEG"|"WEAK_LEG" (auto under sponsor).
   If buyer already placed: reverse (leaf-only) then place again with
     placement_status PLACED_ADMIN.
   Success: { "order_id", "status": "reassigned" }.
+
+
+MODULE: Admin — Binary Tree Management (/api/v1/admin/binary-tree/*)
+--------------------------------------------------------------------------------
+These endpoints are UI-oriented and designed to avoid N+1 queries. All list
+endpoints support pagination and use cached binary subtree counters where applicable.
+
+GET /api/v1/admin/binary-tree/dashboard/
+  Auth: Bearer + IsAdminRole.
+  Success data: {
+    "now": "<iso>",
+    "config": { "refund_window_days", "placement_manual_window_hours", "auto_placement_strategy" },
+    "cards": { "pending_placements", "unplaced_members", "empty_slots", "imbalanced_ratio_gt_3_1" }
+  }
+
+GET /api/v1/admin/binary-tree/placements/pending/
+  Auth: Bearer + IsAdminRole.
+  Query: q (optional), page (default 1), page_size (default 50, max 200).
+  Success data: {
+    "results": [
+      {
+        "order_id", "order_number",
+        "buyer": { "user_id", "member_id", "full_name", "joined_at"|null },
+        "sponsor"|null: { "user_id", "member_id", "full_name" },
+        "placement_status", "placement_deadline_at"|null, "hours_remaining"|null
+      }, ...
+    ],
+    "count", "page", "page_size"
+  }
+
+GET /api/v1/admin/binary-tree/tree/
+  Auth: Bearer + IsAdminRole.
+  Query:
+    - anchor_member_id: optional member_id (anchors the returned tree at that member)
+    - depth: optional int (default 2, max 10)
+  Example:
+    - /api/v1/admin/binary-tree/tree/?anchor_member_id=TQ10021&depth=4
+  Success:
+    - when anchor_member_id provided: same shape as member nested tree payload
+      (see team_services.nested_tree_at_anchor_user), depth-limited.
+    - otherwise: { "roots": [ <nested tree payload>... ], "depth": <int> } (up to 50 roots).
+
+GET /api/v1/admin/binary-tree/members/
+  Auth: Bearer + IsAdminRole.
+  Query: q (optional), level (optional int), page, page_size.
+  Success data: {
+    "results": [
+      {
+        "user_id", "member_id", "full_name", "level",
+        "referral_parent"|null: { "user_id", "member_id", "full_name" },
+        "leg_position": "LEFT"|"RIGHT"|null,
+        "left_dl", "right_dl",
+        "weak_leg": "LEFT"|"RIGHT"|"BALANCED",
+        "status": { "account_status", "kyc_status", "is_active" }
+      }, ...
+    ],
+    "count", "page", "page_size"
+  }
+
+GET /api/v1/admin/binary-tree/weak-leg-report/
+  Auth: Bearer + IsAdminRole.
+  Query: page, page_size.
+  Success data: {
+    "cards": {
+      "members_with_weak_leg", "imbalanced_ratio_gt_3_1",
+      "pending_placements", "empty_slots", "potential_passive_unit"
+    },
+    "results": [
+      {
+        "member": { "user_id", "member_id", "full_name", "level" },
+        "strong_leg_count", "weak_leg_count", "weak_leg",
+        "imbalance_ratio"|null,
+        "suggested_action",
+        "potential_passive_unit"
+      }, ...
+    ],
+    "count", "page", "page_size"
+  }
+
+POST /api/v1/admin/binary-tree/placements/<order_id>/place/
+  Auth: Bearer + IsAdminRole.
+  Cool-off: allowed only while now <= order.refund_eligible_until (refund window).
+  Body: { "parent_member_id": "<member_id>", "leg": "LEFT"|"RIGHT" }
+  Behavior:
+    - If buyer already placed: reverse (leaf-only) then place under the chosen parent/leg (spill within that leg).
+    - Sets placement_status PLACED_ADMIN and reprocesses commissions for the buyer’s PAID MLM orders.
+  Success: { "order_id", "status": "placed", "parent_member_id", "leg" }
 
 
 MODULE: User — Earnings bundle (preferred for My Earnings UI)
@@ -779,15 +870,66 @@ GET /api/v1/user/sponsor-slots/
     ]
   }
 
+GET /api/v1/user/sponsor-slots/bundle/
+  Auth: Bearer.
+  Query (optional):
+    - history_page (default 1)
+    - history_page_size (default 10; max 100)
+  Success data: {
+    "summary": {
+      "active_count", "redeemed_count", "expired_count",
+      "slot_expiry_days",
+      "redeem_commission_amount"
+    },
+    "active_slots": [
+      { "code", "status", "shared_via", "issued_at", "expires_at", "days_remaining" }, ...
+    ],
+    "history": {
+      "count", "page", "page_size",
+      "results": [
+        { "code", "issued_at", "expires_at", "status",
+          "redeemed_by": { "full_name", "member_id" } | null,
+          "commission_amount" | null
+        }, ...
+      ]
+    }
+  }
+  Notes:
+    - active_slots include only valid, unredeemed, unexpired codes (ACTIVE/SHARED + expires_at > now).
+    - commission_amount is returned only when status is REDEEMED (matches direct_commission config).
+
 POST /api/v1/user/sponsor-slots/<code>/share/
   Body: optional { "channel": "COPY" } — stored as shared_via; marks code SHARED.
   Success: { "ok": true }; 404 if code not yours.
 
 POST /api/v1/sponsor-slots/validate/
-  Auth: None.
-  Body: { "code": "..." } or { "sponsor_code": "..." }
-  Success: { "valid": true, "issuer": "<full_name>" }
-  Errors: 400 invalid/expired.
+  Auth: Bearer.
+  Body:
+    - { "code": "..." } or { "sponsor_code": "..." }
+    - Optional pricing context:
+      - single ebook preview: include { "ebook_id": <int> } or { "ebook_slug": "<slug>" }
+      - cart preview: omit ebook_id/ebook_slug (uses authenticated user's cart)
+  Success data: {
+    "valid": true,
+    "issuer": "<full_name>",
+    "totals": null | {
+      "flow": "single" | "cart",
+      "taxable_base", "gst_amount", "gateway_charge", "total",
+      "discount_amount", "net_payable",
+      "amount_paise"
+    }
+  }
+  Errors:
+    - 400 invalid/expired (still returns totals when context is resolvable)
+    - 400 cart_empty (when no ebook_id/slug and cart has no items)
+    - 404 book not found/unpublished (when ebook_id/slug provided and not found)
+  Notes:
+    - Preview-only: does not reserve or redeem the code; checkout/create-order re-validates.
+    - Sponsor slot discount applies to ONE ebook purchase (not the entire cart):
+      - single ebook flow: discounts base + GST + gateway (typically 241.72 for a ₹200 book)
+      - cart flow:
+        - if cart has 1 ebook: discounts base + GST + gateway (net payable becomes 0)
+        - if cart has 2+ ebooks: discounts base + GST of ONE ebook (typically 236.00 for a ₹200 book); gateway remains payable once per cart order.
 
 GET /api/v1/admin/sponsor-slots/
   Auth: Bearer + IsAdminRole.
@@ -1032,24 +1174,22 @@ GET /api/v1/user/orders/
         "ebook_title": "<string|null>",
         "thumbnail_url": "<absolute HTTPS/HTTP URL string|null>",
         "amount_paid": "<decimal string>",
-        "pdf_url": "<absolute HTTPS/HTTP URL string|null>"
+        "invoice_url": "<absolute HTTPS/HTTP URL string|null>"
       },
-      ... newest first, max 50
+      ... newest first, max 50 (PAID orders only)
     ]
   }
-  pdf_url:
+  invoice_url:
     • null for non-PAID orders, or when no GST invoice exists yet.
-    • For PAID orders: absolute URL to the invoice PDF file when generation succeeded (server may generate
+    • For PAID orders: absolute URL to an endpoint that downloads the invoice PDF (server may generate
       on demand if missing). null if PDF file is still unavailable (e.g. generation error).
-    • Clients must serve/open media URLs per deployment (e.g. SERVE_MEDIA=1 locally, CDN/nginx in prod).
+    • Includes a short-lived signed `token` query param so it can be opened in a browser without sending Authorization header.
 
 GET /api/v1/user/orders/<id>/invoice/
-  Auth: Bearer; <id> is the order primary key for the authenticated user’s order.
-  Success data: {
-    "invoice_number": "<string>",
-    "pdf_url": "<absolute URL|null — prefers FileField-backed invoice PDF; legacy DB pdf_url column if no file>"
-  }
+  Auth: Bearer OR `?token=<signed>`; <id> is the order primary key.
+  Success: returns `application/pdf` with `Content-Disposition: attachment; filename="invoice-<invoice_number>.pdf"`.
   Errors: 404 — order not found, not yours, or no GST invoice yet.
+          401 — missing/invalid/expired token when not authenticated.
 
 Invoice PDF branding (operators): optional environment variables COMPANY_NAME, GST_NUMBER,
   COMPANY_ADDRESS, COMPANY_PHONE, COMPANY_EMAIL, COMPANY_WEBSITE,
@@ -1195,8 +1335,57 @@ GET/PATCH /api/v1/admin/config/
     "is_repurchase_commission_allowed" (boolean, default false) — when false, the
     commission engine does not distribute MLM commissions on a buyer's second and
     later PAID non-retail orders (first such order still commissions normally).
+    "auto_process_milestone_bonuses" (boolean, default true) — when false, milestone
+    bonuses are created as PENDING records and must be processed by admin via the
+    Milestone Bonuses queue endpoints.
   PATCH body: any subset of the above; sets updated_by.
   Success PATCH: { "ok": true }
+
+
+MODULE: Admin — Milestone bonuses (/api/v1/admin/milestones*)
+--------------------------------------------------------------------------------
+GET /api/v1/admin/milestones/
+  Auth: Bearer + IsAdminRole.
+  Query: page, page_size — optional; applies to member_progress_tracker (default page_size=10).
+  Success data: {
+    "config": { auto_process_milestone_bonuses, earning_cap, tds_194r_rate, tds_cash_trigger },
+    "cards": { monthly_liability_gross, paid_this_month_net, achievers_this_month },
+    "tiers": [ { tier:"T1".."T5", threshold:<int>, bonus_gross:"<decimal>" }, ... ],
+    "member_progress_tracker": {
+      "results": [ { user_id, member_id, full_name, current_referrals, next_target }, ... ],
+      "count", "page", "page_size", "total_pages"
+    }
+  }
+
+GET /api/v1/admin/milestones/queue/
+  Auth: Bearer + IsAdminRole.
+  Query:
+    - status: optional (default PENDING)
+    - tier: optional alias of milestone_referrals (int threshold)
+    - milestone_referrals: optional (int threshold)
+    - q: optional search by member full_name or member_id; if numeric, also matches user_id or record_id.
+    - page, page_size
+  Success data: {
+    "results": [
+      { record_id, user_id, member_id, full_name, tier_threshold, tier, achieved_at,
+        bonus_gross, status }, ...
+    ],
+    "count", "page", "page_size", "total_pages"
+  }
+
+POST /api/v1/admin/milestones/queue/<record_id>/process/
+  Auth: Bearer + IsAdminRole.
+  Processes a single PENDING milestone record:
+    - credits wallet (subject to KYC + cap)
+    - creates WalletTransaction reference "MILESTONE-<threshold>"
+    - marks MilestoneRecord status CREDITED (or HELD when KYC not verified).
+  Success data: { processed_ids:[<id>], skipped:[] }
+  Error data: { processed_ids:[], skipped:[{id, reason}] }
+
+POST /api/v1/admin/milestones/queue/process/
+  Auth: Bearer + IsAdminRole.
+  Body: { "record_ids": [1,2,3] }
+  Success data: { processed_ids:[...], skipped:[{id, reason}, ...] }
 
 GET /api/v1/admin/reports/tds/
   Auth: IsFinanceAdmin. Stub: { "fy", "total" }.

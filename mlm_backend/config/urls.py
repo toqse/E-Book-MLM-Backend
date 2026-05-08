@@ -7,11 +7,13 @@ from apps.agreements import views as agreement_views
 from apps.authentication import views as auth_views
 from apps.cart import views as cart_views
 from apps.commissions import user_views as comm_views
+from apps.commissions import admin_milestone_views as admin_ms_views
 from apps.courses import views as course_views
 from apps.banners import views as banner_views
 from apps.payments import views as pay_views
 from apps.sponsor_slots import views as slot_views
 from apps.mlm_tree import admin_placement_views as mlm_placement_admin
+from apps.mlm_tree import admin_binary_tree_views as mlm_tree_admin
 from apps.mlm_tree import user_views as mlm_tree_user_views
 from apps.users import member_views as user_views
 from apps.wallet import views as wallet_views
@@ -63,6 +65,22 @@ urlpatterns = [
         "api/v1/admin/placements/<int:order_id>/reassign/",
         mlm_placement_admin.admin_placement_reassign,
     ),
+    # Admin — Binary tree management (UI-oriented)
+    path("api/v1/admin/binary-tree/dashboard/", mlm_tree_admin.admin_binary_tree_dashboard),
+    path(
+        "api/v1/admin/binary-tree/placements/pending/",
+        mlm_tree_admin.admin_binary_tree_pending_placements,
+    ),
+    path("api/v1/admin/binary-tree/tree/", mlm_tree_admin.admin_binary_tree_tree_view),
+    path("api/v1/admin/binary-tree/members/", mlm_tree_admin.admin_binary_tree_members_list),
+    path(
+        "api/v1/admin/binary-tree/weak-leg-report/",
+        mlm_tree_admin.admin_binary_tree_weak_leg_report,
+    ),
+    path(
+        "api/v1/admin/binary-tree/placements/<int:order_id>/place/",
+        mlm_tree_admin.admin_binary_tree_place_under_parent,
+    ),
     path("api/v1/admin/tree/user/<int:user_id>/", user_views.admin_tree_user),
     path("api/v1/admin/tree/platform/", user_views.admin_tree_platform),
     # Commissions & earnings bundles
@@ -76,6 +94,17 @@ urlpatterns = [
     path("api/v1/admin/commissions/force-credit/", comm_views.admin_force_credit),
     path("api/v1/admin/commissions/tds-report/", comm_views.admin_tds_report),
     path("api/v1/admin/commissions/export/", comm_views.admin_commissions_export),
+    # Admin — Milestone bonuses
+    path("api/v1/admin/milestones/", admin_ms_views.admin_milestones_dashboard),
+    path("api/v1/admin/milestones/queue/", admin_ms_views.admin_milestones_queue),
+    path(
+        "api/v1/admin/milestones/queue/<int:record_id>/process/",
+        admin_ms_views.admin_milestones_queue_process_one,
+    ),
+    path(
+        "api/v1/admin/milestones/queue/process/",
+        admin_ms_views.admin_milestones_queue_process_bulk,
+    ),
     # Wallet & payouts bundle
     path("api/v1/user/payouts/", wallet_views.user_payouts_bundle),
     path("api/v1/user/wallet/", wallet_views.wallet_me),
@@ -99,6 +128,7 @@ urlpatterns = [
     path("api/v1/admin/withdrawals/export/", wallet_views.admin_withdrawals_export),
     # Sponsor slots
     path("api/v1/user/sponsor-slots/", slot_views.my_slots),
+    path("api/v1/user/sponsor-slots/bundle/", slot_views.bundle),
     path("api/v1/user/sponsor-slots/<str:code>/share/", slot_views.share_code),
     path("api/v1/sponsor-slots/validate/", slot_views.validate_public),
     path("api/v1/admin/sponsor-slots/", slot_views.admin_slots),

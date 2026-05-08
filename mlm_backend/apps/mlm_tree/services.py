@@ -1,6 +1,7 @@
 from collections import deque
 
 from django.db import transaction
+from django.db.models import F
 
 from apps.admin_panel.models import SystemConfig
 from apps.users.models import User
@@ -10,6 +11,30 @@ from .models import BinaryNode
 
 class BinaryTreeService:
     """Binary tree placement: spillover, manual leg preference, and auto strategies."""
+
+    @staticmethod
+    def _bump_ancestor_subtree_counts(parent: BinaryNode | None, *, child_position: str, delta: int) -> None:
+        """
+        Increment/decrement cached subtree sizes up the ancestor chain.
+
+        `child_position` is the position (LEFT/RIGHT) of the child subtree under `parent` that changed by `delta` nodes.
+        """
+        if not parent or delta == 0:
+            return
+        pos = BinaryNode.Position
+        cur: BinaryNode | None = parent
+        from_pos: str | None = child_position
+        while cur and from_pos in (pos.LEFT, pos.RIGHT):
+            if from_pos == pos.LEFT:
+                BinaryNode.objects.filter(pk=cur.pk).update(left_subtree_size=F("left_subtree_size") + delta)
+            else:
+                BinaryNode.objects.filter(pk=cur.pk).update(right_subtree_size=F("right_subtree_size") + delta)
+            if not cur.parent_id:
+                break
+            # Move one level up; the subtree change is on the side where `cur` sits under its parent.
+            prev = cur
+            cur = BinaryNode.objects.only("id", "parent_id", "position").get(pk=prev.parent_id)
+            from_pos = prev.position
 
     @staticmethod
     def subtree_node_count(node: BinaryNode | None) -> int:
@@ -158,7 +183,26 @@ class BinaryTreeService:
         else:
             parent.right_child = node
             parent.save(update_fields=["right_child"])
+        # Maintain cached subtree counts (node counts beneath each ancestor side).
+        BinaryTreeService._bump_ancestor_subtree_counts(parent, child_position=position, delta=1)
         return node
+
+    @staticmethod
+    def detach_leaf(node: BinaryNode) -> None:
+        """
+        Detach a leaf node from its parent and decrement cached subtree counts.
+        Caller must ensure leaf-only constraint and run inside a transaction.
+        """
+        parent = node.parent
+        if parent:
+            if parent.left_child_id == node.id:
+                parent.left_child = None
+                parent.save(update_fields=["left_child"])
+                BinaryTreeService._bump_ancestor_subtree_counts(parent, child_position=BinaryNode.Position.LEFT, delta=-1)
+            elif parent.right_child_id == node.id:
+                parent.right_child = None
+                parent.save(update_fields=["right_child"])
+                BinaryTreeService._bump_ancestor_subtree_counts(parent, child_position=BinaryNode.Position.RIGHT, delta=-1)
 
     @staticmethod
     @transaction.atomic

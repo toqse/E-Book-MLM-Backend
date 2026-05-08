@@ -53,6 +53,8 @@ def _public_catalog_book_payload(
     request,
     b: EBook,
     enrolled_book_ids: set[int] | None = None,
+    *,
+    include_pdf_url: bool = False,
 ) -> dict:
     payload = {
         "id": b.id,
@@ -70,6 +72,10 @@ def _public_catalog_book_payload(
     }
     if enrolled_book_ids is not None:
         payload["is_already_purchased"] = b.pk in enrolled_book_ids
+        if include_pdf_url and payload["is_already_purchased"]:
+            # Only include the full PDF URL for enrolled items.
+            _preview_url, full_url = _preview_full_urls(request, b)
+            payload["pdf_url"] = full_url
     return payload
 
 
@@ -169,11 +175,18 @@ def _group_books_slice_by_category(
     books: list[EBook],
     request,
     enrolled_book_ids: set[int] | None = None,
+    *,
+    include_pdf_url: bool = False,
 ) -> list[dict]:
     """Preserve order within `books`; merge consecutive rows with the same category string."""
     out: list[dict] = []
     for b in books:
-        payload = _public_catalog_book_payload(request, b, enrolled_book_ids)
+        payload = _public_catalog_book_payload(
+            request,
+            b,
+            enrolled_book_ids,
+            include_pdf_url=include_pdf_url,
+        )
         if out and out[-1]["category"] == b.category:
             out[-1]["books"].append(payload)
         else:
@@ -181,7 +194,7 @@ def _group_books_slice_by_category(
     return out
 
 
-def _paginated_grouped_course_catalog(qs, request) -> dict:
+def _paginated_grouped_course_catalog(qs, request, *, include_pdf_url: bool = False) -> dict:
     qs = qs.order_by("category", "-id")
     page = _parse_positive_int(request.query_params.get("page"), 1, min_v=1, max_v=10_000)
     page_size = _parse_positive_int(request.query_params.get("page_size"), 20, min_v=1, max_v=100)
@@ -202,7 +215,12 @@ def _paginated_grouped_course_catalog(qs, request) -> dict:
             if page_ids
             else set()
         )
-    data = _group_books_slice_by_category(page_objs, request, enrolled_for_page)
+    data = _group_books_slice_by_category(
+        page_objs,
+        request,
+        enrolled_for_page,
+        include_pdf_url=include_pdf_url,
+    )
     return {
         "results": data,
         "count": total_count,
@@ -432,7 +450,7 @@ def my_enrollments(request):
     ebook_ids = Enrollment.objects.filter(user=request.user).values_list("ebook_id", flat=True)
     qs = EBook.objects.filter(pk__in=ebook_ids, status=EBook.Status.PUBLISHED)
     qs = _apply_course_list_filters(qs, request)
-    return envelope_response(_paginated_grouped_course_catalog(qs, request))
+    return envelope_response(_paginated_grouped_course_catalog(qs, request, include_pdf_url=True))
 
 
 @api_view(["GET"])

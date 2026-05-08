@@ -420,15 +420,20 @@ def user_dashboard(request: Request):
     for tx in WalletTransaction.objects.filter(user=u).order_by("-created_at").only(
         "tx_type", "amount", "reference", "created_at"
     )[:10]:
+        # Avoid duplicating commission/milestone events that are already included via earnings ledger.
+        # Wallet transactions for those events use deterministic references from commissions engine.
+        ref = (tx.reference or "").strip()
+        if ref.startswith(("COMM-", "MILESTONE-", "REV-")):
+            continue
         title = "Wallet credit" if tx.tx_type == WalletTransaction.TxType.CREDIT else "Wallet debit"
         activity.append(
             _activity_row(
                 at=tx.created_at,
                 kind="WALLET",
                 title=title,
-                subtitle=tx.reference or None,
+                subtitle=ref or None,
                 amount=tx.amount,
-                meta={"tx_type": tx.tx_type, "reference": tx.reference},
+                meta={"tx_type": tx.tx_type, "reference": ref},
             )
         )
 

@@ -31,7 +31,7 @@ def _random_referral_code() -> str:
 def allocate_member_identity() -> tuple[str, str, str]:
     last = (
         User.objects.select_for_update()
-        .filter(member_id__startswith="MLM")
+        .filter(member_id__startswith="JST")
         .order_by("-member_id")
         .first()
     )
@@ -39,7 +39,7 @@ def allocate_member_identity() -> tuple[str, str, str]:
         next_num = int(last.member_id[3:]) + 1
     else:
         next_num = 1
-    member_id = f"MLM{next_num:06d}"
+    member_id = f"JST{next_num:06d}"
     referral_code = _random_referral_code()
     while _is_reserved_referral_code(referral_code) or User.objects.filter(
         referral_code=referral_code

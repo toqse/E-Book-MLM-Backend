@@ -49,6 +49,7 @@ def _member(phone: str, sponsor: User | None = None) -> User:
 
 def _paid_order(user: User, **kwargs) -> Order:
     suffix = kwargs.pop("suffix", "x")
+    now = timezone.now()
     defaults = dict(
         user=user,
         order_number=f"ORD-P-{user.id}-{suffix}",
@@ -60,6 +61,8 @@ def _paid_order(user: User, **kwargs) -> Order:
         amount_paid=Decimal("241.72"),
         is_retail_purchase=False,
         status=Order.Status.PAID,
+        paid_at=now,
+        refund_eligible_until=now + timedelta(days=7),
     )
     defaults.update(kwargs)
     return Order.objects.create(**defaults)

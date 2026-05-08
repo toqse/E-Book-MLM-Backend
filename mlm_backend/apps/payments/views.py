@@ -3,6 +3,8 @@ import logging
 import secrets
 
 from django.conf import settings
+from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
+from django.http import FileResponse
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -24,6 +26,8 @@ from .services import (
 )
 
 logger = logging.getLogger(__name__)
+_invoice_link_signer = TimestampSigner(salt="payments.invoice.download")
+_INVOICE_LINK_MAX_AGE_SECONDS = 60 * 60 * 24  # 24h
 
 
 def _invoice_pdf_url(request, inv: GSTInvoice):
@@ -168,7 +172,11 @@ def webhook(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_orders(request):
-    qs = Order.objects.filter(user=request.user).select_related("ebook").order_by("-id")[:50]
+    qs = (
+        Order.objects.filter(user=request.user, status=Order.Status.PAID)
+        .select_related("ebook")
+        .order_by("-id")[:50]
+    )
     data = []
     for o in qs:
         purchased_at = o.paid_at or o.created_at
@@ -180,26 +188,48 @@ def my_orders(request):
             "ebook_title": o.ebook.title if o.ebook else None,
             "thumbnail_url": _ebook_thumbnail_url(request, o.ebook),
             "amount_paid": str(o.amount_paid),
-            "pdf_url": None,
+            "invoice_url": None,
         }
-        if o.status == Order.Status.PAID:
-            try:
-                inv = GSTInvoice.objects.filter(order_id=o.id).first()
-                if inv:
-                    ensure_gst_invoice_pdf(o)
-                    inv.refresh_from_db()
-                    row["pdf_url"] = _invoice_pdf_url(request, inv)
-            except Exception:
-                logger.exception("my_orders_paid_invoice_failed order_id=%s", o.pk)
+        try:
+            inv = GSTInvoice.objects.filter(order_id=o.id).first()
+            if inv:
+                ensure_gst_invoice_pdf(o)
+                inv.refresh_from_db()
+                token = _invoice_link_signer.sign(f"{request.user.id}:{o.id}")
+                row["invoice_url"] = request.build_absolute_uri(
+                    f"/api/v1/user/orders/{o.id}/invoice/?token={token}"
+                )
+        except Exception:
+            logger.exception("my_orders_paid_invoice_failed order_id=%s", o.pk)
         data.append(row)
     return envelope_response({"results": data})
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def order_invoice(request, pk: int):
-    o = Order.objects.filter(pk=pk, user=request.user).first()
-    inv = GSTInvoice.objects.filter(order_id=o.pk).first() if o else None
+    o = None
+    inv = None
+
+    if getattr(request, "user", None) and request.user.is_authenticated:
+        o = Order.objects.filter(pk=pk, user=request.user).first()
+        inv = GSTInvoice.objects.filter(order_id=o.pk).first() if o else None
+    else:
+        token = (request.query_params.get("token") or "").strip()
+        if not token:
+            return envelope_response(None, message="Unauthorized", success=False, status=401)
+        try:
+            payload = _invoice_link_signer.unsign(
+                token, max_age=_INVOICE_LINK_MAX_AGE_SECONDS
+            )
+            user_id_s, order_id_s = payload.split(":", 1)
+            if int(order_id_s) != int(pk):
+                raise BadSignature("token does not match order")
+            o = Order.objects.filter(pk=pk, user_id=int(user_id_s)).first()
+            inv = GSTInvoice.objects.filter(order_id=o.pk).first() if o else None
+        except (BadSignature, SignatureExpired, ValueError):
+            return envelope_response(None, message="Unauthorized", success=False, status=401)
+
     if not o or not inv:
         return envelope_response(None, message="No invoice", success=False, status=404)
     try:
@@ -207,9 +237,25 @@ def order_invoice(request, pk: int):
         inv.refresh_from_db()
     except Exception:
         logger.exception("order_invoice_pdf_prepare_failed order_id=%s", o.pk)
-    return envelope_response(
-        {"invoice_number": inv.invoice_number, "pdf_url": _invoice_pdf_url(request, inv)}
-    )
+
+    names = getattr(inv.pdf_file, "name", "") or ""
+    if not names.strip():
+        # Fall back to legacy URL if no generated/stored file exists.
+        legacy = _invoice_pdf_url(request, inv)
+        if legacy:
+            return envelope_response(
+                {"invoice_number": inv.invoice_number, "invoice_url": legacy}
+            )
+        return envelope_response(None, message="No invoice", success=False, status=404)
+
+    try:
+        fh = inv.pdf_file.open("rb")
+    except Exception:
+        logger.exception("order_invoice_pdf_open_failed order_id=%s", o.pk)
+        return envelope_response(None, message="Invoice unavailable", success=False, status=500)
+
+    filename = f"invoice-{inv.invoice_number or o.order_number or o.pk}.pdf"
+    return FileResponse(fh, as_attachment=True, filename=filename, content_type="application/pdf")
 
 
 @api_view(["POST"])

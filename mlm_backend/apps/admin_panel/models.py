@@ -29,6 +29,10 @@ class SystemConfig(models.Model):
         default=False,
         help_text="If false, no MLM commissions on a buyer's 2nd+ paid non-retail orders.",
     )
+    auto_process_milestone_bonuses = models.BooleanField(
+        default=True,
+        help_text="If true, milestone bonuses are credited automatically upon achievement; if false, they enter an admin queue for manual processing.",
+    )
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,

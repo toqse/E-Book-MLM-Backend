@@ -44,6 +44,29 @@ from .services import (
 
 _logger = logging.getLogger(__name__)
 
+def _normalize_category_query(raw: str) -> str:
+    """
+    Map a user-provided category query to a canonical AgreementCategory value.
+
+    Used for GET list filters; admin create/update uses serializer validation.
+    """
+
+    s = (raw or "").strip()
+    if not s:
+        return ""
+
+    def _norm(v: str) -> str:
+        v = (v or "").casefold()
+        v = v.replace("&", " and ")
+        cleaned = "".join(ch if ch.isalnum() else " " for ch in v)
+        return " ".join(cleaned.split())
+
+    needle = _norm(s)
+    for choice in AgreementCategory.values:
+        if needle == _norm(choice):
+            return choice
+    return s
+
 
 def _agreement_otp_payload(rec: OTPRecord) -> dict:
     data: dict = {"expires_in_seconds": 600}
@@ -345,6 +368,9 @@ def compliance_submit(request: Request):
 def admin_legal_documents(request: Request):
     if request.method == "GET":
         qs = LegalDocument.objects.order_by("-id")
+        category = _normalize_category_query(request.query_params.get("category") or "")
+        if category:
+            qs = qs.filter(category__iexact=category)
         ser = LegalDocumentAdminSerializer(
             qs, many=True, context={"request": request}
         )
