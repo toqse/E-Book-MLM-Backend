@@ -18,6 +18,10 @@ from apps.users import team_services
 from .models import BinaryNode
 from .placement import admin_may_change_placement_in_cooloff, admin_place_under_parent
 
+# Tree view: depth limits response size and DB work (full binary tree grows ~2^(d+1) nodes).
+ADMIN_BINARY_TREE_DEPTH_DEFAULT = 2
+ADMIN_BINARY_TREE_DEPTH_MAX = 10
+
 
 def _parse_int(raw: Any, *, default: int, lo: int, hi: int) -> int:
     try:
@@ -179,14 +183,36 @@ def admin_binary_tree_pending_placements(request: Request):
 @api_view(["GET"])
 @permission_classes([IsAdminRole])
 def admin_binary_tree_tree_view(request: Request):
-    depth = _parse_int(request.query_params.get("depth"), default=2, lo=0, hi=10)
+    raw_depth = request.query_params.get("depth")
+    depth_requested: int | None = None
+    if raw_depth is not None and str(raw_depth).strip() != "":
+        try:
+            depth_requested = int(raw_depth)
+        except (TypeError, ValueError):
+            depth_requested = None
+    depth_effective = _parse_int(
+        raw_depth,
+        default=ADMIN_BINARY_TREE_DEPTH_DEFAULT,
+        lo=0,
+        hi=ADMIN_BINARY_TREE_DEPTH_MAX,
+    )
+    depth_capped = depth_requested is not None and depth_requested != depth_effective
     anchor_member_id = (request.query_params.get("anchor_member_id") or "").strip()
+
+    meta = {
+        "depth_requested": depth_requested,
+        "depth_effective": depth_effective,
+        "depth_max": ADMIN_BINARY_TREE_DEPTH_MAX,
+        "depth_capped": depth_capped,
+    }
 
     if anchor_member_id:
         anchor = User.objects.filter(member_id__iexact=anchor_member_id).first()
         if not anchor:
             return envelope_response(None, message="Anchor not found", success=False, status=404)
-        payload = team_services.nested_tree_at_anchor_user(anchor, depth)
+        payload = team_services.nested_tree_at_anchor_user(anchor, depth_effective)
+        if isinstance(payload, dict):
+            payload = {**payload, "tree_query": meta}
         return envelope_response(payload)
 
     roots = (
@@ -194,8 +220,11 @@ def admin_binary_tree_tree_view(request: Request):
         .select_related("user")
         .order_by("id")[:50]
     )
-    data = [team_services.nested_tree_at_anchor_user(r.user, depth) for r in roots]
-    return envelope_response({"roots": data, "depth": depth})
+    data = [team_services.nested_tree_at_anchor_user(r.user, depth_effective) for r in roots]
+    for item in data:
+        if isinstance(item, dict):
+            item["tree_query"] = meta
+    return envelope_response({"roots": data, "depth": depth_effective, "tree_query": meta})
 
 
 @api_view(["GET"])

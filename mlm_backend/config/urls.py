@@ -38,6 +38,11 @@ urlpatterns = [
     ),
     path("api/v1/agreements/send-otp/", agreement_views.agreement_send_otp),
     path("api/v1/agreements/verify/", agreement_views.agreement_verify),
+    path(
+        "api/v1/agreements/acceptance-proof/<uuid:acceptance_batch_id>/download/",
+        agreement_views.agreement_acceptance_proof_download,
+        name="agreement_acceptance_proof_download",
+    ),
     path("api/v1/auth/validate-referral/", auth_views.validate_referral),
     # Admin auth
     path("api/v1/admin/auth/login/", auth_views.admin_password_login),
@@ -131,9 +136,14 @@ urlpatterns = [
     path("api/v1/user/sponsor-slots/bundle/", slot_views.bundle),
     path("api/v1/user/sponsor-slots/<str:code>/share/", slot_views.share_code),
     path("api/v1/sponsor-slots/validate/", slot_views.validate_public),
-    path("api/v1/admin/sponsor-slots/", slot_views.admin_slots),
     path("api/v1/admin/sponsor-slots/flagged/", slot_views.admin_slots_flagged),
+    path("api/v1/admin/sponsor-slots/issue/", slot_views.admin_issue_slot),
+    path("api/v1/admin/sponsor-slots/audit-log/", slot_views.admin_audit_log),
     path("api/v1/admin/sponsor-slots/<str:code>/expire/", slot_views.admin_expire_code),
+    path("api/v1/admin/sponsor-slots/<str:code>/flag/", slot_views.admin_flag_code),
+    path("api/v1/admin/sponsor-slots/<str:code>/clear-flag/", slot_views.admin_clear_flag_code),
+    path("api/v1/admin/sponsor-slots/<str:code>/", slot_views.admin_slot_detail),
+    path("api/v1/admin/sponsor-slots/", slot_views.admin_slots),
     # Courses
     path("api/v1/courses/", course_views.list_ebooks),
     path("api/v1/courses/bestsellers/", course_views.bestsellers),

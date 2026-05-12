@@ -8,7 +8,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.admin_panel.utils import get_system_config
-from apps.commissions.milestone_tiers import MILESTONES
+from apps.commissions.milestone_tiers import get_milestones
 from apps.commissions.models import MilestoneRecord
 from apps.users.models import User
 from apps.wallet.models import Wallet
@@ -41,15 +41,16 @@ def _money(v: Decimal | int | float | None) -> str:
 
 def build_user_milestones_dashboard(user: User) -> dict[str, Any]:
     cfg = get_system_config()
+    milestones = get_milestones(cfg)
     wallet, _ = Wallet.objects.get_or_create(user_id=user.pk)
     count = int(getattr(user, "direct_referral_count", 0) or 0)
 
     records = list(MilestoneRecord.objects.filter(user=user).order_by("milestone_referrals"))
     by_threshold: dict[int, MilestoneRecord] = {r.milestone_referrals: r for r in records}
 
-    thresholds = [int(t[0]) for t in MILESTONES]
+    thresholds = [int(t[0]) for t in milestones]
 
-    total_tiers = len(MILESTONES)
+    total_tiers = len(milestones)
     milestones_completed = sum(
         1
         for th in thresholds
@@ -63,7 +64,7 @@ def build_user_milestones_dashboard(user: User) -> dict[str, Any]:
     tds_sum = sum(((r.tds_deducted or ZERO) for r in records), ZERO)
 
     remaining_potential = ZERO
-    for th, _, bonus in MILESTONES:
+    for th, _, bonus in milestones:
         th = int(th)
         if th not in by_threshold:
             remaining_potential += bonus
@@ -82,7 +83,7 @@ def build_user_milestones_dashboard(user: User) -> dict[str, Any]:
 
     # Smallest threshold not yet paid and count still below threshold → IN_PROGRESS
     in_progress_threshold: int | None = None
-    for th, _, _bonus in MILESTONES:
+    for th, _, _bonus in milestones:
         th = int(th)
         if th in by_threshold:
             continue
@@ -90,14 +91,14 @@ def build_user_milestones_dashboard(user: User) -> dict[str, Any]:
             in_progress_threshold = th
             break
 
-    milestone_bonus_sum_gross = sum(bonus for _th, _p, bonus in MILESTONES)
+    milestone_bonus_sum_gross = sum(bonus for _th, _p, bonus in milestones)
     cap = cfg.earning_cap or ZERO
     cap_pct = (
         float((milestone_bonus_sum_gross / cap) * 100) if cap > 0 else 0.0
     )
 
     tiers_out: list[dict[str, Any]] = []
-    for idx, (th, _pct, bonus_gross) in enumerate(MILESTONES, start=1):
+    for idx, (th, _pct, bonus_gross) in enumerate(milestones, start=1):
         th = int(th)
         rec = by_threshold.get(th)
         bonus_gross_dec = bonus_gross

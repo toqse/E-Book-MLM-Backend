@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
@@ -5,6 +7,7 @@ from rest_framework.decorators import api_view, permission_classes
 from apps.admin_panel.models import Grievance
 from apps.agreements.models import MemberComplianceProfile
 from apps.admin_panel.utils import get_system_config
+from apps.commissions.milestone_tiers import get_milestones
 from apps.common.permissions import (
     IsAdminRole,
     IsFinanceAdmin,
@@ -514,7 +517,14 @@ def admin_users_detail(request, pk: int):
             )
         u.phone = new_phone
 
-    for field in ["pan_number", "aadhaar_number", "bank_account_number", "bank_ifsc", "upi_id"]:
+    for field in [
+        "pan_number",
+        "aadhaar_number",
+        "bank_account_number",
+        "bank_ifsc",
+        "bank_name",
+        "upi_id",
+    ]:
         if field in data:
             setattr(u, field, _clean_opt_str(data.get(field)) or "")
 
@@ -657,6 +667,7 @@ def compliance_queue(request):
             row["bank_on_user"] = {
                 "bank_account_number": u.bank_account_number,
                 "bank_ifsc": u.bank_ifsc,
+                "bank_name": getattr(u, "bank_name", None),
                 "upi_id": u.upi_id,
             }
         else:
@@ -783,6 +794,7 @@ def users_delisted(request):
 def system_config_view(request):
     cfg = get_system_config()
     if request.method == "GET":
+        milestones = get_milestones(cfg)
         return envelope_response(
             {
                 "product_base_price": str(cfg.product_base_price),
@@ -795,8 +807,43 @@ def system_config_view(request):
                 "auto_placement_strategy": cfg.auto_placement_strategy,
                 "is_repurchase_commission_allowed": cfg.is_repurchase_commission_allowed,
                 "auto_process_milestone_bonuses": cfg.auto_process_milestone_bonuses,
+                "milestone_bonus_overrides": cfg.milestone_bonus_overrides or {},
+                "milestones": [
+                    {
+                        "label": f"T{idx}",
+                        "index": idx,
+                        "threshold": int(th),
+                        "bonus_gross": str(bonus),
+                    }
+                    for idx, (th, _pct, bonus) in enumerate(milestones, start=1)
+                ],
+                "razorpay": {
+                    "key_id": cfg.razorpay_key_id or None,
+                    "key_secret_set": bool((cfg.razorpay_key_secret or "").strip()),
+                },
+                "grievance_nodal_officer": {
+                    "nodal_officer_name": cfg.nodal_officer_name or "",
+                    "nodal_officer_email": cfg.nodal_officer_email or "",
+                    "nodal_officer_phone": cfg.nodal_officer_phone or "",
+                    "grievance_sla_hours": int(cfg.grievance_sla_hours or 0),
+                },
             }
         )
+    data = request.data or {}
+    errors: dict[str, str] = {}
+
+    decimal_fields = {
+        "product_base_price",
+        "gst_rate",
+        "direct_commission",
+        "upline_commission",
+        "earning_cap",
+    }
+    int_fields = {
+        "refund_window_days",
+        "placement_manual_window_hours",
+        "grievance_sla_hours",
+    }
     for field in [
         "product_base_price",
         "gst_rate",
@@ -808,18 +855,59 @@ def system_config_view(request):
         "auto_placement_strategy",
         "is_repurchase_commission_allowed",
         "auto_process_milestone_bonuses",
+        "milestone_bonus_overrides",
+        "razorpay_key_id",
+        "razorpay_key_secret",
+        "nodal_officer_name",
+        "nodal_officer_email",
+        "nodal_officer_phone",
+        "grievance_sla_hours",
     ]:
-        if field not in request.data:
+        if field not in data:
             continue
-        val = request.data[field]
+        val = data[field]
         if field in ("is_repurchase_commission_allowed", "auto_process_milestone_bonuses"):
             setattr(
                 cfg,
                 field,
                 val is True or str(val).lower() in ("1", "true", "yes"),
             )
+        elif field == "milestone_bonus_overrides":
+            if isinstance(val, dict):
+                cfg.milestone_bonus_overrides = val
+            elif val in (None, ""):
+                cfg.milestone_bonus_overrides = {}
+            else:
+                errors[field] = "must_be_object"
+        elif field in decimal_fields:
+            if val in (None, ""):
+                errors[field] = "required_decimal"
+                continue
+            try:
+                setattr(cfg, field, Decimal(str(val)))
+            except Exception:
+                errors[field] = "invalid_decimal"
+        elif field in int_fields:
+            if val in (None, ""):
+                errors[field] = "required_int"
+                continue
+            try:
+                ival = int(str(val).strip())
+                if ival < 0:
+                    raise ValueError("negative")
+                setattr(cfg, field, ival)
+            except Exception:
+                errors[field] = "invalid_int"
         else:
             setattr(cfg, field, val)
+    if errors:
+        return envelope_response(
+            None,
+            success=False,
+            message="Invalid config payload",
+            errors=errors,
+            status=400,
+        )
     cfg.updated_by = request.user
     cfg.save()
     return envelope_response({"ok": True})

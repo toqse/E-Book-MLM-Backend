@@ -11,7 +11,7 @@ from apps.wallet.bands import on_total_earned_updated
 from apps.wallet.models import Wallet, WalletTransaction
 from apps.tds.services import calculate_and_apply_194h_tds
 
-from .milestone_tiers import MILESTONES
+from .milestone_tiers import get_milestones
 from .models import CommissionLedger, MilestoneRecord
 
 
@@ -136,25 +136,6 @@ class CommissionEngine:
             )
             return
         wallet, _ = Wallet.objects.select_for_update().get_or_create(user=recipient)
-        # Business rule: during Band 2 (slot band), do not credit direct/tree commissions.
-        # We record a HELD ledger row for audit, but no wallet balances are updated.
-        if wallet.current_band == 2 and ctype in (
-            CommissionLedger.CommissionType.DIRECT,
-            CommissionLedger.CommissionType.UPLINE_L2,
-            CommissionLedger.CommissionType.UPLINE_L3,
-            CommissionLedger.CommissionType.UPLINE_L4,
-        ):
-            CommissionLedger.objects.create(
-                recipient=recipient,
-                source_user=source,
-                order=order,
-                commission_type=ctype,
-                amount=gross,
-                tds_deducted=Decimal("0"),
-                net_amount=Decimal("0"),
-                status=CommissionLedger.Status.HELD,
-            )
-            return
         remaining = cap - wallet.total_earned
         if remaining <= 0:
             recipient.account_status = User.AccountStatus.CAPPED
@@ -208,7 +189,7 @@ class CommissionEngine:
     @staticmethod
     def _maybe_milestone(sponsor: User, cfg):
         count = sponsor.direct_referral_count
-        for threshold, _pct, bonus in MILESTONES:
+        for threshold, _pct, bonus in get_milestones(cfg):
             if count != threshold:
                 continue
             if MilestoneRecord.objects.filter(

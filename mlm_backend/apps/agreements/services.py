@@ -91,6 +91,7 @@ def apply_profile_bank_to_user(user: User, profile: MemberComplianceProfile, upi
     user.payout_preference = profile.payout_preference
     user.bank_account_number = profile.account_number or ""
     user.bank_ifsc = (profile.ifsc or "").strip().upper() or ""
+    user.bank_name = (profile.bank_name or "").strip() or ""
     if upi_override is not None:
         user.upi_id = (upi_override or "").strip()
 

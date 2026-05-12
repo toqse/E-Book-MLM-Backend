@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 
+from django.contrib.auth import get_user_model
 from django.db.models import Case, Count, IntegerField, Q, When
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
@@ -10,8 +12,11 @@ from rest_framework.permissions import IsAuthenticated
 from apps.common.permissions import IsAdminRole
 from apps.common.responses import envelope_response
 from apps.admin_panel.utils import get_system_config
+from apps.wallet.bands import BAND_EDGES
+from apps.wallet.models import Wallet
 
-from .models import SponsorSlotBatch, SponsorSlotCode
+from .audit_log import log_sponsor_audit
+from .models import SponsorSlotAuditEvent, SponsorSlotBatch, SponsorSlotCode
 from .services import SponsorSlotService
 
 
@@ -355,26 +360,326 @@ def validate_public(request):
     return envelope_response({"valid": True, "issuer": issuer, "totals": totals_payload})
 
 
+def _admin_days_remaining_for_row(c: SponsorSlotCode) -> int | None:
+    if c.status in (SponsorSlotCode.Status.REDEEMED, SponsorSlotCode.Status.EXPIRED):
+        return None
+    return _days_remaining(c.expires_at)
+
+
 @api_view(["GET"])
 @permission_classes([IsAdminRole])
 def admin_slots(request):
-    qs = SponsorSlotBatch.objects.all()[:100]
-    return envelope_response({"count": qs.count()})
+    page = _parse_positive_int(request.query_params.get("page"), 1, min_v=1, max_v=1_000_000)
+    page_size = _parse_positive_int(
+        request.query_params.get("page_size"), 20, min_v=1, max_v=100
+    )
+    q = (request.query_params.get("q") or "").strip()
+    raw_status = (request.query_params.get("status") or "").strip().upper()
+
+    base = SponsorSlotCode.objects.select_related("issued_to", "redeemed_by", "batch").order_by(
+        "-created_at", "-id"
+    )
+    if q:
+        base = base.filter(
+            Q(code__icontains=q)
+            | Q(issued_to__member_id__icontains=q)
+            | Q(issued_to__full_name__icontains=q)
+        )
+    if raw_status and raw_status != "ALL":
+        valid = {x for x, _ in SponsorSlotCode.Status.choices}
+        if raw_status not in valid:
+            return envelope_response(
+                None,
+                message="Invalid status filter.",
+                success=False,
+                errors={"detail": "invalid_status"},
+                status=400,
+            )
+        base = base.filter(status=raw_status)
+
+    total_count = base.count()
+    total_pages = (total_count + page_size - 1) // page_size if total_count else 0
+    start = (page - 1) * page_size
+    rows = list(base[start : start + page_size])
+
+    results = []
+    for c in rows:
+        redeemed_by = None
+        if c.redeemed_by_id:
+            redeemed_by = {
+                "member_id": c.redeemed_by.member_id,
+                "full_name": c.redeemed_by.full_name,
+            }
+        results.append(
+            {
+                "code": c.code,
+                "issuer_name": c.issued_to.full_name,
+                "issuer_member_id": c.issued_to.member_id,
+                "issued_at": c.created_at.isoformat(),
+                "expires_at": c.expires_at.isoformat(),
+                "days_remaining": _admin_days_remaining_for_row(c),
+                "redeemed_by": redeemed_by,
+                "status": c.status,
+                "is_flagged": c.is_flagged,
+                "band_number": c.batch.band_number,
+                "batch_id": c.batch_id,
+            }
+        )
+
+    return envelope_response(
+        {
+            "results": results,
+            "count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+        }
+    )
 
 
 @api_view(["GET"])
 @permission_classes([IsAdminRole])
 def admin_slots_flagged(request):
-    qs = SponsorSlotCode.objects.filter(is_flagged=True)
-    return envelope_response({"results": [c.code for c in qs]})
+    qs = (
+        SponsorSlotCode.objects.filter(is_flagged=True)
+        .select_related("issued_to")
+        .order_by("-created_at", "-id")
+    )
+    return envelope_response(
+        {
+            "results": [
+                {
+                    "code": c.code,
+                    "issuer_member_id": c.issued_to.member_id,
+                    "status": c.status,
+                }
+                for c in qs
+            ]
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminRole])
+def admin_slot_detail(request, code: str):
+    c = (
+        SponsorSlotCode.objects.filter(code__iexact=code.strip())
+        .select_related("issued_to", "redeemed_by", "batch", "redeemed_order", "redeemed_order__ebook")
+        .first()
+    )
+    if not c:
+        return envelope_response(None, message="Not found", success=False, status=404)
+
+    order_payload = None
+    if c.redeemed_order_id:
+        o = c.redeemed_order
+        order_payload = {
+            "id": o.id,
+            "order_number": o.order_number,
+            "status": o.status,
+            "total_amount": str(o.total_amount),
+            "paid_at": o.paid_at.isoformat() if o.paid_at else None,
+            "ebook_id": o.ebook_id,
+            "ebook_title": getattr(o.ebook, "title", None) if o.ebook_id else None,
+        }
+
+    redeemed_by = None
+    if c.redeemed_by_id:
+        redeemed_by = {
+            "member_id": c.redeemed_by.member_id,
+            "full_name": c.redeemed_by.full_name,
+        }
+
+    return envelope_response(
+        {
+            "code": c.code,
+            "status": c.status,
+            "is_flagged": c.is_flagged,
+            "shared_via": c.shared_via,
+            "unique_ips_attempted": c.unique_ips_attempted,
+            "unlock_at_total_earned": str(c.unlock_at_total_earned)
+            if c.unlock_at_total_earned is not None
+            else None,
+            "unlocked_at": c.unlocked_at.isoformat() if c.unlocked_at else None,
+            "issued_at": c.created_at.isoformat(),
+            "expires_at": c.expires_at.isoformat(),
+            "issuer": {
+                "member_id": c.issued_to.member_id,
+                "full_name": c.issued_to.full_name,
+            },
+            "redeemed_by": redeemed_by,
+            "redeemed_order": order_payload,
+            "batch": {
+                "id": c.batch.id,
+                "band_number": c.batch.band_number,
+                "total_codes": c.batch.total_codes,
+                "codes_redeemed": c.batch.codes_redeemed,
+                "codes_expired": c.batch.codes_expired,
+                "expires_at": c.batch.expires_at.isoformat(),
+            },
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAdminRole])
+def admin_issue_slot(request):
+    member_id = (request.data.get("member_id") or "").strip()
+    if not member_id:
+        return envelope_response(
+            None,
+            message="member_id is required",
+            success=False,
+            status=400,
+            errors={"detail": "missing_member_id"},
+        )
+    User = get_user_model()
+    user = User.objects.filter(member_id__iexact=member_id).first()
+    if not user:
+        return envelope_response(None, message="Member not found", success=False, status=404)
+
+    band_raw = request.data.get("band_number", 2)
+    try:
+        band_number = int(band_raw)
+    except (TypeError, ValueError):
+        return envelope_response(
+            None,
+            message="Invalid band_number",
+            success=False,
+            status=400,
+            errors={"detail": "invalid_band_number"},
+        )
+    if band_number < 1 or band_number > len(BAND_EDGES):
+        return envelope_response(
+            None,
+            message="band_number out of range",
+            success=False,
+            status=400,
+            errors={"detail": "invalid_band_number"},
+        )
+
+    w = Wallet.objects.filter(user=user).first()
+    earned = w.total_earned if w else Decimal("0")
+
+    batch = SponsorSlotService.issue_batch(
+        user,
+        band_number,
+        current_total_earned=earned,
+    )
+    codes = [
+        {
+            "code": co.code,
+            "status": co.status,
+            "expires_at": co.expires_at.isoformat(),
+        }
+        for co in batch.codes.order_by("id")
+    ]
+
+    return envelope_response(
+        {
+            "batch_id": batch.id,
+            "band_number": batch.band_number,
+            "expires_at": batch.expires_at.isoformat(),
+            "codes": codes,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminRole])
+def admin_audit_log(request):
+    page = _parse_positive_int(request.query_params.get("page"), 1, min_v=1, max_v=1_000_000)
+    page_size = _parse_positive_int(
+        request.query_params.get("page_size"), 20, min_v=1, max_v=100
+    )
+    code_filter = (request.query_params.get("code") or "").strip()
+
+    qs = SponsorSlotAuditEvent.objects.select_related("sponsor_slot_code", "actor").order_by(
+        "-created_at", "-id"
+    )
+    if code_filter:
+        qs = qs.filter(sponsor_slot_code__code__iexact=code_filter)
+
+    total = qs.count()
+    total_pages = (total + page_size - 1) // page_size if total else 0
+    start = (page - 1) * page_size
+    rows = list(qs[start : start + page_size])
+
+    results = []
+    for ev in rows:
+        results.append(
+            {
+                "code": ev.sponsor_slot_code.code,
+                "event_type": ev.event_type,
+                "actor_member_id": ev.actor.member_id if ev.actor_id else None,
+                "actor_full_name": ev.actor.full_name if ev.actor_id else None,
+                "actor_is_system": ev.actor_id is None,
+                "metadata": ev.metadata,
+                "created_at": ev.created_at.isoformat(),
+            }
+        )
+
+    return envelope_response(
+        {
+            "results": results,
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAdminRole])
+def admin_flag_code(request, code: str):
+    c = SponsorSlotCode.objects.filter(code__iexact=code.strip()).first()
+    if not c:
+        return envelope_response(None, message="Not found", success=False, status=404)
+    if not c.is_flagged:
+        c.is_flagged = True
+        c.save(update_fields=["is_flagged"])
+        log_sponsor_audit(
+            c,
+            SponsorSlotAuditEvent.EventType.FLAGGED,
+            actor=request.user,
+            metadata={},
+        )
+    return envelope_response({"ok": True})
+
+
+@api_view(["POST"])
+@permission_classes([IsAdminRole])
+def admin_clear_flag_code(request, code: str):
+    c = SponsorSlotCode.objects.filter(code__iexact=code.strip()).first()
+    if not c:
+        return envelope_response(None, message="Not found", success=False, status=404)
+    if c.is_flagged:
+        c.is_flagged = False
+        c.save(update_fields=["is_flagged"])
+        log_sponsor_audit(
+            c,
+            SponsorSlotAuditEvent.EventType.AUDIT_CLEARED,
+            actor=request.user,
+            metadata={},
+        )
+    return envelope_response({"ok": True})
 
 
 @api_view(["POST"])
 @permission_classes([IsAdminRole])
 def admin_expire_code(request, code: str):
-    c = SponsorSlotCode.objects.filter(code__iexact=code).first()
+    c = SponsorSlotCode.objects.filter(code__iexact=code.strip()).first()
     if not c:
         return envelope_response(None, message="Not found", success=False, status=404)
-    c.status = SponsorSlotCode.Status.EXPIRED
-    c.save(update_fields=["status"])
+    prev = c.status
+    if prev != SponsorSlotCode.Status.EXPIRED:
+        c.status = SponsorSlotCode.Status.EXPIRED
+        c.save(update_fields=["status"])
+        log_sponsor_audit(
+            c,
+            SponsorSlotAuditEvent.EventType.EXPIRED,
+            actor=request.user,
+            metadata={"previous_status": prev},
+        )
     return envelope_response({"ok": True})

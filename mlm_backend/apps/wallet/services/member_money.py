@@ -592,6 +592,7 @@ def build_band_ladder(wallet: Wallet, cfg: SystemConfig) -> list[dict[str, Any]]
         band_num = i + 1
         low_s, high_s = _band_range_display(i)
         kind = "SLOT" if band_num in SLOT_BAND_NUMBERS else "CASH"
+        slot_expiry_days = cfg.sponsor_slot_expiry_days if kind == "SLOT" else None
         low_dec = BAND_EDGES[i]
         high_dec = BAND_EDGES[i + 1] if i + 1 < len(BAND_EDGES) else None
         progress = None
@@ -607,7 +608,7 @@ def build_band_ladder(wallet: Wallet, cfg: SystemConfig) -> list[dict[str, Any]]
                 "range_low": low_s,
                 "range_high": high_s,
                 "kind": kind,
-                "slot_expiry_days": cfg.sponsor_slot_expiry_days,
+                "slot_expiry_days": slot_expiry_days,
                 "is_current": wallet.current_band == band_num,
                 "unlocked": wallet.current_band >= band_num,
                 "progress_in_band_percent": round(progress, 2) if progress is not None else None,
@@ -617,6 +618,13 @@ def build_band_ladder(wallet: Wallet, cfg: SystemConfig) -> list[dict[str, Any]]
 
 
 def build_payouts_bundle(user: User, *, include_movements: bool) -> dict[str, Any]:
+    def _mask_bank_account(acct: str | None) -> str | None:
+        s = (acct or "").strip()
+        if not s:
+            return None
+        last4 = s[-4:] if len(s) >= 4 else s
+        return f"XXXX{last4}" if last4 else "XXXX"
+
     wallet = get_wallet_row(user)
     cfg = get_system_config()
     kyc_ok = user.kyc_status == User.KYCStatus.VERIFIED
@@ -670,6 +678,12 @@ def build_payouts_bundle(user: User, *, include_movements: bool) -> dict[str, An
         "bands": build_band_ladder(wallet, cfg),
         "withdrawals": withdrawals,
     }
+    data["bank_details"] = {
+        "account_number": _mask_bank_account(getattr(user, "bank_account_number", None)),
+        "ifsc": ((getattr(user, "bank_ifsc", None) or "").strip().upper() or None),
+        "bank_name": ((getattr(user, "bank_name", None) or "").strip() or None),
+    }
+    data["upi_id"] = ((getattr(user, "upi_id", None) or "").strip() or None)
     if include_movements:
         txs = (
             WalletTransaction.objects.filter(user=user)
@@ -687,6 +701,62 @@ def build_payouts_bundle(user: User, *, include_movements: bool) -> dict[str, An
             for x in txs
         ]
     return data
+
+
+def build_todays_earnings_for_dashboard(user: User) -> dict[str, str]:
+    """
+    Tile fields for the member dashboard: todays_earnings is the net sum credited today
+    (direct + tree_passive + milestone_bonuses). Other keys are the same window for
+    commissions/milestones; wallet_balance is current cash_balance.
+    """
+    since = _period_start("today")
+    assert since is not None  # period "today" is always bounded
+    end = since + timedelta(days=1)
+    wallet = get_wallet_row(user)
+    ct = CommissionLedger.CommissionType
+    st = CommissionLedger.Status
+    passive_types = (ct.UPLINE_L2, ct.UPLINE_L3, ct.UPLINE_L4)
+    dec = DecimalField(max_digits=12, decimal_places=2)
+    agg = CommissionLedger.objects.filter(
+        recipient_id=user.pk,
+        status=st.CREDITED,
+        created_at__gte=since,
+        created_at__lt=end,
+    ).aggregate(
+        direct_net=Sum(
+            Case(
+                When(commission_type=ct.DIRECT, then=F("net_amount")),
+                default=ZERO,
+                output_field=dec,
+            )
+        ),
+        passive_net=Sum(
+            Case(
+                When(commission_type__in=passive_types, then=F("net_amount")),
+                default=ZERO,
+                output_field=dec,
+            )
+        ),
+    )
+    direct = agg["direct_net"] or ZERO
+    passive = agg["passive_net"] or ZERO
+    ms_sum = (
+        MilestoneRecord.objects.filter(
+            user_id=user.pk,
+            status="CREDITED",
+            created_at__gte=since,
+            created_at__lt=end,
+        ).aggregate(s=Sum("net_bonus"))["s"]
+        or ZERO
+    )
+    total_today = direct + passive + ms_sum
+    return {
+        "todays_earnings": _fmt_money(total_today),
+        "direct_commission": _fmt_money(direct),
+        "milestone_bonuses": _fmt_money(ms_sum),
+        "tree_passive": _fmt_money(passive),
+        "wallet_balance": _fmt_money(wallet.cash_balance),
+    }
 
 
 def build_earnings_response(

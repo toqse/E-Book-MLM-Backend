@@ -105,6 +105,11 @@ class AgreementOTPSendSerializer(serializers.Serializer):
         child=serializers.IntegerField(min_value=1),
         allow_empty=False,
     )
+    declaration = serializers.CharField(
+        min_length=1,
+        max_length=4000,
+        trim_whitespace=True,
+    )
 
 
 class AgreementOTPVerifySerializer(serializers.Serializer):

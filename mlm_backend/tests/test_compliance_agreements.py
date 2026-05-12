@@ -1,10 +1,20 @@
 import io
+from decimal import Decimal
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APIClient
 
-from apps.agreements.models import LegalDocument, MemberComplianceProfile, UserAgreementAcceptance
+from apps.agreements.models import (
+    LegalDocument,
+    MemberComplianceProfile,
+    UserAgreementAcceptance,
+    UserAgreementAcceptanceDeclaration,
+)
+from apps.agreements.proof_service import verify_hmac_for_batch
+from apps.courses.models import EBook
+from apps.payments.models import Order
+from apps.payments.services import finalize_order_as_paid
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
 
@@ -88,7 +98,10 @@ def test_compliance_flow_with_agreement_otp_and_admin_approve():
 
     r_send = client.post(
         "/api/v1/agreements/send-otp/",
-        {"document_ids": [doc.id]},
+        {
+            "document_ids": [doc.id],
+            "declaration": "Declaration: I accept all these conditions for compliance testing.",
+        },
         format="json",
     )
     assert r_send.status_code == 200
@@ -365,7 +378,13 @@ def test_agreements_list_supports_category_filter():
 
     all_resp = client.get("/api/v1/agreements/")
     assert all_resp.status_code == 200
-    assert len(all_resp.json()["data"]["results"]) == 2
+    body = all_resp.json()["data"]
+    assert len(body["results"]) == 2
+    assert "user" in body
+    assert len(body["user"]) == 1
+    assert body["user"][0]["id"] == u.id
+    assert body["user"][0]["order_invoices"] == []
+    assert body["user"][0]["compliance_acceptance_proof"] is None
 
     filtered = client.get("/api/v1/agreements/", {"category": "legal"})
     assert filtered.status_code == 200
@@ -419,6 +438,121 @@ def test_agreements_compliance_legal_list_filters():
     assert rows[0]["name"] == "Legal Req"
     assert rows[0]["requires_acceptance_for_compliance"] is True
     assert rows[0]["is_agreement_accepted"] is False
+
+
+@pytest.mark.django_db
+def test_agreements_get_user_invoices_acceptance_proof_and_download(system_config):
+    LegalDocument.objects.create(
+        name="Terms Proof",
+        category="LEGAL DOCUMENT",
+        document_type="terms",
+        year=2026,
+        description="d",
+        content_html="<p>x</p>",
+        version="1.0",
+        requires_acceptance_for_compliance=True,
+        is_active=True,
+    )
+    doc = LegalDocument.objects.get(name="Terms Proof")
+    decl_text = "Declaration: I accept all these conditions for proof PDF testing."
+
+    u = _member_user("+919887766502")
+    client = APIClient()
+    client.force_authenticate(user=u)
+
+    r_send = client.post(
+        "/api/v1/agreements/send-otp/",
+        {"document_ids": [doc.id], "declaration": decl_text},
+        format="json",
+    )
+    assert r_send.status_code == 200
+    otp = r_send.json()["data"].get("otp")
+    assert otp
+
+    rv = client.post(
+        "/api/v1/agreements/verify/",
+        {"document_ids": [doc.id], "otp_code": otp},
+        format="json",
+    )
+    assert rv.status_code == 200
+    batch_id = rv.json()["data"]["acceptance_batch_id"]
+    decl_row = UserAgreementAcceptanceDeclaration.objects.get(user=u, acceptance_batch_id=batch_id)
+    assert decl_row.declaration_text == decl_text.strip()
+
+    book = EBook.objects.create(
+        title="Proof Book",
+        slug="proof-book",
+        category="X",
+        description="d",
+        pages_count=10,
+        language="English",
+        price=200,
+        status=EBook.Status.PUBLISHED,
+        file_url="https://example.com/b.pdf",
+        is_active=True,
+    )
+    order = Order.objects.create(
+        user=u,
+        ebook=book,
+        order_number="ORD-PROOF-AG-1",
+        base_price=Decimal("200"),
+        gst_amount=Decimal("36"),
+        gateway_charge=Decimal("5.72"),
+        total_amount=Decimal("241.72"),
+        discount_amount=Decimal("0"),
+        amount_paid=Decimal("241.72"),
+        status=Order.Status.CREATED,
+        razorpay_order_id="ord_proof_ag",
+    )
+    finalize_order_as_paid(order, payment_id="pay_proof_ag")
+
+    r_list = client.get("/api/v1/agreements/")
+    assert r_list.status_code == 200
+    payload = r_list.json()["data"]
+    assert "user" in payload
+    assert len(payload["user"]) == 1
+    row = payload["user"][0]
+    assert row["id"] == u.id
+    assert len(row["order_invoices"]) == 1
+    inv_row = row["order_invoices"][0]
+    assert inv_row["order_id"] == order.id
+    assert inv_row["invoice_number"]
+    assert inv_row["invoice_pdf_url"]
+
+    proof_meta = row["compliance_acceptance_proof"]
+    assert proof_meta is not None
+    assert proof_meta["acceptance_batch_id"] == batch_id
+    assert proof_meta["pdf_download_url"]
+    assert proof_meta["verification"]["algo"] == "HMAC-SHA256"
+    sig = proof_meta["verification"]["signature"]
+    assert verify_hmac_for_batch(
+        user_id=u.id,
+        acceptance_batch_id=batch_id,
+        signature_hex=sig,
+    )
+
+    dl = client.get(
+        f"/api/v1/agreements/acceptance-proof/{batch_id}/download/",
+    )
+    assert dl.status_code == 200
+    assert dl["Content-Type"].startswith("application/pdf")
+    assert "attachment" in (dl.get("Content-Disposition") or "").lower()
+    pdf_bytes = b"".join(dl.streaming_content)
+    assert pdf_bytes[:4] == b"%PDF"
+    # Declaration is bound in HMAC v2 and stored on UserAgreementAcceptanceDeclaration;
+    # embedded PDF text may be compressed so we do not assert raw substring here.
+
+    # Browser-style GET: same URL with signed token, no Authorization header
+    from urllib.parse import parse_qs, urlparse
+
+    anon = APIClient()
+    parsed = urlparse(proof_meta["pdf_download_url"])
+    qs = parse_qs(parsed.query)
+    assert "token" in qs and qs["token"][0]
+    path_qs = f"{parsed.path}?{parsed.query}"
+    dl2 = anon.get(path_qs)
+    assert dl2.status_code == 200
+    assert b"".join(dl2.streaming_content)[:4] == b"%PDF"
 
 
 @pytest.mark.django_db

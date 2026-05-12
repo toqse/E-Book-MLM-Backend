@@ -10,6 +10,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-only-secret-change-me")
+# Optional separate secret for agreement acceptance proof HMAC; falls back to SECRET_KEY in proof_service.
+AGREEMENT_PROOF_SIGNING_SECRET = os.environ.get("AGREEMENT_PROOF_SIGNING_SECRET", "").strip()
 DEBUG = os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes")
 
 # When True, OTP is included in JSON and logged (never use in real production unless you intend it).

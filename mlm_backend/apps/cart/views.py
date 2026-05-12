@@ -7,7 +7,11 @@ from rest_framework.request import Request
 
 from apps.common.responses import envelope_response
 from apps.courses.models import EBook, Enrollment
-from apps.payments.services import create_checkout_order_from_cart, normalize_billing_from_payload
+from apps.payments.services import (
+    create_checkout_order_from_cart,
+    get_razorpay_key_id,
+    normalize_billing_from_payload,
+)
 
 from .models import Cart, CartItem
 from .services import preview_checkout_totals
@@ -122,8 +126,6 @@ def cart_remove_item(request: Request, item_id: int):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def cart_checkout(request: Request):
-    from django.conf import settings
-
     cart = _get_or_create_cart(request.user)
     sponsor_code = request.data.get("sponsor_code") or request.data.get("sponsor_slot_code")
     is_retail = bool(request.data.get("is_retail", False))
@@ -151,7 +153,7 @@ def cart_checkout(request: Request):
                 "order_number": order.order_number,
                 "amount_paise": 0,
                 "razorpay_order_id": None,
-                "key_id": settings.RAZORPAY_KEY_ID,
+                "key_id": get_razorpay_key_id(),
                 "status": order.status,
             }
         )
@@ -161,6 +163,6 @@ def cart_checkout(request: Request):
             "order_number": order.order_number,
             "amount_paise": rz["amount"],
             "razorpay_order_id": rz["id"],
-            "key_id": settings.RAZORPAY_KEY_ID,
+            "key_id": get_razorpay_key_id(),
         }
     )

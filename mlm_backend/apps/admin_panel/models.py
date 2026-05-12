@@ -33,6 +33,20 @@ class SystemConfig(models.Model):
         default=True,
         help_text="If true, milestone bonuses are credited automatically upon achievement; if false, they enter an admin queue for manual processing.",
     )
+    milestone_bonus_overrides = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional mapping of milestone referral threshold -> bonus gross amount. Keys may be int or stringified int.",
+    )
+
+    razorpay_key_id = models.CharField(max_length=64, blank=True, default="")
+    # Stored for admin configuration; do not expose back to clients.
+    razorpay_key_secret = models.CharField(max_length=256, blank=True, default="")
+
+    nodal_officer_name = models.CharField(max_length=120, blank=True, default="")
+    nodal_officer_email = models.EmailField(blank=True, default="")
+    nodal_officer_phone = models.CharField(max_length=32, blank=True, default="")
+    grievance_sla_hours = models.PositiveIntegerField(default=48)
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,

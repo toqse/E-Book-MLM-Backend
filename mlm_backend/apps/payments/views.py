@@ -20,6 +20,7 @@ from .services import (
     create_checkout_order,
     ensure_gst_invoice_pdf,
     finalize_order_as_paid,
+    get_razorpay_key_id,
     normalize_billing_from_payload,
     verify_payment,
     verify_webhook_signature,
@@ -127,7 +128,7 @@ def create_order(request):
                 "order_number": order.order_number,
                 "amount_paise": 0,
                 "razorpay_order_id": None,
-                "key_id": settings.RAZORPAY_KEY_ID,
+                "key_id": get_razorpay_key_id(),
                 "status": order.status,
             }
         )
@@ -137,7 +138,7 @@ def create_order(request):
             "order_number": order.order_number,
             "amount_paise": rz["amount"],
             "razorpay_order_id": rz["id"],
-            "key_id": settings.RAZORPAY_KEY_ID,
+            "key_id": get_razorpay_key_id(),
         }
     )
 

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import SponsorSlotBatch, SponsorSlotCode
+from .models import SponsorSlotAuditEvent, SponsorSlotBatch, SponsorSlotCode
 
 
 @admin.register(SponsorSlotBatch)
@@ -45,3 +45,12 @@ class SponsorSlotCodeAdmin(admin.ModelAdmin):
     autocomplete_fields = ("batch", "issued_to", "redeemed_by", "redeemed_order")
     readonly_fields = ("created_at",)
     ordering = ("-id",)
+
+
+@admin.register(SponsorSlotAuditEvent)
+class SponsorSlotAuditEventAdmin(admin.ModelAdmin):
+    list_display = ("id", "sponsor_slot_code", "event_type", "actor", "created_at")
+    list_filter = ("event_type", "created_at")
+    search_fields = ("sponsor_slot_code__code", "actor__member_id")
+    readonly_fields = ("created_at",)
+    ordering = ("-created_at", "-id")

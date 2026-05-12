@@ -77,3 +77,35 @@ class SponsorSlotCode(models.Model):
 
     class Meta:
         db_table = "sponsor_slot_code"
+
+
+class SponsorSlotAuditEvent(models.Model):
+    class EventType(models.TextChoices):
+        ISSUED = "ISSUED", "Issued"
+        FLAGGED = "FLAGGED", "Flagged"
+        AUDIT_CLEARED = "AUDIT_CLEARED", "Audit cleared"
+        REDEEMED = "REDEEMED", "Redeemed"
+        EXPIRED = "EXPIRED", "Expired"
+        SHARED = "SHARED", "Shared"
+
+    sponsor_slot_code = models.ForeignKey(
+        SponsorSlotCode,
+        on_delete=models.CASCADE,
+        related_name="audit_events",
+        db_index=True,
+    )
+    event_type = models.CharField(max_length=32, choices=EventType.choices)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sponsor_slot_audit_actions",
+        help_text="Null when the actor is the system.",
+    )
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "sponsor_slot_audit_event"
+        ordering = ("-created_at", "-id")

@@ -73,11 +73,18 @@ def ensure_gst_invoice_pdf(order: Order, *, force: bool = False) -> None:
 def _client():
     import razorpay  # noqa: WPS433 — defer import (SDK pulls pkg_resources at import time)
 
-    key = settings.RAZORPAY_KEY_ID
-    secret = settings.RAZORPAY_KEY_SECRET
+    cfg = get_system_config()
+    key = (getattr(cfg, "razorpay_key_id", "") or "").strip() or settings.RAZORPAY_KEY_ID
+    secret = (getattr(cfg, "razorpay_key_secret", "") or "").strip() or settings.RAZORPAY_KEY_SECRET
     if not key or not secret:
         return None
     return razorpay.Client(auth=(key, secret))
+
+
+def get_razorpay_key_id() -> str:
+    """Public Razorpay key_id for frontend checkout."""
+    cfg = get_system_config()
+    return (getattr(cfg, "razorpay_key_id", "") or "").strip() or settings.RAZORPAY_KEY_ID
 
 
 def generate_order_number() -> str:
@@ -420,6 +427,8 @@ def _ensure_gst_invoice(order: Order):
 
 
 def verify_webhook_signature(body: bytes, signature: str) -> bool:
-    secret = settings.RAZORPAY_KEY_SECRET.encode()
+    cfg = get_system_config()
+    secret_s = (getattr(cfg, "razorpay_key_secret", "") or "").strip() or settings.RAZORPAY_KEY_SECRET
+    secret = (secret_s or "").encode()
     digest = hmac.new(secret, body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(digest, signature or "")

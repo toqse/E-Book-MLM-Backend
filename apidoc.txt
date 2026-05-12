@@ -59,10 +59,11 @@ FLOWS (high level)
    - Suspended/deactivated accounts: Bearer access tokens are rejected while the account is suspended (tokens become valid again after unsuspend).
 
 4) Compliance (agreements OTP + extended KYC/bank/nominee)
-   - GET /api/v1/agreements/ (Bearer) — active legal documents (content_html + PDF URL when present); optional category filter.
+   - GET /api/v1/agreements/ (Bearer) — active legal documents + `user` array (order invoice URLs, compliance acceptance proof download URL); optional category filter.
+   - GET /api/v1/agreements/acceptance-proof/<uuid>/download/ — download agreement acceptance proof PDF (attachment). Use full `pdf_download_url` from agreements (includes signed `token` for browser) or Bearer.
    - GET /api/v1/agreements/compliance-legal/ (Bearer) — subset: active documents with category LEGAL DOCUMENT and requires_acceptance_for_compliance=true only.
-   - POST /api/v1/agreements/send-otp/ — JSON { "document_ids": [int, ...] }; OTP tied to JWT user identity only.
-   - POST /api/v1/agreements/verify/ — JSON { "document_ids", "otp_code" }; records UserAgreementAcceptance + client IP.
+   - POST /api/v1/agreements/send-otp/ — JSON { "document_ids": [int, ...], "declaration": "<text>" }; OTP payload binds documents + user + declaration; declaration appears on acceptance proof PDF.
+   - POST /api/v1/agreements/verify/ — JSON { "document_ids", "otp_code" }; records UserAgreementAcceptance + declaration row + client IP.
   - POST /api/v1/auth/compliance/submit/ — multipart form: identity, address, nominee, bank, payout; files pan_document,
     aadhar_front and aadhar_back (both required on first submit; optional on update if already stored). Dates in DD/MM/YYYY.
      Requires all active LegalDocuments with requires_acceptance_for_compliance=true at current version.
@@ -254,25 +255,55 @@ GET /api/v1/agreements/
   Success: {
     "results": [
       { "id", "name", "category", "document_type", "year", "description",
-        "content_html", "version", "pdf_url", "pdf_file_url", "requires_acceptance_for_compliance" }
+        "content_html", "version", "pdf_url", "pdf_file_url", "requires_acceptance_for_compliance",
+        "is_agreement_accepted" }
+    ],
+    "user": [
+      {
+        "id": <member user id>,
+        "order_invoices": [
+          { "order_id", "order_number", "invoice_number", "invoice_pdf_url", "paid_at" }
+        ],
+        "compliance_acceptance_proof": null | {
+          "acceptance_batch_id": "<uuid>",
+          "pdf_download_url": "<absolute URL with ?token=... signed query — paste in browser to download without Bearer>",
+          "issued_at": "<ISO8601>",
+          "verification": { "signature": "<hex>", "algo": "HMAC-SHA256" }
+        }
+      }
     ]
   }
+  Notes: order_invoices lists PAID orders with GST invoice PDF URL when generated.
+    compliance_acceptance_proof reflects the latest OTP acceptance batch; PDF is created lazily on first list/download.
+    The downloaded proof PDF includes company logo (just200_logo.png), member declaration text from send-otp, attestation block (signed-by / date / reason / location), document table, and HMAC.
+
+GET /api/v1/agreements/acceptance-proof/<acceptance_batch_id>/download/
+  Auth (either):
+    - Full URL as returned in user.compliance_acceptance_proof.pdf_download_url: includes query ``token=<signed payload>`` (valid ~7 days). No Authorization header required — for opening in a browser / WebView.
+    - Or: Bearer access token for the same member (path batch must belong to that user).
+  Path: acceptance_batch_id is a UUID (must match token when using token auth).
+  Success: binary PDF stream; Content-Type application/pdf; Content-Disposition attachment.
+  Errors: 401 missing/invalid/expired token and no Bearer; 404 if batch not found for owner or proof cannot be built.
 
 GET /api/v1/agreements/compliance-legal/
   Auth: Bearer.
-  No query params. Returns the same envelope shape as GET /api/v1/agreements/ but only rows where:
+  No query params. Success data: { "results": [ ... ] } — same object shape as each element of `results` from GET /api/v1/agreements/, but only rows where:
     is_active=true, requires_acceptance_for_compliance=true, and category is LEGAL DOCUMENT (case-insensitive).
 
 POST /api/v1/agreements/send-otp/
   Auth: Bearer.
-  Body (JSON): { "document_ids": [ <active doc ids that require acceptance> ] }
+  Body (JSON): {
+    "document_ids": [ <active doc ids that require acceptance> ],
+    "declaration": "<required; non-empty trimmed text 1–4000 chars; shown on generated acceptance proof PDF>"
+  }
   Uses member's stored phone/email only (never arbitrary numbers).
-  OTP purpose AGREEMENT; OTP payload binds document_ids + user_id server-side.
+  OTP purpose AGREEMENT; OTP payload binds document_ids + user_id + declaration server-side.
 
 POST /api/v1/agreements/verify/
   Auth: Bearer.
   Body (JSON): { "document_ids": [<same ids as OTP session — same order-independent match>], "otp_code": "......" }
-  Success: acceptance_batch_id, accepted_document_ids; creates UserAgreementAcceptance rows.
+  Success: acceptance_batch_id, accepted_document_ids; creates UserAgreementAcceptance rows and stores declaration for the batch.
+  Errors: 400 if OTP session predates declaration field — request a new OTP via send-otp with declaration.
 
 
 MODULE: Admin agreements & compliance (/api/v1/admin/…)
@@ -519,13 +550,23 @@ GET /api/v1/admin/binary-tree/tree/
   Auth: Bearer + IsAdminRole.
   Query:
     - anchor_member_id: optional member_id (anchors the returned tree at that member)
-    - depth: optional int (default 2, max 10)
+    - depth: optional int (default 2). Values above the server maximum are clamped (max 10);
+      requesting e.g. depth=100 does not load 100 levels — the API uses depth_effective=10 only.
   Example:
     - /api/v1/admin/binary-tree/tree/?anchor_member_id=TQ10021&depth=4
   Success:
+    - Every payload includes "tree_query": {
+        "depth_requested": <int|null> — parsed from query when valid; null if omitted/invalid,
+        "depth_effective": <int> — value actually used (clamped to max 10),
+        "depth_max": 10,
+        "depth_capped": <bool> — true when the client asked for a depth outside [0,10]
+      }
     - when anchor_member_id provided: same shape as member nested tree payload
-      (see team_services.nested_tree_at_anchor_user), depth-limited.
-    - otherwise: { "roots": [ <nested tree payload>... ], "depth": <int> } (up to 50 roots).
+      (see team_services.nested_tree_at_anchor_user), depth-limited, plus "tree_query" as above.
+    - otherwise: { "roots": [ ... ], "depth": <int>, "tree_query": { ... } } (up to 50 roots).
+  Performance: subtree nodes are collected in batched DB queries (no N+1). Large depth still
+    grows the JSON (up to ~2^(depth+1)-1 nodes in a full tree at depth 10); use smaller depth for UI
+    lazy-expand, or anchor on the member you need.
 
 GET /api/v1/admin/binary-tree/members/
   Auth: Bearer + IsAdminRole.
@@ -639,7 +680,12 @@ GET /api/v1/user/dashboard/
       "total_earnings": "<decimal string>",            # lifetime (wallet.total_earned)
       "direct_referrals": <int>,
       "available_balance": "<decimal string>",         # wallet.cash_balance
-      "milestones": { "current": <int>, "total": <int>, "next_target": <int|null> }
+      "milestones": { "current": <int>, "total": <int>, "next_target": <int|null> },
+      "todays_earnings": "<decimal string>",           # sum today: direct_commission + tree_passive + milestone_bonuses (net credited)
+      "direct_commission": "<decimal string>",         # net L1 direct credited today
+      "milestone_bonuses": "<decimal string>",        # net milestone credited today
+      "tree_passive": "<decimal string>",              # net L2-L4 passive credited today
+      "wallet_balance": "<decimal string>"            # current wallet cash_balance
     },
     "earnings_cap": {
       "used_amount": "<decimal string>",
@@ -677,10 +723,12 @@ GET /api/v1/user/payouts/
     "wallet": { cash_balance, total_earned, total_withdrawn, total_tds_deducted,
       fy_label, band_cash_withdrawn_fy, current_band, withdrawals_blocked, kyc_status },
     "bands": [ 9 entries: band, range_low, range_high, kind CASH|SLOT,
-      slot_expiry_days, is_current, unlocked, progress_in_band_percent ],
+      slot_expiry_days (int|null; null for CASH bands), is_current, unlocked, progress_in_band_percent ],
     "withdrawals": [ { id, band, amount_requested, net_payable, tds_amount,
       tds_section, status, created_at, updated_at }, ... max 50 ],
-    "recent_movements": optional [ { type, amount, balance_after, reference, at } ]
+    "recent_movements": optional [ { type, amount, balance_after, reference, at } ],
+    "bank_details": { account_number (masked, e.g. "XXXX1234"|null), ifsc (string|null), bank_name (string|null) },
+    "upi_id": string|null
   }
 
 MODULE: User — Commissions (/api/v1/user/commissions*)  [legacy; prefer /user/earnings/]
@@ -933,13 +981,87 @@ POST /api/v1/sponsor-slots/validate/
 
 GET /api/v1/admin/sponsor-slots/
   Auth: Bearer + IsAdminRole.
-  Success: { "count": <batch count capped query> }
+  Breaking change (vs older builds): returns paginated sponsor codes for the admin table (not batch count only).
+  Query:
+    - page (default 1), page_size (default 20, max 100)
+    - q — optional; matches code, issuer member_id, or issuer full_name (icontains)
+    - status — optional; one of LOCKED, ACTIVE, REDEEMED, EXPIRED, SHARED, or ALL / omitted for no filter
+  Success data: {
+    "results": [
+      {
+        "code", "issuer_name", "issuer_member_id", "issued_at", "expires_at",
+        "days_remaining": <int> | null (null when REDEEMED or EXPIRED),
+        "redeemed_by": { "member_id", "full_name" } | null,
+        "status", "is_flagged", "band_number", "batch_id"
+      }, ...
+    ],
+    "count", "page", "page_size", "total_pages"
+  }
+  Errors: 400 invalid_status when status is not a known code status.
 
 GET /api/v1/admin/sponsor-slots/flagged/
-  Success: { "results": [ "<codes>", ... ] }
+  Auth: Bearer + IsAdminRole.
+  Success data: {
+    "results": [
+      { "code", "issuer_member_id", "status" }, ...
+    ]
+  }
+
+GET /api/v1/admin/sponsor-slots/<code>/
+  Auth: Bearer + IsAdminRole.
+  Trailing slash required if your client uses APPEND_SLASH.
+  Success data: {
+    "code", "status", "is_flagged", "shared_via", "unique_ips_attempted",
+    "unlock_at_total_earned", "unlocked_at", "issued_at", "expires_at",
+    "issuer": { "member_id", "full_name" },
+    "redeemed_by": { "member_id", "full_name" } | null,
+    "redeemed_order": {
+      "id", "order_number", "status", "total_amount", "paid_at",
+      "ebook_id", "ebook_title"
+    } | null,
+    "batch": { "id", "band_number", "total_codes", "codes_redeemed", "codes_expired", "expires_at" }
+  }
+  404 if code unknown.
+
+POST /api/v1/admin/sponsor-slots/issue/
+  Auth: Bearer + IsAdminRole.
+  Body: { "member_id": "<member id>", "band_number": <optional int; default 2> }
+  Creates one SponsorSlotBatch with five codes (same rules as automatic band unlock). Admin may issue even if a batch already exists for that member+band.
+  New codes use prefix "SP-" (six hex chars after prefix).
+  Success data: {
+    "batch_id", "band_number", "expires_at",
+    "codes": [ { "code", "status", "expires_at" }, ... ]
+  }
+  Errors: 400 missing_member_id / invalid_band_number; 404 member not found; 400 band_number out of range (1..9).
+
+GET /api/v1/admin/sponsor-slots/audit-log/
+  Auth: Bearer + IsAdminRole.
+  Query: page, page_size (defaults 20, max 100); optional code (exact match, case-insensitive).
+  Success data: {
+    "results": [
+      {
+        "code", "event_type" (ISSUED | FLAGGED | AUDIT_CLEARED | REDEEMED | EXPIRED | SHARED),
+        "actor_member_id", "actor_full_name", "actor_is_system",
+        "metadata", "created_at"
+      }, ...
+    ],
+    "count", "page", "page_size", "total_pages"
+  }
+  Note: events exist from deployment forward; ISSUED/REDEEMED/EXPIRED are written by the system or checkout where noted; FLAGGED/AUDIT_CLEARED/EXPIRED (admin) by admin actions.
+
+POST /api/v1/admin/sponsor-slots/<code>/flag/
+  Auth: Bearer + IsAdminRole.
+  Sets is_flagged=true and appends a FLAGGED audit row (idempotent if already flagged).
+  Success: { "ok": true }
+
+POST /api/v1/admin/sponsor-slots/<code>/clear-flag/
+  Auth: Bearer + IsAdminRole.
+  Sets is_flagged=false and appends an AUDIT_CLEARED audit row (idempotent if not flagged).
+  Success: { "ok": true }
 
 POST /api/v1/admin/sponsor-slots/<code>/expire/
-  Success: { "ok": true }; status set EXPIRED. 404 if unknown code.
+  Auth: Bearer + IsAdminRole.
+  Success: { "ok": true }; status set to EXPIRED when not already; appends EXPIRED audit row with actor=admin when status changes. 404 if unknown code.
 
 
 MODULE: Banners (home page)
@@ -1156,7 +1278,10 @@ POST /api/v1/payments/verify/
 
 POST /api/v1/payments/webhook/
   Auth: None.
-  Header: X-Razorpay-Signature — HMAC verified against raw body (see settings.RAZORPAY_KEY_SECRET).
+  Header: X-Razorpay-Signature — HMAC verified against raw body.
+    Secret lookup order:
+      1) SystemConfig.razorpay_key_secret (admin config)
+      2) settings.RAZORPAY_KEY_SECRET (env fallback)
   Body: Razorpay JSON payload (raw bytes used for signature).
   Success data: { "received": true, "event": "<from payload>" }
   Errors: 400 — bad signature.
@@ -1338,6 +1463,25 @@ GET/PATCH /api/v1/admin/config/
     "auto_process_milestone_bonuses" (boolean, default true) — when false, milestone
     bonuses are created as PENDING records and must be processed by admin via the
     Milestone Bonuses queue endpoints.
+    Milestones (admin-configurable):
+      - milestone_bonus_overrides: { "<threshold_int>": "<decimal|string|number>", ... }
+        Example: { "10":"300", "25":"600", "50":"1000", "75":"1350", "100":"1600" }
+      - milestones: [
+          { "label":"T1", "index":1, "threshold":10, "bonus_gross":"300" },
+          ...
+        ]
+        Note: `milestones` is computed from defaults with `milestone_bonus_overrides` applied.
+    Razorpay (admin-configurable; secret is never returned):
+      - razorpay: { "key_id": "<string|null>", "key_secret_set": true|false }
+      - PATCH accepts: razorpay_key_id (string), razorpay_key_secret (string)
+    Grievance & nodal officer (admin-configurable):
+      - grievance_nodal_officer: {
+          "nodal_officer_name": "<string>",
+          "nodal_officer_email": "<string>",
+          "nodal_officer_phone": "<string>",
+          "grievance_sla_hours": <int>
+        }
+      - PATCH accepts: nodal_officer_name, nodal_officer_email, nodal_officer_phone, grievance_sla_hours
   PATCH body: any subset of the above; sets updated_by.
   Success PATCH: { "ok": true }
 

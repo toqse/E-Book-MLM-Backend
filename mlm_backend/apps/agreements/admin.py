@@ -1,6 +1,12 @@
 from django.contrib import admin
 
-from .models import LegalDocument, MemberComplianceProfile, UserAgreementAcceptance
+from .models import (
+    LegalDocument,
+    MemberComplianceProfile,
+    UserAgreementAcceptance,
+    UserAgreementAcceptanceDeclaration,
+    UserAgreementAcceptanceProof,
+)
 
 
 @admin.register(LegalDocument)
@@ -14,6 +20,18 @@ class LegalDocumentAdmin(admin.ModelAdmin):
 class UserAgreementAcceptanceAdmin(admin.ModelAdmin):
     list_display = ("user", "document", "version_accepted", "accepted_at")
     readonly_fields = ("accepted_at",)
+
+
+@admin.register(UserAgreementAcceptanceDeclaration)
+class UserAgreementAcceptanceDeclarationAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "acceptance_batch_id", "created_at")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(UserAgreementAcceptanceProof)
+class UserAgreementAcceptanceProofAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "acceptance_batch_id", "issued_at", "created_at")
+    readonly_fields = ("created_at", "signature_hex", "issued_at")
 
 
 @admin.register(MemberComplianceProfile)

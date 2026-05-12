@@ -64,6 +64,60 @@ class UserAgreementAcceptance(models.Model):
         ]
 
 
+class UserAgreementAcceptanceProof(models.Model):
+    """
+    One PDF per OTP acceptance batch: human-readable summary + HMAC over canonical payload.
+    Served for download via API (Content-Disposition: attachment).
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="agreement_acceptance_proofs",
+    )
+    acceptance_batch_id = models.UUIDField()
+    signature_hex = models.CharField(max_length=64)
+    issued_at = models.DateTimeField()
+    pdf_file = models.FileField(
+        upload_to="agreement_proofs/%Y/%m/",
+        max_length=500,
+        blank=True,
+        null=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "agreements_user_acceptance_proof"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "acceptance_batch_id"],
+                name="uniq_agreement_acceptance_proof_user_batch",
+            ),
+        ]
+
+
+class UserAgreementAcceptanceDeclaration(models.Model):
+    """Member declaration text captured at OTP send and tied to an acceptance batch at verify."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="agreement_acceptance_declarations",
+    )
+    acceptance_batch_id = models.UUIDField()
+    declaration_text = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "agreements_user_acceptance_declaration"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "acceptance_batch_id"],
+                name="uniq_agreement_declaration_user_batch",
+            ),
+        ]
+
+
 class MemberComplianceProfile(models.Model):
     """Extended KYC / bank / nominee data; payouts still read synced User columns."""
 

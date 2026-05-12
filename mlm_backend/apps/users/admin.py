@@ -59,6 +59,7 @@ class UserAdmin(DjangoUserAdmin):
                     "compliance_submission_version",
                     "bank_account_number",
                     "bank_ifsc",
+                    "bank_name",
                     "upi_id",
                     "payout_preference",
                     "otp_locked_until",

@@ -18,7 +18,11 @@ from apps.mlm_tree.models import BinaryNode
 from apps.mlm_tree.placement import get_pending_placement_order
 from apps.payments.models import Order
 from apps.wallet.models import WalletTransaction, WithdrawalRequest
-from apps.wallet.services.member_money import build_earnings_response, build_payouts_bundle
+from apps.wallet.services.member_money import (
+    build_earnings_response,
+    build_payouts_bundle,
+    build_todays_earnings_for_dashboard,
+)
 
 from . import team_services
 from .models import User
@@ -475,6 +479,7 @@ def user_dashboard(request: Request):
             "direct_referrals": direct_referrals,
             "available_balance": ((payouts.get("wallet") or {}).get("available_balance")),
             "milestones": {"current": milestones_current, "total": milestones_total, "next_target": next_target},
+            **build_todays_earnings_for_dashboard(u),
         },
         "earnings_cap": {
             "used_amount": cap_progress.get("used_amount"),

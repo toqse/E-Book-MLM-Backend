@@ -66,6 +66,7 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     bank_account_number = models.CharField(max_length=64, null=True, blank=True)
     bank_ifsc = models.CharField(max_length=20, null=True, blank=True)
+    bank_name = models.CharField(max_length=255, null=True, blank=True)
     upi_id = models.CharField(max_length=100, null=True, blank=True)
     payout_preference = models.CharField(
         max_length=10,

@@ -155,6 +155,13 @@ def test_user_payouts_bundle_ladder_length(system_config):
     sponsor.save()
     BinaryTreeService.place_member(sponsor, None)
     Wallet.objects.filter(user=sponsor).update(total_earned=Decimal("5000"))
+    User.objects.filter(pk=sponsor.pk).update(
+        bank_account_number="123456789012",
+        bank_ifsc="hdfc0001234",
+        bank_name="HDFC Bank",
+        upi_id="member@okhdfcbank",
+    )
+    sponsor.refresh_from_db()
 
     client = APIClient()
     client.force_authenticate(user=sponsor)
@@ -163,6 +170,18 @@ def test_user_payouts_bundle_ladder_length(system_config):
     body = r.json()["data"]
     assert len(body["bands"]) == 9
     assert "recent_movements" in body
+    assert "bank_details" in body
+    assert body["bank_details"]["account_number"] == "XXXX9012"
+    assert body["bank_details"]["ifsc"] == "HDFC0001234"
+    assert body["bank_details"]["bank_name"] == "HDFC Bank"
+    assert body["upi_id"] == "member@okhdfcbank"
+
+    User.objects.filter(pk=sponsor.pk).update(upi_id="")
+    sponsor.refresh_from_db()
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+    r2 = client.get("/api/v1/user/payouts/")
+    assert r2.json()["data"]["upi_id"] is None
 
 
 @pytest.mark.django_db

@@ -286,10 +286,18 @@ def wallet_withdraw(request):
         )
         locked_balance = min(wallet.cash_balance or ZERO, recent_credit)
         available_balance = max(ZERO, (wallet.cash_balance or ZERO) - locked_balance)
-        if amount <= ZERO or amount > available_balance:
+        if amount <= ZERO:
             return envelope_response(
                 None,
                 message="Invalid amount",
+                success=False,
+                errors={"detail": "invalid_amount"},
+                status=400,
+            )
+        if amount > available_balance:
+            return envelope_response(
+                None,
+                message="Insufficient Balance",
                 success=False,
                 errors={"detail": "insufficient_available_balance"},
                 status=400,

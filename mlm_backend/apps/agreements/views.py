@@ -3,6 +3,7 @@ import uuid
 
 from django.conf import settings
 from django.db import transaction
+from django.http import FileResponse
 from rest_framework import permissions, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.request import Request
@@ -19,12 +20,17 @@ from apps.authentication.otp import (
 from apps.common.client_ip import get_client_ip
 from apps.common.permissions import IsSuperAdmin
 from apps.common.responses import envelope_response
+from apps.users.models import User
 from .models import (
     AgreementCategory,
     LegalDocument,
     MemberComplianceProfile,
     UserAgreementAcceptance,
+    UserAgreementAcceptanceDeclaration,
 )
+from .proof_download_token import parse_proof_download_token
+from .proof_service import ensure_proof_for_batch
+from .user_docs import build_agreements_user_array
 from .serializers import (
     AgreementOTPSendSerializer,
     AgreementOTPVerifySerializer,
@@ -91,7 +97,12 @@ def legal_documents_public_list(request: Request):
     ser = LegalDocumentPublicSerializer(
         qs, many=True, context={"request": request}
     )
-    return envelope_response({"results": ser.data})
+    return envelope_response(
+        {
+            "results": ser.data,
+            "user": build_agreements_user_array(request, request.user),
+        }
+    )
 
 
 @api_view(["GET"])
@@ -164,9 +175,11 @@ def agreement_send_otp(request: Request):
             errors={"detail": "rate_limited"},
             status=status.HTTP_429_TOO_MANY_REQUESTS,
         )
+    declaration = ser.validated_data["declaration"]
     payload = {
         "document_ids": sorted(doc_ids),
         "user_id": user.id,
+        "declaration": declaration,
     }
     rec = create_otp_record(
         phone=phone,
@@ -216,6 +229,15 @@ def agreement_verify(request: Request):
             success=False,
             status=400,
         )
+    if "declaration" not in got_p:
+        return envelope_response(
+            None,
+            message="This OTP session has no declaration. Request a new code from "
+            "POST /api/v1/agreements/send-otp/ including a declaration text.",
+            success=False,
+            status=400,
+        )
+    declaration_text = (got_p.get("declaration") or "").strip()
     docs = list(
         LegalDocument.objects.filter(
             id__in=doc_ids,
@@ -239,6 +261,11 @@ def agreement_verify(request: Request):
             acceptance_batch_id=batch,
             ip=ip,
         )
+        UserAgreementAcceptanceDeclaration.objects.create(
+            user=user,
+            acceptance_batch_id=batch,
+            declaration_text=declaration_text,
+        )
     write_audit(
         "agreement.accepted",
         actor=user,
@@ -248,6 +275,71 @@ def agreement_verify(request: Request):
     return envelope_response(
         {"acceptance_batch_id": str(batch), "accepted_document_ids": doc_ids},
         message="Agreements accepted",
+    )
+
+
+@api_view(["GET"])
+@permission_classes([permissions.AllowAny])
+def agreement_acceptance_proof_download(request: Request, acceptance_batch_id: uuid.UUID):
+    """
+    Download the stored agreement acceptance proof PDF for a batch (attachment disposition).
+
+    Auth: either ``Authorization: Bearer <access>`` (same user as batch owner), or a signed
+    ``token`` query string returned in ``pdf_download_url`` from GET /api/v1/agreements/
+    (so opening the link in a browser works without custom headers).
+    """
+    user: User | None = None
+    if getattr(request.user, "is_authenticated", False):
+        user = request.user
+    else:
+        raw = (request.query_params.get("token") or "").strip()
+        if not raw:
+            return envelope_response(
+                None,
+                message=(
+                    "Authentication credentials were not provided. "
+                    "Open the full pdf_download_url from GET /api/v1/agreements/ "
+                    "(it includes a signed token query parameter), "
+                    "or send Authorization: Bearer <access_token>."
+                ),
+                success=False,
+                status=401,
+                errors={"detail": "Authentication credentials were not provided."},
+            )
+        parsed = parse_proof_download_token(raw)
+        if parsed is None:
+            return envelope_response(
+                None,
+                message="Invalid or expired download link. Refresh agreements and use the new pdf_download_url.",
+                success=False,
+                status=401,
+            )
+        uid, bid_from_token = parsed
+        if bid_from_token != acceptance_batch_id:
+            return envelope_response(
+                None,
+                message="Invalid download link.",
+                success=False,
+                status=400,
+            )
+        user = User.objects.filter(pk=uid).first()
+        if user is None:
+            return envelope_response(None, message="Not found", success=False, status=404)
+
+    if not UserAgreementAcceptance.objects.filter(
+        user=user, acceptance_batch_id=acceptance_batch_id
+    ).exists():
+        return envelope_response(None, message="Not found", success=False, status=404)
+    proof = ensure_proof_for_batch(user, acceptance_batch_id)
+    if not proof or not (getattr(proof.pdf_file, "name", None) or "").strip():
+        return envelope_response(None, message="Proof not available", success=False, status=404)
+    short = str(acceptance_batch_id).replace("-", "")[:8]
+    filename = f"agreement-acceptance-proof-{short}.pdf"
+    return FileResponse(
+        proof.pdf_file.open("rb"),
+        as_attachment=True,
+        filename=filename,
+        content_type="application/pdf",
     )
 
 

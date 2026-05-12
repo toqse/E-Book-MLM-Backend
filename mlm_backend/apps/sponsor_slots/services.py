@@ -9,7 +9,8 @@ from apps.admin_panel.models import SystemConfig
 from apps.payments.models import Order
 from apps.wallet.bands import BAND_EDGES
 
-from .models import SponsorSlotBatch, SponsorSlotCode
+from .audit_log import log_sponsor_audit
+from .models import SponsorSlotAuditEvent, SponsorSlotBatch, SponsorSlotCode
 
 
 class SponsorSlotService:
@@ -49,7 +50,7 @@ class SponsorSlotService:
         cfg: SystemConfig | None = None,
         *,
         current_total_earned: Decimal | None = None,
-    ):
+    ) -> SponsorSlotBatch:
         if cfg is None:
             from apps.admin_panel.utils import get_system_config
 
@@ -74,10 +75,10 @@ class SponsorSlotService:
             expires_at=expires_at,
         )
         for i in range(total_codes):
-            code_str = "SPONSOR-" + secrets.token_hex(3).upper()
-            while SponsorSlotCode.objects.filter(code=code_str).exists():
-                code_str = "SPONSOR-" + secrets.token_hex(3).upper()
-            SponsorSlotCode.objects.create(
+            code_str = "SP-" + secrets.token_hex(3).upper()
+            while SponsorSlotCode.objects.filter(code__iexact=code_str).exists():
+                code_str = "SP-" + secrets.token_hex(3).upper()
+            c = SponsorSlotCode.objects.create(
                 batch=batch,
                 issued_to=user,
                 code=code_str,
@@ -85,8 +86,15 @@ class SponsorSlotService:
                 unlock_at_total_earned=unlock_thresholds[i],
                 expires_at=expires_at,
             )
+            log_sponsor_audit(
+                c,
+                SponsorSlotAuditEvent.EventType.ISSUED,
+                actor=None,
+                metadata={"batch_id": batch.id, "band_number": band_number},
+            )
         if current_total_earned is not None:
             SponsorSlotService.unlock_due_codes(user=user, total_earned=Decimal(current_total_earned))
+        return batch
 
     @staticmethod
     def validate_code(code: str, redeemer=None) -> SponsorSlotCode | None:
@@ -114,6 +122,12 @@ class SponsorSlotService:
         code.redeemed_by = redeemer
         code.redeemed_order = order
         code.save()
+        log_sponsor_audit(
+            code,
+            SponsorSlotAuditEvent.EventType.REDEEMED,
+            actor=redeemer,
+            metadata={"order_id": order.id, "order_number": order.order_number},
+        )
         batch = code.batch
         batch.codes_redeemed += 1
         batch.save(update_fields=["codes_redeemed"])
