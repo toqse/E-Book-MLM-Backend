@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import GSTInvoice, Order
+from .models import GSTInvoice, Order, RefundRequest
 
 
 @admin.register(Order)
@@ -100,6 +100,29 @@ class OrderAdmin(admin.ModelAdmin):
             },
         ),
     )
+
+
+@admin.register(RefundRequest)
+class RefundRequestAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "reference",
+        "status",
+        "amount",
+        "payment_method",
+        "razorpay_refund_id",
+        "user",
+        "order",
+        "order_line",
+        "created_at",
+        "approved_at",
+    )
+    list_filter = ("status", "payment_method", "created_at")
+    search_fields = ("reference", "user__member_id", "order__order_number")
+    autocomplete_fields = ("user", "order", "processing_by", "approved_by", "rejected_by")
+    raw_id_fields = ("order_line",)
+    readonly_fields = ("created_at", "updated_at")
+    ordering = ("-id",)
 
 
 @admin.register(GSTInvoice)

@@ -383,9 +383,12 @@ def user_dashboard(request: Request):
     next_target = next((t for t in thresholds if direct_referrals < t), None)
 
     summary = (earnings or {}).get("summary") or {}
-    hero = summary.get("hero") or {}
-    cap_progress = hero.get("cap_progress") or {}
-    breakdown_inline = hero.get("breakdown_inline") or {}
+    cap_block = summary.get("cap") or {}
+    income = summary.get("income") or {}
+    direct_l1 = income.get("direct_l1") or {}
+    passive_l2_l4 = income.get("passive_l2_l4") or {}
+    milestone_inc = income.get("milestone") or {}
+    slots_inc = income.get("slots") or {}
 
     # Recent activity: merge-sort across bounded sources.
     feed_limit = 20
@@ -410,10 +413,10 @@ def user_dashboard(request: Request):
                 at=at,
                 kind="EARNINGS",
                 title=str(row.get("type") or "Earnings"),
-                subtitle=str(row.get("description") or "") or None,
-                amount=row.get("net_credited"),
+                subtitle=str(row.get("detail") or row.get("description") or "") or None,
+                amount=row.get("net") or row.get("net_credited"),
                 meta={
-                    "entry_kind": row.get("entry_kind"),
+                    "kind": row.get("kind") or row.get("entry_kind"),
                     "status": row.get("status"),
                     "order_id": row.get("order_id"),
                 },
@@ -475,23 +478,23 @@ def user_dashboard(request: Request):
     data = {
         "profile": {"full_name": u.full_name, "member_id": u.member_id},
         "tiles": {
-            "total_earnings": hero.get("lifetime_earnings"),
+            "total_earnings": summary.get("lifetime_earnings"),
             "direct_referrals": direct_referrals,
             "available_balance": ((payouts.get("wallet") or {}).get("available_balance")),
             "milestones": {"current": milestones_current, "total": milestones_total, "next_target": next_target},
             **build_todays_earnings_for_dashboard(u),
         },
         "earnings_cap": {
-            "used_amount": cap_progress.get("used_amount"),
-            "cap_amount": cap_progress.get("cap_amount"),
-            "used_percent": cap_progress.get("used_percent"),
-            "remaining_amount": cap_progress.get("remaining_amount"),
+            "used_amount": cap_block.get("used"),
+            "cap_amount": cap_block.get("limit"),
+            "used_percent": cap_block.get("used_pct"),
+            "remaining_amount": cap_block.get("remaining"),
         },
         "earnings_breakdown": {
-            "direct": breakdown_inline.get("direct"),
-            "passive": breakdown_inline.get("passive"),
-            "milestone": breakdown_inline.get("milestone"),
-            "slots": breakdown_inline.get("slots"),
+            "direct": direct_l1.get("amount"),
+            "passive": passive_l2_l4.get("amount"),
+            "milestone": milestone_inc.get("amount"),
+            "slots": slots_inc.get("amount"),
         },
         "wallet": payouts.get("wallet"),
         "recent_activity": activity,

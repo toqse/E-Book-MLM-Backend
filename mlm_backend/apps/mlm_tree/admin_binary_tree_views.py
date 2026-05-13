@@ -101,6 +101,7 @@ def admin_binary_tree_dashboard(request: Request):
         "now": now.isoformat(),
         "config": {
             "refund_window_days": int(cfg.refund_window_days),
+            "cooling_off_days": int(cfg.cooling_off_days),
             "placement_manual_window_hours": int(cfg.placement_manual_window_hours),
             "auto_placement_strategy": cfg.auto_placement_strategy,
         },

@@ -18,6 +18,7 @@ from apps.common.responses import envelope_response
 from apps.payments.models import GSTInvoice, Order
 from apps.payments.services import ensure_gst_invoice_pdf
 from apps.users.models import User
+from apps.users.services import effective_company_referral_code, environment_company_referral_code
 from apps.wallet.models import Wallet
 
 
@@ -803,6 +804,8 @@ def system_config_view(request):
                 "upline_commission": str(cfg.upline_commission),
                 "earning_cap": str(cfg.earning_cap),
                 "refund_window_days": cfg.refund_window_days,
+                "cooling_off_days": cfg.cooling_off_days,
+                "refund_request_sla_hours": int(cfg.refund_request_sla_hours or 0),
                 "placement_manual_window_hours": cfg.placement_manual_window_hours,
                 "auto_placement_strategy": cfg.auto_placement_strategy,
                 "is_repurchase_commission_allowed": cfg.is_repurchase_commission_allowed,
@@ -827,6 +830,10 @@ def system_config_view(request):
                     "nodal_officer_phone": cfg.nodal_officer_phone or "",
                     "grievance_sla_hours": int(cfg.grievance_sla_hours or 0),
                 },
+                "default_company_referral_code": effective_company_referral_code(),
+                "default_company_referral_code_environment": environment_company_referral_code(),
+                "default_company_referral_code_override": (cfg.default_company_referral_code or "").strip()
+                or None,
             }
         )
     data = request.data or {}
@@ -841,6 +848,8 @@ def system_config_view(request):
     }
     int_fields = {
         "refund_window_days",
+        "cooling_off_days",
+        "refund_request_sla_hours",
         "placement_manual_window_hours",
         "grievance_sla_hours",
     }
@@ -851,6 +860,8 @@ def system_config_view(request):
         "upline_commission",
         "earning_cap",
         "refund_window_days",
+        "cooling_off_days",
+        "refund_request_sla_hours",
         "placement_manual_window_hours",
         "auto_placement_strategy",
         "is_repurchase_commission_allowed",
@@ -862,10 +873,23 @@ def system_config_view(request):
         "nodal_officer_email",
         "nodal_officer_phone",
         "grievance_sla_hours",
+        "default_company_referral_code",
     ]:
         if field not in data:
             continue
         val = data[field]
+        if field == "default_company_referral_code":
+            if val in (None, ""):
+                cfg.default_company_referral_code = ""
+            elif isinstance(val, str):
+                s = val.strip()
+                if len(s) > 64:
+                    errors[field] = "max_length_64"
+                    continue
+                cfg.default_company_referral_code = s
+            else:
+                errors[field] = "must_be_string"
+            continue
         if field in ("is_repurchase_commission_allowed", "auto_process_milestone_bonuses"):
             setattr(
                 cfg,

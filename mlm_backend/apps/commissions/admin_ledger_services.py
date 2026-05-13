@@ -1,0 +1,207 @@
+"""Admin Commission Engine: shared queryset filters, serialization, and aggregates."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any
+
+from django.db.models import Q, QuerySet, Sum
+
+from apps.admin_panel.utils import get_system_config
+
+from .models import CommissionLedger
+
+MAX_PAGE_SIZE = 100
+DEFAULT_PAGE_SIZE = 20
+
+
+@dataclass(frozen=True)
+class AdminCommissionFilters:
+    q: str
+    status: str  # all | processed | pending | reversed | held
+    level: str  # all | L1 | L2 | L3 | L4 | passive
+    exclude_milestone: bool
+
+
+def _norm(s: str | None) -> str:
+    return (s or "").strip()
+
+
+def parse_admin_commission_filters(query_params: dict[str, Any]) -> AdminCommissionFilters:
+    raw_status = _norm(query_params.get("status")).lower() or "all"
+    if raw_status not in ("all", "processed", "pending", "reversed", "held"):
+        raw_status = "all"
+    raw_level = _norm(query_params.get("level")).upper()
+    if raw_level == "ALL" or not raw_level:
+        raw_level = "all"
+    else:
+        raw_level = raw_level.lower()
+        if raw_level not in ("l1", "l2", "l3", "l4", "passive"):
+            raw_level = "all"
+    em = query_params.get("exclude_milestone")
+    if em is None:
+        exclude_milestone = True
+    else:
+        s = str(em).strip().lower()
+        exclude_milestone = s not in ("0", "false", "no", "off", "")
+    return AdminCommissionFilters(
+        q=_norm(query_params.get("q")),
+        status=raw_status,
+        level=raw_level,
+        exclude_milestone=exclude_milestone,
+    )
+
+
+def base_ledger_queryset() -> QuerySet[CommissionLedger]:
+    return CommissionLedger.objects.select_related("recipient", "source_user", "order")
+
+
+def apply_admin_commission_filters(
+    qs: QuerySet[CommissionLedger], flt: AdminCommissionFilters
+) -> QuerySet[CommissionLedger]:
+    if flt.exclude_milestone:
+        qs = qs.exclude(commission_type=CommissionLedger.CommissionType.MILESTONE)
+    if flt.q:
+        term = flt.q
+        qs = qs.filter(
+            Q(recipient__full_name__icontains=term)
+            | Q(recipient__member_id__icontains=term)
+            | Q(order__order_number__icontains=term)
+            | Q(order__razorpay_order_id__icontains=term)
+        )
+    ct = CommissionLedger.CommissionType
+    if flt.level == "l1":
+        qs = qs.filter(commission_type=ct.DIRECT)
+    elif flt.level == "l2":
+        qs = qs.filter(commission_type=ct.UPLINE_L2)
+    elif flt.level == "l3":
+        qs = qs.filter(commission_type=ct.UPLINE_L3)
+    elif flt.level == "l4":
+        qs = qs.filter(commission_type=ct.UPLINE_L4)
+    elif flt.level == "passive":
+        qs = qs.filter(
+            commission_type__in=(ct.UPLINE_L2, ct.UPLINE_L3, ct.UPLINE_L4),
+        )
+    st = CommissionLedger.Status
+    if flt.status == "processed":
+        qs = qs.filter(status=st.CREDITED)
+    elif flt.status == "pending":
+        qs = qs.filter(status__in=(st.PENDING, st.HELD))
+    elif flt.status == "reversed":
+        qs = qs.filter(status=st.REVERSED)
+    elif flt.status == "held":
+        qs = qs.filter(status=st.HELD)
+    return qs
+
+
+def commission_level_label(commission_type: str) -> str | None:
+    if commission_type == CommissionLedger.CommissionType.DIRECT:
+        return "L1"
+    mapping = {
+        CommissionLedger.CommissionType.UPLINE_L2: "L2",
+        CommissionLedger.CommissionType.UPLINE_L3: "L3",
+        CommissionLedger.CommissionType.UPLINE_L4: "L4",
+        CommissionLedger.CommissionType.MILESTONE: "MS",
+    }
+    return mapping.get(commission_type)
+
+
+def display_status_for_ledger(row: CommissionLedger) -> str:
+    st = CommissionLedger.Status
+    if row.status == st.REVERSED:
+        return "Reversed"
+    if row.status == st.CREDITED:
+        return "Processed"
+    if row.status in (st.PENDING, st.HELD):
+        return "Pending"
+    return row.status
+
+
+def _tds_rate_percent(amount: Decimal, tds: Decimal) -> str | None:
+    if amount <= 0 or tds <= 0:
+        return None
+    try:
+        pct = (tds / amount) * Decimal("100")
+        return str(pct.quantize(Decimal("0.01")))
+    except Exception:
+        return None
+
+
+def serialize_admin_commission_row(row: CommissionLedger) -> dict[str, Any]:
+    gross = row.amount
+    tds = row.tds_deducted
+    return {
+        "id": row.id,
+        "created_at": row.created_at.isoformat(),
+        "order": {
+            "id": row.order_id,
+            "order_number": row.order.order_number,
+            "razorpay_order_id": row.order.razorpay_order_id or None,
+        },
+        "earner": {
+            "member_id": row.recipient.member_id,
+            "full_name": row.recipient.full_name,
+        },
+        "buyer": {
+            "member_id": row.source_user.member_id,
+            "full_name": row.source_user.full_name,
+        },
+        "commission_type": row.commission_type,
+        "level": commission_level_label(row.commission_type),
+        "gross": str(gross),
+        "tds_deducted": str(tds),
+        "net_amount": str(row.net_amount),
+        "tds_rate_percent": _tds_rate_percent(gross, tds),
+        "status": row.status,
+        "status_display": display_status_for_ledger(row),
+        "wallet_reference": f"COMM-{row.order.order_number}",
+    }
+
+
+def serialize_admin_commission_detail(row: CommissionLedger) -> dict[str, Any]:
+    base = serialize_admin_commission_row(row)
+    o = row.order
+    base["order_detail"] = {
+        "id": o.id,
+        "order_number": o.order_number,
+        "razorpay_order_id": o.razorpay_order_id or None,
+        "status": o.status,
+        "amount_paid": str(o.amount_paid),
+        "paid_at": o.paid_at.isoformat() if o.paid_at else None,
+        "is_retail_purchase": o.is_retail_purchase,
+    }
+    return base
+
+
+def build_admin_commission_summary(flt: AdminCommissionFilters) -> dict[str, Any]:
+    qs = apply_admin_commission_filters(base_ledger_queryset(), flt)
+    st = CommissionLedger.Status
+    paid = qs.filter(status=st.CREDITED).aggregate(s=Sum("net_amount"))["s"] or Decimal("0")
+    pending = qs.filter(status__in=(st.PENDING, st.HELD)).aggregate(s=Sum("net_amount"))[
+        "s"
+    ] or Decimal("0")
+    rev = qs.filter(status=st.REVERSED).aggregate(s=Sum("net_amount"))["s"] or Decimal("0")
+    cfg = get_system_config()
+    q2 = Decimal("0.01")
+    return {
+        "total_paid": str(paid.quantize(q2)),
+        "pending": str(pending.quantize(q2)),
+        "reversed": str(rev.quantize(q2)),
+        "total_entries": qs.count(),
+        "direct_commission_unit": str(cfg.direct_commission),
+        "upline_commission_unit": str(cfg.upline_commission),
+    }
+
+
+def parse_pagination(query_params: dict[str, Any]) -> tuple[int, int]:
+    try:
+        page = max(1, int(query_params.get("page", 1) or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(query_params.get("page_size", DEFAULT_PAGE_SIZE) or DEFAULT_PAGE_SIZE)
+    except (TypeError, ValueError):
+        page_size = DEFAULT_PAGE_SIZE
+    page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+    return page, page_size

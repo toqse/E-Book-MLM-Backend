@@ -7,17 +7,40 @@ from django.db import transaction
 from .models import User
 
 
-def _company_referral_raw() -> str:
-    """Read settings at call time so .env-loaded values apply (not stale import-time defaults)."""
-    return getattr(settings, "DEFAULT_COMPANY_REFERRAL_CODE", "Admin").strip()
+def _env_company_referral_raw() -> str:
+    """Value from DEFAULT_COMPANY_REFERRAL_CODE in settings (typically from env)."""
+    return (getattr(settings, "DEFAULT_COMPANY_REFERRAL_CODE", "Admin") or "Admin").strip()
+
+
+def _stored_company_referral_override() -> str:
+    try:
+        from apps.admin_panel.utils import get_system_config
+
+        cfg = get_system_config()
+        return (getattr(cfg, "default_company_referral_code", None) or "").strip()
+    except Exception:
+        return ""
+
+
+def effective_company_referral_code() -> str:
+    """Active company referral code: DB override on SystemConfig when set, else env default."""
+    override = _stored_company_referral_override()
+    if override:
+        return override
+    return _env_company_referral_raw() or "Admin"
+
+
+def environment_company_referral_code() -> str:
+    """DEFAULT_COMPANY_REFERRAL_CODE from settings only (ignores DB override)."""
+    return _env_company_referral_raw() or "Admin"
 
 
 def company_referral_code_normalized() -> str:
-    return _company_referral_raw().upper()
+    return effective_company_referral_code().upper()
 
 
 def _is_reserved_referral_code(code: str) -> bool:
-    return bool(code and code.strip().upper() == _company_referral_raw().upper())
+    return bool(code and code.strip().upper() == effective_company_referral_code().upper())
 
 
 def _random_referral_code() -> str:

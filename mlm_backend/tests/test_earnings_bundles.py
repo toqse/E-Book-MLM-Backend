@@ -133,10 +133,23 @@ def test_user_earnings_overview_and_ledger(system_config):
     data = r.json()["data"]
     assert "summary" in data
     assert "ledger" in data
-    assert data["summary"]["income_cards"]["direct_commission_l1"]["amount"] != "0.00"
+    w = data["summary"]["wallet"]
+    assert set(w.keys()) == {"available_to_withdraw", "locked", "withdrawn"}
+    assert data["summary"]["income"]["direct_l1"]["amount"] != "0.00"
     assert data["ledger"]["total_count"] >= 1
     assert len(data["ledger"]["rows"]) >= 1
-    assert "running_balance" in data["ledger"]["rows"][0]
+    row0 = data["ledger"]["rows"][0]
+    assert "balance" in row0
+    assert "running_balance" in row0
+    assert row0["balance"] == row0["running_balance"]
+    assert "date" in row0 and "time" in row0
+    assert "description" in row0 and row0["description"] == row0["detail"]
+    assert "tds_deducted" in row0 and row0["tds_deducted"] == row0["tds"]
+    assert "net_credited" in row0 and row0["net_credited"] == row0["net"]
+    assert "status_label" in row0
+    assert "via_downline" in row0
+    assert "at" in row0
+    assert "kind" in row0
 
 
 @pytest.mark.django_db

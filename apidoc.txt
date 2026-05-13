@@ -18,6 +18,8 @@ Standard JSON envelope (most endpoints — see exceptions below):
 Exceptions to the envelope:
   • CSV export endpoints — return plain text/csv HTTP responses with Content-Disposition;
     Content-Type: text/csv.
+  • Some admin exports (e.g. GET /api/v1/admin/commissions/export/ with export_format=pdf) return
+    application/pdf with Content-Disposition: attachment.
 
 Validation errors may use DRF’s field error structure inside "errors" (via envelope
 exception handler) for 400-class failures.
@@ -46,7 +48,8 @@ FLOWS (high level)
    - Generic POST /api/v1/auth/send-otp/ does NOT accept purpose=REGISTER (use register/send-otp/).
    - LOGIN / KYC OTP (phone channel): same strict E.164 with leading + as registration (e.g. +918589960592).
    - data.tokens + data.user on successful verify.
-   - Company referral code "Admin": see DEFAULT_COMPANY_REFERRAL_CODE / superuser (earlier docs).
+   - Company referral code (default "Admin"): env DEFAULT_COMPANY_REFERRAL_CODE, overridable via
+     SystemConfig (PATCH superadmin GET/PATCH /api/v1/admin/config/ or PATCH /api/v1/auth/me/); see auth/me admin block.
 
 2) Member login
    - POST /api/v1/auth/send-otp/  purpose=LOGIN
@@ -61,7 +64,7 @@ FLOWS (high level)
 4) Compliance (agreements OTP + extended KYC/bank/nominee)
    - GET /api/v1/agreements/ (Bearer) — active legal documents + `user` array (order invoice URLs, compliance acceptance proof download URL); optional category filter.
    - GET /api/v1/agreements/acceptance-proof/<uuid>/download/ — download agreement acceptance proof PDF (attachment). Use full `pdf_download_url` from agreements (includes signed `token` for browser) or Bearer.
-   - GET /api/v1/agreements/compliance-legal/ (Bearer) — subset: active documents with category LEGAL DOCUMENT and requires_acceptance_for_compliance=true only.
+   - GET /api/v1/agreements/compliance-legal/ (Bearer) — subset: active documents with category LEGAL DOCUMENT and requires_acceptance_for_compliance=true only; response includes `user` { id, full_name } for the authenticated member.
    - POST /api/v1/agreements/send-otp/ — JSON { "document_ids": [int, ...], "declaration": "<text>" }; OTP payload binds documents + user + declaration; declaration appears on acceptance proof PDF.
    - POST /api/v1/agreements/verify/ — JSON { "document_ids", "otp_code" }; records UserAgreementAcceptance + declaration row + client IP.
   - POST /api/v1/auth/compliance/submit/ — multipart form: identity, address, nominee, bank, payout; files pan_document,
@@ -73,11 +76,11 @@ FLOWS (high level)
 5) Course catalog and enrollment
    - GET /api/v1/courses/ (public) — grouped catalog without pdf_url; with Bearer, each book includes is_already_purchased; filters and pagination unchanged
    - GET /api/v1/courses/<slug>/ (public)
-   - Cart (Bearer): GET /api/v1/user/cart/ — items + totals preview; POST /api/v1/user/cart/items/ — body ebook_id or ebook_slug; DELETE /api/v1/user/cart/items/<id>/; DELETE /api/v1/user/cart/ — clear; POST /api/v1/user/cart/checkout/ — same billing/sponsor/is_retail as create-order, response shape matches create-order (then POST /api/v1/payments/verify/ with order_id)
+   - Cart (Bearer): GET /api/v1/user/cart/ — items + totals preview; POST /api/v1/user/cart/items/ — body ebook_id or ebook_slug; DELETE /api/v1/user/cart/items/<id>/; DELETE /api/v1/user/cart/ — clear; POST /api/v1/user/cart/checkout/ — same billing/sponsor/is_retail as create-order; response = create-order fields + full_name + phone for the buyer (then POST /api/v1/payments/verify/ with order_id)
    - Purchase (direct buy): POST /api/v1/payments/create-order/ (Bearer) — ebook_id or ebook_slug (optional; both → id wins), sponsor_code / sponsor_slot_code, is_retail, optional billing_* snapshot fields for the GST invoice
    - Zero-amount path when valid sponsor slot; else Razorpay order (amount_paise, razorpay_order_id, key_id).
    - POST /api/v1/payments/verify/ (Bearer) — order_id + Razorpay payment id/signature; on success order is PAID, enrollment + GST invoice PDF generated when applicable
-   - GET /api/v1/user/orders/ (Bearer) — payment-completed orders (PAID) i.e. purchased books history; may include invoice_url (absolute URL to download invoice PDF when available)
+   - GET /api/v1/user/orders/ (Bearer) — PAID and REFUNDED orders; each row includes `items[]` (per checkout line: order_line_id, ebook_id, title, thumbnail, refundable_amount, can_refund) plus legacy `ebook_title`/`thumbnail_url` from the order’s primary ebook; `order_refundable_amount` for remaining full-order refund cap; `open_refund_requests` lists open PENDING/PROCESSING requests (with optional order_line_id); `can_refund` when any line or full remainder can still be requested (per-line / full-order open-request rules)
    - GET /api/v1/user/orders/<id>/invoice/ (Bearer OR signed token) — downloads invoice PDF (Content-Disposition: attachment)
    - GET /api/v1/user/courses/enrolled/ — same grouped shape as GET /courses/ for published books you are enrolled in; optional category/language/search and pagination
    - GET /api/v1/user/courses/enrolled/<slug>/ | /enrolled/<id>/ — same body as GET /courses/<slug>|<id>/ (pdf_url + is_already_purchased); 403 if not enrolled
@@ -178,6 +181,10 @@ GET/PATCH /api/v1/auth/me/
     - sponsor: { member_id, full_name } or null
     - binary_placement: position, level, position_label
     - team_legs: left_leg_count, right_leg_count, weaker_leg, left_leg_label, right_leg_label, subtree_member_count
+    - admin (only when caller is staff with role SUPER_ADMIN, FINANCE, or SUPPORT):
+      - default_company_referral_code: active value used for sponsor resolution and reserved-code checks
+        (SystemConfig override when set, otherwise DEFAULT_COMPANY_REFERRAL_CODE from the environment).
+      - default_company_referral_code_environment: env/settings value before override (for display).
   PATCH — Edit profile fields (partial update).
     Content-Type: application/json
     Body fields:
@@ -191,6 +198,9 @@ GET/PATCH /api/v1/auth/me/
       - state (string, optional)
       - country (string, optional)
       - payout_preference (string, optional): "BANK" or "UPI".
+      - default_company_referral_code (string, optional): SUPER_ADMIN only; max 64 chars after trim.
+        Persists to SystemConfig; send empty string to clear override and use env DEFAULT_COMPANY_REFERRAL_CODE again.
+        Same field is PATCHable on GET/PATCH /api/v1/admin/config/ (superadmin).
     Example body:
       {
         "full_name": "Unnikrishnan K",
@@ -208,6 +218,7 @@ GET/PATCH /api/v1/auth/me/
       - Send only the fields you want to update.
       - Name/email update on User; DOB/address fields update MemberComplianceProfile.
       - If neither field is sent, response still returns current profile payload.
+      - If default_company_referral_code is present and the caller is not role SUPER_ADMIN: 403 errors.detail super_admin_only.
   Success data: same shape as GET; message "Updated"
 
 POST /api/v1/auth/kyc/submit/
@@ -287,7 +298,7 @@ GET /api/v1/agreements/acceptance-proof/<acceptance_batch_id>/download/
 
 GET /api/v1/agreements/compliance-legal/
   Auth: Bearer.
-  No query params. Success data: { "results": [ ... ] } — same object shape as each element of `results` from GET /api/v1/agreements/, but only rows where:
+  No query params. Success data: { "results": [ ... ], "user": { "id": <int>, "full_name": "<member name>" } } — same object shape as each element of `results` from GET /api/v1/agreements/, but only rows where:
     is_active=true, requires_acceptance_for_compliance=true, and category is LEGAL DOCUMENT (case-insensitive).
 
 POST /api/v1/agreements/send-otp/
@@ -527,7 +538,7 @@ GET /api/v1/admin/binary-tree/dashboard/
   Auth: Bearer + IsAdminRole.
   Success data: {
     "now": "<iso>",
-    "config": { "refund_window_days", "placement_manual_window_hours", "auto_placement_strategy" },
+    "config": { "refund_window_days", "cooling_off_days", "placement_manual_window_hours", "auto_placement_strategy" },
     "cards": { "pending_placements", "unplaced_members", "empty_slots", "imbalanced_ratio_gt_3_1" }
   }
 
@@ -628,45 +639,59 @@ GET /api/v1/user/earnings/
     `data.ledger.total_count` is the total count across the active `period` + `type` filters.
   Success data (subset keys omitted when include excludes that section):
     "summary": {
-      "hero": {
-        "title", "subtitle", "lifetime_earnings",
-        "breakdown_inline" { direct, passive, milestone, slots },
-        "cap_progress" { used_percent, used_amount, cap_amount, remaining_amount },
-        "available_in_wallet"
+      "title", "subtitle", "lifetime_earnings",
+      "cap": { used_pct, used, limit, remaining },
+      "wallet": {
+        available_to_withdraw, locked, withdrawn
       },
-      "wallet_cards": {
-        "withdrawn_all_time", "available_to_withdraw", "on_pay_hold",
-        "tds_deducted_fy", "reversed_referrals"
+      "income": {
+        "direct_l1" { amount, units, unit },
+        "passive_l2_l4" { amount, units, unit },
+        "milestone" { amount },
+        "slots" { amount, redeemed, unit }
       },
-      "income_cards": {
-        "direct_commission_l1" { amount, units, unit_amount },
-        "tree_passive_l2_l4" { amount, units, unit_amount },
-        "milestone_bonuses" { amount },
-        "sponsor_slot_value" { amount, codes_redeemed, unit_amount }
-      },
-      "band_strip": {
-        "current_band", "current_band_number", "message", "next_band"
-      },
-      "rules_strip": { "title", "message" },
+      "band": { label, number, next, policy },
+      "rule": { title, text },
       "fy_label", "kyc_status"
     },
     "filters": {
-      "selected_period", "selected_type",
-      "period_options": [today, 7d, 30d, fy, all],
-      "type_options": [all, direct, passive, milestone, pending, reversed]
+      "period", "type",
+      "periods": [today, 7d, 30d, fy, all],
+      "types": [all, direct, passive, milestone, pending, reversed]
     },
     "ledger": {
       "rows": [ unified rows ],
       "total_count", "page", "page_size"
     }
-  Ledger row fields: id, entry_kind (COMMISSION|MILESTONE), at, date, time, type,
-    level, description, triggered_by { member_id, full_name }|null, via_downline,
-    gross, tds_deducted, net_credited, running_balance, status, order_id.
-  Notes: on_pay_hold = sum of credited commission net still under Order.refund_eligible_until.
-    running_balance is emitted per returned row in descending time order.
-    Per-line tds may be 0 until engine writes tds_deducted. Slots amount =
-    count(REDEEMED sponsor codes issued to you) × ₹100 display unit.
-    `page` and `page_size` are clamped server-side: `page` >= 1, `page_size` in [1..100].
+  Per-stream lifetime amounts are the four strings under summary.income.*.amount
+  (direct_l1, passive_l2_l4, milestone, slots); summary.breakdown is not returned.
+  Ledger row fields (commissions + milestones; aliases kept for existing clients):
+    id, kind (COMMISSION|MILESTONE), at (ISO datetime),
+    date (e.g. "13 May 2026"), time (12h local, e.g. "01:45 PM"),
+    type (Direct|Passive|Reversed|Pending; Milestone|Held|Pending for milestones),
+    detail, description (same string as detail, for table DESCRIPTION column),
+    triggered_by { member_id, full_name }|null (joiner / source user; null for milestones),
+    via_downline null (reserved for future tree context),
+    level (L1–L4 for commissions; null for milestones),
+    gross, tds, tds_deducted (same as tds), net, net_credited (same as net),
+    status (CREDITED|REVERSED|PENDING|HELD), status_label ("Credited"|… title case for UI chips),
+    source { member_id, full_name }|omitted (duplicate of triggered_by when present),
+    referrals (int, milestone rows only),
+    order_id (commissions, if present),
+    balance, running_balance (same decimal string; approximate running cash after this line when
+    walking newest-first — see note below),
+  Notes:
+    - summary.wallet values are decimal strings. locked = cash not yet withdrawable under the wallet cooling
+      window (length = SystemConfig.cooling_off_days, echoed as cooling_days on GET /api/v1/user/payouts/ and
+      GET /api/v1/user/wallet/); available_to_withdraw matches withdrawal checks. For TDS and richer wallet fields
+      use GET /api/v1/user/payouts/.
+    - balance / running_balance are emitted per returned row in descending time order; they only
+      reflect commission+milestone lines on this feed (withdrawals and other wallet movements are
+      not included). REVERSED rows adjust the walk so running totals are less wrong than treating
+      them as credits.
+    - Per-line tds may be 0 until engine writes tds_deducted.
+    - Slots amount = count(REDEEMED sponsor codes issued to you) × ₹100 display unit.
+    - `page` and `page_size` are clamped server-side: `page` >= 1, `page_size` in [1..100].
 
 
 MODULE: User — Dashboard (member home)
@@ -720,7 +745,8 @@ GET /api/v1/user/payouts/
   Auth: Bearer.
   Query: movements — optional "1" or "true" to include recent_movements (last 25).
   Success data: {
-    "wallet": { cash_balance, total_earned, total_withdrawn, total_tds_deducted,
+    "wallet": { cash_balance, available_balance, locked_balance, cooling_days (int; from SystemConfig.cooling_off_days),
+      total_earned, total_withdrawn, total_tds_deducted,
       fy_label, band_cash_withdrawn_fy, current_band, withdrawals_blocked, kyc_status },
     "bands": [ 9 entries: band, range_low, range_high, kind CASH|SLOT,
       slot_expiry_days (int|null; null for CASH bands), is_current, unlocked, progress_in_band_percent ],
@@ -782,27 +808,92 @@ GET /api/v1/user/commissions/tds/
 
 MODULE: Admin — Commissions (/api/v1/admin/commissions*)
 --------------------------------------------------------------------------------
+Shared query params (list, summary, export; not on detail):
+  - q: search earner full_name, earner member_id, order_number, razorpay_order_id (icontains).
+  - status: all (default) | processed | pending | reversed | held
+      processed → ledger CREDITED; pending → PENDING + HELD; reversed → REVERSED; held → HELD only.
+  - level: all (default) | L1 | L2 | L3 | L4 | passive  (L1=DIRECT; L2..L4=upline types; passive=all uplines).
+  - exclude_milestone: default true (book MLM ledger). Pass false | 0 | off to include MILESTONE rows.
+List pagination:
+  - page (default 1), page_size (default 20, max 100).
+
+GET /api/v1/admin/commissions/summary/
+  Auth: Bearer + IsFinanceAdmin.
+  Same filters as list (q, status, level, exclude_milestone); no pagination.
+  Success data: {
+    "total_paid", "pending", "reversed" — decimal strings (2 places), sums of net_amount for:
+      CREDITED (paid), PENDING+HELD (pending), REVERSED (reversed);
+    "total_entries" — count of rows matching filters;
+    "direct_commission_unit", "upline_commission_unit" — from SystemConfig (subtitle / rate copy for UI).
+  }
+
 GET /api/v1/admin/commissions/
   Auth: Bearer + IsFinanceAdmin.
   Success data: {
+    "count", "page", "page_size",
     "results": [
-      { "id", "recipient": "<member_id>", "source": "<member_id>",
-        "type", "net" }, ... up to 200
+      {
+        "id", "created_at",
+        "order": { "id", "order_number", "razorpay_order_id" },
+        "earner": { "member_id", "full_name" },
+        "buyer": { "member_id", "full_name" },
+        "commission_type", "level" (L1|L2|L3|L4|MS|null),
+        "gross", "tds_deducted", "net_amount" (strings),
+        "tds_rate_percent" (string or null),
+        "status", "status_display" (Processed|Pending|Reversed),
+        "wallet_reference" — e.g. COMM-<order_number>
+      }, ...
     ]
   }
 
+GET /api/v1/admin/commissions/<int:pk>/
+  Auth: Bearer + IsFinanceAdmin.
+  Same row fields as list item plus "order_detail": order id, order_number, razorpay_order_id, status,
+  amount_paid, paid_at, is_retail_purchase.
+  Errors: 404 if ledger id missing.
+
 GET /api/v1/admin/commissions/pending/
-  Success data: { "results": [ ledger id ints, ... up to 100 ] }
+  Auth: Bearer + IsFinanceAdmin.
+  Same optional filters as list (q, level, exclude_milestone) but status is forced to pending (PENDING+HELD).
+  Max 100 rows, same "results" row shape as GET /api/v1/admin/commissions/?status=pending.
+  Success data also includes "note" pointing to the paginated list endpoint.
 
 POST /api/v1/admin/commissions/force-credit/
-  Auth: Bearer + IsSuperAdmin only.
-  Success data: { "ok": false, "detail": "Not implemented in demo" }
+  Auth: Bearer + IsFinanceAdmin (SUPER_ADMIN or FINANCE + is_staff).
+  Body (JSON): { "user_id": <int> } — recipient user whose HELD backlog to process (required).
+  Behaviour:
+    - Does not run on KYC/compliance approval; finance triggers this explicitly.
+    - Processes book-commission ledger rows for that recipient with status HELD or PENDING and net_amount 0,
+      excluding commission_type MILESTONE (milestones use the milestone admin queue).
+    - Skips a row when: recipient kyc_status is not VERIFIED; order is not PAID (e.g. REFUNDED);
+      earning_cap leaves no room (earning_cap_reached); or payout gross would be zero.
+    - Same wallet/TDS/cap rules as live commission credit; WalletTransaction reference COMM-<order_number>;
+      meta includes "admin_held_release": true. If gross exceeds remaining cap room, pays a partial gross and
+      creates a new HELD row for the remainder.
+    - Audit action: commission.admin_held_release (payload lists credited_ids and skipped reasons).
+  Success data: {
+    "ok": true,
+    "credited_ids": [ ledger ids updated to CREDITED, ... ],
+    "skipped": [ { "id", "reason" }, ... ],
+    "processed_count": <int>
+  }
+  Reasons in skipped examples: kyc_not_verified | order_not_paid | earning_cap_reached | zero_gross_credit
+  Errors:
+    - 400 — missing or invalid user_id (errors.detail invalid_user_id)
+    - 404 — user_id does not exist (data includes ok: false, detail: user_not_found)
 
 GET /api/v1/admin/commissions/tds-report/
   Demo stub: { "month": "2026-04", "tds": "0.00" }
 
 GET /api/v1/admin/commissions/export/
-  Plain CSV attachment; columns: type,amount (no JSON envelope).
+  Auth: Bearer + IsFinanceAdmin.
+  Binary attachment (not JSON envelope). Same filters as list (q, status, level, exclude_milestone).
+  Query: export_format=csv (default) | pdf
+    Do not use query name "format" — Django REST framework reserves it for content negotiation and can yield 404.
+  CSV: header row then one row per ledger line (id, created_at, order_number, razorpay_order_id, earner_member_id,
+    earner_name, buyer_member_id, level, commission_type, gross, tds_deducted, net_amount, status, status_display).
+  PDF: ReportLab table with the same columns.
+  Errors: 400 invalid_export_format if export_format is not csv or pdf.
 
 
 MODULE: Wallet — Member (/api/v1/user/wallet*)  [legacy fields; prefer /user/payouts/]
@@ -810,7 +901,8 @@ MODULE: Wallet — Member (/api/v1/user/wallet*)  [legacy fields; prefer /user/p
 GET /api/v1/user/wallet/
   Auth: Bearer.
   Success data: {
-    "cash_balance", "total_earned", "current_band", "fy_withdrawn",
+    "cash_balance", "available_balance", "locked_balance", "cooling_days" (int; from SystemConfig.cooling_off_days),
+    "total_earned", "current_band", "fy_withdrawn",
     "total_withdrawn", "fy_label", "withdrawals_blocked"
   } (amounts as strings; current_band int).
 
@@ -837,7 +929,7 @@ POST /api/v1/user/wallet/withdraw/
     - KYC VERIFIED
     - payout method details exist (BANK: bank_account_number+bank_ifsc, UPI: upi_id)
     - band must equal wallet.current_band and be a cash band (1,3,5,7,9)
-    - amount >= 200 and ≤ available_balance (cash_balance minus locked cooling-period credits)
+    - amount >= 200 and ≤ available_balance (cash_balance minus locked credits within cooling_off_days)
   Side effects:
     - Creates WithdrawalRequest (PENDING)
     - Applies Sec 194H TDS at request-time (PAN: 2%, else 20%) using cumulative-FY threshold
@@ -1212,7 +1304,14 @@ DELETE /api/v1/user/cart/
 POST /api/v1/user/cart/checkout/
   Auth: Bearer.
   Body: same optional fields as POST /api/v1/payments/create-order/ (sponsor_code / sponsor_slot_code, is_retail, billing_*).
-  Success data: identical to create-order (Razorpay or zero-amount PAID path). Cart is emptied after a successful checkout.
+  Success data — same keys as POST /api/v1/payments/create-order/ for the Razorpay vs zero-amount branch, plus always:
+    • "full_name" — authenticated member’s display name (string).
+    • "phone" — member’s registered phone when set, else null.
+  Paid (Razorpay) branch additionally: order_id, order_number, amount_paise, razorpay_order_id, key_id.
+  Zero-amount (valid sponsor slot) branch additionally: order_id, order_number, amount_paise: 0,
+    razorpay_order_id: null, key_id, status (typically PAID).
+  Cart lines for the purchased books are removed when the order is PAID: immediately on this response for the
+    zero-amount path; after POST /api/v1/payments/verify/ succeeds when paying via Razorpay.
   Errors: 400 — empty cart, unpublished book in cart, already enrolled for a cart line, etc.; 401; 500 — Razorpay not configured / gateway errors.
   After success, client completes payment with POST /api/v1/payments/verify/ using returned order_id (unchanged).
 
@@ -1299,14 +1398,47 @@ GET /api/v1/user/orders/
         "ebook_title": "<string|null>",
         "thumbnail_url": "<absolute HTTPS/HTTP URL string|null>",
         "amount_paid": "<decimal string>",
-        "invoice_url": "<absolute HTTPS/HTTP URL string|null>"
+        "order_refundable_amount": "<decimal string>" — for PAID orders, remaining amount that can still be covered by an
+          order-wide (no line) refund request after approved refunds; "0" for REFUNDED or when nothing left.
+        "items": [
+          {
+            "order_line_id": <int|null> — null only for legacy single-ebook orders with no OrderLine rows (synthetic row),
+            "ebook_id": <int>,
+            "slug": "<string|null>",
+            "title": "<string|null>",
+            "thumbnail_url": "<absolute URL|null>",
+            "unit_base_price": "<decimal string>",
+            "refundable_amount": "<decimal string>",
+            "can_refund": <boolean> — per line: PAID, in refund window, positive refundable_amount, and no open request for that line
+          }, ...
+        ],
+        "invoice_url": "<absolute HTTPS/HTTP URL string|null>",
+        "open_refund_requests": [
+          { "reference", "status", "order_line_id": <int|null>, "ebook_title": "<string|null>" }, ...
+        ],
+        "refund_request": null | {
+          "reference": "<string>",
+          "status": "PENDING" | "PROCESSING",
+          "order_line_id": <int|null>,
+          "ebook_title": "<string|null>"
+        } | {
+          "reference": "<string>",
+          "status": "APPROVED",
+          "razorpay_refund_id": "<string|null>",
+          "order_line_id": <int|null>,
+          "ebook_title": "<string|null>"
+        } — when order status is REFUNDED and an approved RefundRequest exists, the APPROVED shape is returned
+          (latest APPROVED per order); open requests (PENDING/PROCESSING) take precedence on PAID orders.
+        "can_refund": <boolean> — true when status is PAID, now <= refund_eligible_until, and at least one of:
+          a full-order remainder refund can be submitted, or a line-item refund can be submitted for some line
+          (see open-refund blocking: at most one open full-order request, and at most one open request per order line).
       },
-      ... newest first, max 50 (PAID orders only)
+      ... newest first, max 50 (PAID and REFUNDED only; CREATED/FAILED excluded)
     ]
   }
   invoice_url:
-    • null for non-PAID orders, or when no GST invoice exists yet.
-    • For PAID orders: absolute URL to an endpoint that downloads the invoice PDF (server may generate
+    • null when no GST invoice exists yet.
+    • For PAID or REFUNDED orders with an invoice: absolute URL to download the invoice PDF (server may generate
       on demand if missing). null if PDF file is still unavailable (e.g. generation error).
     • Includes a short-lived signed `token` query param so it can be opened in a browser without sending Authorization header.
 
@@ -1321,10 +1453,110 @@ Invoice PDF branding (operators): optional environment variables COMPANY_NAME, G
   INVOICE_PAYMENT_DETAILS, INVOICE_TERMS_AND_CONDITIONS (see mlm_backend/.env.example).
 
 POST /api/v1/user/orders/<id>/refund/
-  Auth: Bearer; <id> must be your order.
-  Allowed only when status is PAID and now <= refund_eligible_until (from SystemConfig.refund_window_days).
-  Success data: { "status": "REFUNDED" } — reverses commissions (when applicable), removes enrollment tied to this order.
-  Errors: 401; 400 — not PAID / refund window expired; 404 — order not found or not yours.
+  Auth: Bearer; <id> must be your order primary key.
+  Allowed only when status is PAID and now <= refund_eligible_until (snapshot from SystemConfig.refund_window_days at payment).
+  Effect: submits a refund **request** (PENDING) for finance admin approval — does **not** refund instantly.
+  Body (optional JSON): {
+    "note" | "member_note": "<string>" — trimmed; max ~4000 chars stored as member_note.
+    "order_line_id": <int> — optional; when set, request targets that checkout line (multi-item cart orders). Omit for a
+      order-wide refund of the **remaining** captured amount (after any approved refunds). Legacy orders without OrderLine
+      rows must omit order_line_id.
+  }
+  Success data: {
+    "reference": "RET-<year>-<order_pk>-<seq>",
+    "status": "PENDING",
+    "created_at": "<ISO datetime>",
+    "amount": "<decimal string>" — line share of amount_paid (including proportional gateway) or full remaining for order-wide,
+    "order_line_id": <int|null>
+  }
+  Errors:
+    • 401 — unauthenticated.
+    • 404 — order not yours / not found.
+    • 400 — not PAID / refund window closed / invalid order_line_id / nothing left to refund / blocked because an open
+      request already exists for that scope (full-order open blocks all new requests; line open blocks the same line and
+      blocks new full-order requests while any line-specific request is open).
+
+GET /api/v1/user/refund-requests/
+  Auth: Bearer.
+  Success data: {
+    "results": [
+      {
+        "id", "reference", "order_id", "order_number",
+        "order_line_id": <int|null>, "ebook_id": <int|null>, "ebook_title": "<string|null>",
+        "amount": "<decimal string>",
+        "payment_method": "GATEWAY" | "DIRECT" (DIRECT when razorpay_payment_id starts with MANUAL-),
+        "status": "PENDING"|"PROCESSING"|"APPROVED"|"REJECTED",
+        "member_note", "invoice_number", "purchase_date" (YYYY-MM-DD),
+        "reject_reason": present when REJECTED,
+        "created_at", "approved_at"|null, "rejected_at"|null,
+        "razorpay_refund_id": "<string|null>" — set when a GATEWAY refund succeeded at Razorpay on admin approval; null for DIRECT or before approval
+      }, ... newest first, max 100
+    ]
+  }
+
+GET /api/v1/admin/refunds/summary/
+  Auth: IsFinanceAdmin (SUPER_ADMIN or FINANCE, staff).
+  Dashboard-style aggregates:
+    • pending_review — count of requests in PENDING or PROCESSING.
+    • approved_today — { count, amount_refunded } — APPROVED with approved_at local date = today (amount sum uses request.amount).
+    • sla — open_total (= pending_review), open_within_sla / open_overdue computed from created_at vs
+      SystemConfig.refund_request_sla_hours (hours until created_at + SLA passes).
+    • commission_reversed_this_month — sum of CommissionLedger.net_amount where status REVERSED and order_id belongs to a
+      request APPROVED in the current calendar month (server local timezone month start).
+    • avg_processing_hours_last_30d — mean (approved_at - created_at) in hours for APPROVED in last 30 days, or null.
+
+GET /api/v1/admin/refunds/
+  Auth: IsFinanceAdmin.
+  Query:
+    • status — optional filter (PENDING|PROCESSING|APPROVED|REJECTED)
+    • q — optional search reference, member_id/full_name substring, GST invoice_number
+    • page (default 1), page_size (max 200, default 50)
+  Success data: {
+    count, page, page_size,
+    results: [
+      {
+        id, reference,
+        member: { full_name, member_id, phone },
+        order_id, order_line_id|null, ebook_id|null, ebook_title|null,
+        invoice_number|null, purchase_date (YYYY-MM-DD|null),
+        amount (decimal string), payment_method,
+        status, member_note|null, reject_reason|null,
+        created_at, processing_at|null, approved_at|null, rejected_at|null,
+        razorpay_refund_id|null
+      }, ...
+    ]
+  }
+
+POST /api/v1/admin/refunds/<id>/mark-processing/
+  Auth: IsFinanceAdmin.
+  Allowed when status is PENDING → sets PROCESSING, processing_at, processing_by (idempotent 200 if already PROCESSING).
+
+POST /api/v1/admin/refunds/<id>/approve/
+  Auth: IsFinanceAdmin.
+  Flow:
+    1) Pre-check: refund request exists, not closed, linked order is PAID.
+    2) **Razorpay refund (GATEWAY only)** — before any DB row locks: calls Razorpay `payments/<payment_id>/refunds`
+      with `amount` in paise (from `RefundRequest.amount`). Uses same credentials as checkout (`SystemConfig`
+      or env). **DIRECT** payments (`razorpay_payment_id` prefixed `MANUAL-`): skip this step (offline settlement).
+    3) Inside a transaction (row locks): re-verify open request + PAID order, then runs internal fulfilment —
+      Razorpay partial amount is refunded; enrollments removed for the refunded line (or all enrollments when the request
+      is order-wide with order_line_id null). Order stays **PAID** until cumulative **approved** refund amounts reach
+      ``order.amount_paid`` (within a small rounding tolerance); then order is set **REFUNDED**, commissions are reversed
+      once, and any remaining enrollments for that order are cleared. Sets request APPROVED plus `razorpay_refund_id`
+      when the gateway returned one.
+  Success: { id, status, approved_at, razorpay_refund_id | null }
+  Errors:
+    • 503 — Razorpay keys missing / client not configured (GATEWAY orders only; no DB changes).
+    • 502 — Razorpay refund API error (safe message; order stays PAID; request stays open).
+    • 400 — invalid state (closed / order not PAID / missing payment id on GATEWAY order).
+    • 404 — request not found.
+    • 500 — rare: Razorpay refund succeeded but finalize failed; audit `refund.razorpay_ok_db_failed` is written
+      for ops; errors payload may include `razorpay_refund_id` for reconciliation.
+
+POST /api/v1/admin/refunds/<id>/reject/
+  Auth: IsFinanceAdmin.
+  Body (optional): { "reason": "<string>" } → stored reject_reason.
+  Allowed when PENDING or PROCESSING; order remains PAID.
 
 GET /api/v1/admin/orders/
   Auth: IsFinanceAdmin.
@@ -1455,7 +1687,7 @@ GET/PATCH /api/v1/admin/config/
   GET data: {
     "product_base_price", "gst_rate", "direct_commission", "upline_commission",
     "earning_cap" } as strings;
-    "refund_window_days", "placement_manual_window_hours" (integers);
+    "refund_window_days", "cooling_off_days", "refund_request_sla_hours", "placement_manual_window_hours" (integers);
     "auto_placement_strategy": "LEFT_FIRST"|"RIGHT_FIRST"|"LONG_LEG"|"WEAK_LEG";
     "is_repurchase_commission_allowed" (boolean, default false) — when false, the
     commission engine does not distribute MLM commissions on a buyer's second and
@@ -1482,7 +1714,12 @@ GET/PATCH /api/v1/admin/config/
           "grievance_sla_hours": <int>
         }
       - PATCH accepts: nodal_officer_name, nodal_officer_email, nodal_officer_phone, grievance_sla_hours
-  PATCH body: any subset of the above; sets updated_by.
+    Company referral (runtime override of DEFAULT_COMPANY_REFERRAL_CODE):
+      - default_company_referral_code: active value (DB override or env).
+      - default_company_referral_code_environment: env/settings value only.
+      - default_company_referral_code_override: stored override string or null when empty (env used).
+      - PATCH accepts: default_company_referral_code (string, max 64 after trim; empty string clears override).
+  PATCH body: any subset of the above; includes refund_request_sla_hours (non-negative int, default 48 for open refund SLA dashboard). refund_window_days (buyer refund / placement cool-off eligibility) and cooling_off_days (wallet credit cooling for withdrawals) are independent non-negative ints. sets updated_by.
   Success PATCH: { "ok": true }
 
 

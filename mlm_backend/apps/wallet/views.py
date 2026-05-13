@@ -33,7 +33,6 @@ CASH_BANDS = frozenset({1, 3, 5, 7, 9})
 SLOT_BANDS = frozenset({2, 4, 6, 8})
 MIN_WITHDRAWAL = Decimal("200.00")
 ZERO = Decimal("0.00")
-COOLING_DAYS = 7
 
 
 def _q2(raw: Decimal) -> Decimal:
@@ -150,7 +149,9 @@ def user_payouts_bundle(request: Request):
 def wallet_me(request):
     w = get_wallet_row(request.user)
     kyc_ok = request.user.kyc_status == User.KYCStatus.VERIFIED
-    cutoff = timezone.now() - timedelta(days=COOLING_DAYS)
+    cfg = get_system_config()
+    cooling_days = max(0, int(cfg.cooling_off_days))
+    cutoff = timezone.now() - timedelta(days=cooling_days)
     recent_credit = (
         WalletTransaction.objects.filter(
             user=request.user,
@@ -166,7 +167,7 @@ def wallet_me(request):
             "cash_balance": str(w.cash_balance),
             "available_balance": str(available_balance),
             "locked_balance": str(locked_balance),
-            "cooling_days": COOLING_DAYS,
+            "cooling_days": cooling_days,
             "total_earned": str(w.total_earned),
             "current_band": w.current_band,
             "fy_withdrawn": str(w.band_cash_withdrawn_fy),
@@ -275,7 +276,9 @@ def wallet_withdraw(request):
                 errors={"detail": "band_mismatch", "current_band": wallet.current_band},
                 status=400,
             )
-        cutoff = timezone.now() - timedelta(days=COOLING_DAYS)
+        cfg = get_system_config()
+        cooling_days = max(0, int(cfg.cooling_off_days))
+        cutoff = timezone.now() - timedelta(days=cooling_days)
         recent_credit = (
             WalletTransaction.objects.filter(
                 user=user,

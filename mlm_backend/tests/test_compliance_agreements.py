@@ -433,7 +433,9 @@ def test_agreements_compliance_legal_list_filters():
     )
     r = client.get("/api/v1/agreements/compliance-legal/")
     assert r.status_code == 200
-    rows = r.json()["data"]["results"]
+    data = r.json()["data"]
+    rows = data["results"]
+    assert data["user"] == {"id": u.id, "full_name": u.full_name}
     assert len(rows) == 1
     assert rows[0]["name"] == "Legal Req"
     assert rows[0]["requires_acceptance_for_compliance"] is True

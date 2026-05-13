@@ -10,6 +10,7 @@ from apps.commissions import user_views as comm_views
 from apps.commissions import admin_milestone_views as admin_ms_views
 from apps.courses import views as course_views
 from apps.banners import views as banner_views
+from apps.payments import refund_request_views as pay_refunds
 from apps.payments import views as pay_views
 from apps.sponsor_slots import views as slot_views
 from apps.mlm_tree import admin_placement_views as mlm_placement_admin
@@ -94,11 +95,13 @@ urlpatterns = [
     path("api/v1/user/commissions/summary/", comm_views.user_commissions_summary),
     path("api/v1/user/commissions/milestones/", comm_views.user_milestones),
     path("api/v1/user/commissions/tds/", comm_views.user_tds),
-    path("api/v1/admin/commissions/", comm_views.admin_commissions),
+    path("api/v1/admin/commissions/summary/", comm_views.admin_commissions_summary),
     path("api/v1/admin/commissions/pending/", comm_views.admin_commissions_pending),
     path("api/v1/admin/commissions/force-credit/", comm_views.admin_force_credit),
     path("api/v1/admin/commissions/tds-report/", comm_views.admin_tds_report),
     path("api/v1/admin/commissions/export/", comm_views.admin_commissions_export),
+    path("api/v1/admin/commissions/<int:pk>/", comm_views.admin_commission_detail),
+    path("api/v1/admin/commissions/", comm_views.admin_commissions),
     # Admin — Milestone bonuses
     path("api/v1/admin/milestones/", admin_ms_views.admin_milestones_dashboard),
     path("api/v1/admin/milestones/queue/", admin_ms_views.admin_milestones_queue),
@@ -171,6 +174,15 @@ urlpatterns = [
     path("api/v1/user/orders/", pay_views.my_orders),
     path("api/v1/user/orders/<int:pk>/invoice/", pay_views.order_invoice),
     path("api/v1/user/orders/<int:pk>/refund/", pay_views.order_refund),
+    path("api/v1/user/refund-requests/", pay_refunds.user_refund_requests),
+    path("api/v1/admin/refunds/summary/", pay_refunds.admin_refunds_summary),
+    path("api/v1/admin/refunds/", pay_refunds.admin_refunds_list),
+    path(
+        "api/v1/admin/refunds/<int:pk>/mark-processing/",
+        pay_refunds.admin_refund_mark_processing,
+    ),
+    path("api/v1/admin/refunds/<int:pk>/approve/", pay_refunds.admin_refund_approve),
+    path("api/v1/admin/refunds/<int:pk>/reject/", pay_refunds.admin_refund_reject),
     path("api/v1/admin/orders/", pay_views.admin_orders),
     path(
         "api/v1/admin/orders/<str:order_ref>/verify-payment-manual/",

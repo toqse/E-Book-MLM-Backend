@@ -27,7 +27,6 @@ SLOT_BAND_NUMBERS = frozenset({2, 4, 6, 8})
 # Display value per redeemed sponsor code (issuer); aligns with common UI copy.
 SLOT_LEDGER_UNIT_VALUE = Decimal("100")
 ZERO = Decimal("0")
-COOLING_DAYS = 7
 
 
 def _fmt_money(v: Decimal | None) -> str:
@@ -35,16 +34,32 @@ def _fmt_money(v: Decimal | None) -> str:
 
 
 def _fmt_date_time(dt: datetime) -> tuple[str, str]:
+    """Local calendar date and 12h time for ledger UI columns."""
     local_dt = timezone.localtime(dt) if timezone.is_aware(dt) else dt
     return local_dt.strftime("%d %b %Y"), local_dt.strftime("%I:%M %p")
 
 
-def cooling_snapshot(*, user: User, wallet: Wallet) -> dict[str, Any]:
+def _ledger_status_label(status: str) -> str:
+    """Title-case label for STATUS column (matches common UI chips)."""
+    s = (status or "").strip().upper()
+    if s == "CREDITED":
+        return "Credited"
+    if s == "REVERSED":
+        return "Reversed"
+    if s == "PENDING":
+        return "Pending"
+    if s == "HELD":
+        return "Held"
+    return s.title() or status
+
+
+def cooling_snapshot(*, user: User, wallet: Wallet, cooling_days: int) -> dict[str, Any]:
     """
-    Cooling rule (7 days): recent CREDIT movements are locked from withdrawal.
+    Recent CREDIT movements within `cooling_days` are locked from withdrawal.
     Returns decimal values (not strings) for internal composition.
     """
-    cutoff = timezone.now() - timedelta(days=COOLING_DAYS)
+    days = max(0, int(cooling_days))
+    cutoff = timezone.now() - timedelta(days=days)
     recent_credit = (
         WalletTransaction.objects.filter(
             user=user,
@@ -56,7 +71,7 @@ def cooling_snapshot(*, user: User, wallet: Wallet) -> dict[str, Any]:
     locked_balance = min(wallet.cash_balance or ZERO, recent_credit)
     available_balance = max(ZERO, (wallet.cash_balance or ZERO) - locked_balance)
     return {
-        "cooling_days": COOLING_DAYS,
+        "cooling_days": days,
         "locked_balance": locked_balance,
         "available_balance": available_balance,
     }
@@ -274,84 +289,67 @@ def build_ui_summary(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str,
     agg = commission_aggregates_for_user(user.pk)
     ms_total = milestone_net_total(user.pk)
     slot_amt, slot_n = slot_issuer_display_total(user.pk)
-    hold = refund_window_hold_net(user.pk)
     direct = agg["direct_net"] or ZERO
     passive = agg["passive_net"] or ZERO
-    rev = agg["reversed_net"] or ZERO
     cap = cfg.earning_cap or ZERO
     used = wallet.total_earned or ZERO
     used_pct = float((used / cap) * 100) if cap > 0 else 0.0
     remaining = max(ZERO, cap - used)
     band_name, next_band = _band_text(wallet.current_band)
     tds_rate = (cfg.tds_194h_rate or ZERO) * Decimal("100")
-    cool = cooling_snapshot(user=user, wallet=wallet)
+    cooling_days = max(0, int(cfg.cooling_off_days))
+    cool = cooling_snapshot(user=user, wallet=wallet, cooling_days=cooling_days)
     available_balance = cool["available_balance"]
     locked_balance = cool["locked_balance"]
+    band_policy = (
+        f"Current withdrawal band — cash payout, TDS {tds_rate:.0f}% (Sec 194H); "
+        f"trigger from {_fmt_money(cfg.tds_cash_trigger)}."
+    )
+    one_credit = (
+        f"Direct L1 {_fmt_money(cfg.direct_commission)} or passive L2–L4 "
+        f"{_fmt_money(cfg.upline_commission)} per qualifying join."
+    )
 
     return {
-        "hero": {
-            "title": "My Earnings",
-            "subtitle": "Complete income ledger - commissions, tree passive and milestones",
-            "lifetime_earnings": _fmt_money(used),
-            "breakdown_inline": {
-                "direct": _fmt_money(direct),
-                "passive": _fmt_money(passive),
-                "milestone": _fmt_money(ms_total),
-                "slots": _fmt_money(slot_amt),
-            },
-            "cap_progress": {
-                "used_percent": round(used_pct, 2),
-                "used_amount": _fmt_money(used),
-                "cap_amount": _fmt_money(cap),
-                "remaining_amount": _fmt_money(remaining),
-            },
-            "available_in_wallet": _fmt_money(available_balance),
-            "locked_in_wallet": _fmt_money(locked_balance),
-            "cooling_days": COOLING_DAYS,
+        "title": "My Earnings",
+        "subtitle": "Commissions, tree passive, milestones",
+        "lifetime_earnings": _fmt_money(used),
+        "cap": {
+            "used_pct": round(used_pct, 2),
+            "used": _fmt_money(used),
+            "limit": _fmt_money(cap),
+            "remaining": _fmt_money(remaining),
         },
-        "wallet_cards": {
-            "withdrawn_all_time": _fmt_money(wallet.total_withdrawn),
+        "wallet": {
             "available_to_withdraw": _fmt_money(available_balance),
-            "locked_balance": _fmt_money(locked_balance),
-            "cooling_days": COOLING_DAYS,
-            "on_pay_hold": _fmt_money(hold),
-            "tds_deducted_fy": _fmt_money(wallet.total_tds_deducted),
-            "reversed_referrals": _fmt_money(rev),
+            "locked": _fmt_money(locked_balance),
+            "withdrawn": _fmt_money(wallet.total_withdrawn),
         },
-        "income_cards": {
-            "direct_commission_l1": {
+        "income": {
+            "direct_l1": {
                 "amount": _fmt_money(direct),
                 "units": int(agg["direct_units"] or 0),
-                "unit_amount": _fmt_money(cfg.direct_commission),
+                "unit": _fmt_money(cfg.direct_commission),
             },
-            "tree_passive_l2_l4": {
+            "passive_l2_l4": {
                 "amount": _fmt_money(passive),
                 "units": int(agg["passive_units"] or 0),
-                "unit_amount": _fmt_money(cfg.upline_commission),
+                "unit": _fmt_money(cfg.upline_commission),
             },
-            "milestone_bonuses": {"amount": _fmt_money(ms_total)},
-            "sponsor_slot_value": {
+            "milestone": {"amount": _fmt_money(ms_total)},
+            "slots": {
                 "amount": _fmt_money(slot_amt),
-                "codes_redeemed": slot_n,
-                "unit_amount": _fmt_money(SLOT_LEDGER_UNIT_VALUE),
+                "redeemed": slot_n,
+                "unit": _fmt_money(SLOT_LEDGER_UNIT_VALUE),
             },
         },
-        "band_strip": {
-            "current_band": band_name,
-            "current_band_number": wallet.current_band,
-            "message": (
-                f"Current withdrawal band - Cash payout, TDS {tds_rate:.0f}% applies "
-                f"(Sec 194H). Trigger starts at {_fmt_money(cfg.tds_cash_trigger)}."
-            ),
-            "next_band": next_band,
+        "band": {
+            "label": band_name,
+            "number": wallet.current_band,
+            "next": next_band,
+            "policy": band_policy,
         },
-        "rules_strip": {
-            "title": "One-credit rule",
-            "message": (
-                f"You earn direct L1 at {_fmt_money(cfg.direct_commission)} or passive L2-L4 at "
-                f"{_fmt_money(cfg.upline_commission)} from a qualifying join event."
-            ),
-        },
+        "rule": {"title": "One-credit rule", "text": one_credit},
         "fy_label": wallet.fy_label,
         "kyc_status": user.kyc_status,
     }
@@ -405,47 +403,77 @@ def _serialize_commission(row: CommissionLedger) -> dict[str, Any]:
     triggered = None
     if src:
         triggered = {"member_id": src.member_id, "full_name": src.full_name}
-    d, t = _fmt_date_time(row.created_at)
     net = row.net_amount or ZERO
-    return {
+    st = row.status
+    if st == CommissionLedger.Status.CREDITED:
+        balance_delta = net
+    elif st == CommissionLedger.Status.REVERSED:
+        # Backward running-balance walk: reversal removed cash; undo by adding net.
+        balance_delta = -net
+    else:
+        balance_delta = ZERO
+    level = _commission_level_label(row.commission_type)
+    desc = _commission_description(row)
+    date_s, time_s = _fmt_date_time(row.created_at)
+    out: dict[str, Any] = {
         "id": row.id,
-        "entry_kind": "COMMISSION",
+        "kind": "COMMISSION",
         "at": row.created_at.isoformat(),
-        "date": d,
-        "time": t,
+        "date": date_s,
+        "time": time_s,
         "type": _commission_display_type(row),
-        "level": _commission_level_label(row.commission_type),
-        "description": _commission_description(row),
+        "detail": desc,
+        "description": desc,
         "triggered_by": triggered,
-        "via_downline": None,  # Reserved for deeper tree displays.
+        "via_downline": None,
         "gross": _fmt_money(row.amount),
-        "tds_deducted": _fmt_money(row.tds_deducted),
-        "net_credited": _fmt_money(net),
+        "tds": _fmt_money(row.tds_deducted),
+        "net": _fmt_money(net),
         "status": row.status,
-        "order_id": row.order_id,
-        "_balance_delta": net,
+        "status_label": _ledger_status_label(row.status),
+        "_balance_delta": balance_delta,
     }
+    if level is not None:
+        out["level"] = level
+    if triggered is not None:
+        out["source"] = triggered
+    if row.order_id is not None:
+        out["order_id"] = row.order_id
+    return out
+
+
+def _milestone_display_type(status: str) -> str:
+    if status == "CREDITED":
+        return "Milestone"
+    if status == "PENDING":
+        return "Pending"
+    if status == "HELD":
+        return "Held"
+    return "Milestone"
 
 
 def _serialize_milestone(row: MilestoneRecord) -> dict[str, Any]:
-    d, t = _fmt_date_time(row.created_at)
     net = row.net_bonus or ZERO
+    desc = f"Milestone bonus — {row.milestone_referrals} direct referrals"
+    date_s, time_s = _fmt_date_time(row.created_at)
     return {
         "id": row.id,
-        "entry_kind": "MILESTONE",
+        "kind": "MILESTONE",
         "at": row.created_at.isoformat(),
-        "date": d,
-        "time": t,
-        "type": "Milestone",
-        "level": None,
-        "description": f"Milestone bonus — {row.milestone_referrals} direct referrals",
+        "date": date_s,
+        "time": time_s,
+        "type": _milestone_display_type(row.status),
+        "detail": desc,
+        "description": desc,
         "triggered_by": None,
         "via_downline": None,
+        "level": None,
         "gross": _fmt_money(row.bonus_amount),
-        "tds_deducted": _fmt_money(row.tds_deducted),
-        "net_credited": _fmt_money(net),
+        "tds": _fmt_money(row.tds_deducted),
+        "net": _fmt_money(net),
         "status": row.status,
-        "order_id": None,
+        "status_label": _ledger_status_label(row.status),
+        "referrals": int(row.milestone_referrals),
         "_balance_delta": net if row.status == "CREDITED" else ZERO,
     }
 
@@ -561,7 +589,11 @@ def build_ledger(
 
     balance = wallet_cash_balance(user.pk)
     for row in results:
-        row["running_balance"] = _fmt_money(balance)
+        bal_s = _fmt_money(balance)
+        row["balance"] = bal_s
+        row["running_balance"] = bal_s
+        row["tds_deducted"] = row["tds"]
+        row["net_credited"] = row["net"]
         balance -= row.pop("_balance_delta", ZERO)
 
     return {
@@ -628,7 +660,8 @@ def build_payouts_bundle(user: User, *, include_movements: bool) -> dict[str, An
     wallet = get_wallet_row(user)
     cfg = get_system_config()
     kyc_ok = user.kyc_status == User.KYCStatus.VERIFIED
-    cool = cooling_snapshot(user=user, wallet=wallet)
+    cooling_days = max(0, int(cfg.cooling_off_days))
+    cool = cooling_snapshot(user=user, wallet=wallet, cooling_days=cooling_days)
     locked_balance = cool["locked_balance"]
     available_balance = cool["available_balance"]
     wd_qs = (
@@ -665,7 +698,7 @@ def build_payouts_bundle(user: User, *, include_movements: bool) -> dict[str, An
             "cash_balance": str(wallet.cash_balance),
             "available_balance": str(available_balance),
             "locked_balance": str(locked_balance),
-            "cooling_days": COOLING_DAYS,
+            "cooling_days": cool["cooling_days"],
             "total_earned": str(wallet.total_earned),
             "total_withdrawn": str(wallet.total_withdrawn),
             "total_tds_deducted": str(wallet.total_tds_deducted),
@@ -776,10 +809,10 @@ def build_earnings_response(
         data["summary"] = build_ui_summary(user, wallet, cfg)
     if "ledger" in include:
         data["filters"] = {
-            "selected_period": _parse_period(period),
-            "selected_type": _parse_ledger_type(ledger_type),
-            "period_options": ["today", "7d", "30d", "fy", "all"],
-            "type_options": ["all", "direct", "passive", "milestone", "pending", "reversed"],
+            "period": _parse_period(period),
+            "type": _parse_ledger_type(ledger_type),
+            "periods": ["today", "7d", "30d", "fy", "all"],
+            "types": ["all", "direct", "passive", "milestone", "pending", "reversed"],
         }
         data["ledger"] = build_ledger(
             user,

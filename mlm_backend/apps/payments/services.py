@@ -8,6 +8,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 
 from apps.admin_panel.utils import get_system_config
@@ -16,9 +17,21 @@ from apps.mlm_tree.placement import open_placement_queue_if_needed
 from apps.sponsor_slots.services import SponsorSlotService
 from apps.users.models import User
 
-from .models import GSTInvoice, Order, OrderLine
+from apps.audit.services import write_audit
+from apps.commissions.engine import CommissionEngine
+
+from .models import GSTInvoice, Order, OrderLine, RefundRequest
 
 logger = logging.getLogger(__name__)
+
+
+class RazorpayRefundError(Exception):
+    """Raised when a Razorpay gateway refund cannot be completed (caller maps to HTTP)."""
+
+    def __init__(self, message: str, *, status_code: int = 502):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
 
 
 def normalize_billing_from_payload(data: dict | None) -> dict[str, str]:
@@ -432,3 +445,260 @@ def verify_webhook_signature(body: bytes, signature: str) -> bool:
     secret = (secret_s or "").encode()
     digest = hmac.new(secret, body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(digest, signature or "")
+
+
+def payment_method_for_refund(order: Order) -> str:
+    rid = (order.razorpay_payment_id or "").strip()
+    if rid.startswith("MANUAL-"):
+        return RefundRequest.PaymentMethod.DIRECT
+    return RefundRequest.PaymentMethod.GATEWAY
+
+
+REFUND_SUM_TOLERANCE = Decimal("0.02")
+
+
+def amount_paid_share_by_order_line_id(order: Order) -> dict[int, Decimal]:
+    """Split ``order.amount_paid`` across lines by ``unit_base_price`` ratio; last line absorbs rounding."""
+    lines = list(order.lines.order_by("id").only("id", "unit_base_price"))
+    if not lines:
+        return {}
+    ap = order.amount_paid.quantize(Decimal("0.01"))
+    tot = sum((ln.unit_base_price for ln in lines), Decimal("0")).quantize(Decimal("0.01"))
+    out: dict[int, Decimal] = {}
+    if tot <= 0:
+        n = len(lines)
+        acc = Decimal("0")
+        for i, ln in enumerate(lines):
+            if i == n - 1:
+                out[ln.pk] = (ap - acc).quantize(Decimal("0.01"))
+            else:
+                share = (ap / n).quantize(Decimal("0.01"))
+                out[ln.pk] = share
+                acc += share
+        return out
+    acc = Decimal("0")
+    for i, ln in enumerate(lines):
+        if i == len(lines) - 1:
+            out[ln.pk] = (ap - acc).quantize(Decimal("0.01"))
+        else:
+            share = (ap * (ln.unit_base_price / tot)).quantize(Decimal("0.01"))
+            out[ln.pk] = share
+            acc += share
+    return out
+
+
+def sum_approved_refund_amounts(order_id: int) -> Decimal:
+    s = RefundRequest.objects.filter(
+        order_id=order_id,
+        status=RefundRequest.Status.APPROVED,
+    ).aggregate(s=Sum("amount"))["s"]
+    return (s or Decimal("0")).quantize(Decimal("0.01"))
+
+
+def sum_approved_refund_amounts_for_line(order_line_id: int) -> Decimal:
+    s = RefundRequest.objects.filter(
+        order_line_id=order_line_id,
+        status=RefundRequest.Status.APPROVED,
+    ).aggregate(s=Sum("amount"))["s"]
+    return (s or Decimal("0")).quantize(Decimal("0.01"))
+
+
+def remaining_refundable_for_order(order: Order) -> Decimal:
+    return (order.amount_paid - sum_approved_refund_amounts(order.pk)).quantize(Decimal("0.01"))
+
+
+def remaining_refundable_for_order_line(order: Order, order_line_id: int) -> Decimal:
+    shares = amount_paid_share_by_order_line_id(order)
+    cap = shares.get(order_line_id, Decimal("0"))
+    used = sum_approved_refund_amounts_for_line(order_line_id)
+    return (cap - used).quantize(Decimal("0.01"))
+
+
+def refund_submission_blocked(order_id: int, *, target_order_line_id: int | None) -> bool:
+    open_q = RefundRequest.objects.filter(
+        order_id=order_id,
+        status__in=(
+            RefundRequest.Status.PENDING,
+            RefundRequest.Status.PROCESSING,
+        ),
+    )
+    if open_q.filter(order_line__isnull=True).exists():
+        return True
+    if target_order_line_id is not None:
+        return open_q.filter(order_line_id=target_order_line_id).exists()
+    return open_q.exists()
+
+
+def _next_refund_reference_locked(order_pk: int) -> str:
+    yr = timezone.now().year
+    n = RefundRequest.objects.filter(order_id=order_pk).count() + 1
+    return f"RET-{yr}-{order_pk}-{n:03d}"
+
+
+def refund_razorpay_payment_for_order(
+    order: Order,
+    *,
+    refund_reference: str,
+    amount_inr: Decimal,
+) -> str | None:
+    """
+    Create a Razorpay refund for a GATEWAY capture. Returns refund id or None when DIRECT/offline payment (skip).
+
+    Raises RazorpayRefundError when refund was required but could not be created.
+    """
+    if payment_method_for_refund(order) == RefundRequest.PaymentMethod.DIRECT:
+        return None
+
+    pid = (order.razorpay_payment_id or "").strip()
+    if not pid:
+        raise RazorpayRefundError(
+            "No Razorpay payment id on this order; cannot refund via gateway.",
+            status_code=400,
+        )
+
+    client = _client()
+    if client is None:
+        raise RazorpayRefundError(
+            "Razorpay is not configured.",
+            status_code=503,
+        )
+
+    amt = amount_inr.quantize(Decimal("0.01"))
+    paise = int((amt * Decimal(100)).quantize(Decimal("1")))
+    if paise <= 0:
+        raise RazorpayRefundError("Invalid refund amount.", status_code=400)
+
+    ref_note = (refund_reference or "").strip()[:225]
+    ord_note = (order.order_number or "").strip()[:225]
+    payload = {
+        "amount": paise,
+        "notes": {"refund_reference": ref_note, "order_number": ord_note},
+    }
+    try:
+        resp = client.payment.refund(pid, payload)
+    except Exception as exc:
+        logger.exception(
+            "razorpay_refund_failed payment_id=%s order_id=%s",
+            pid[:20],
+            order.pk,
+        )
+        detail = getattr(exc, "description", None) or getattr(exc, "message", None)
+        if isinstance(detail, dict):
+            detail = detail.get("description") or str(detail)
+        raise RazorpayRefundError(
+            str(detail or exc)[:500],
+            status_code=502,
+        ) from exc
+
+    refund_id = None
+    if isinstance(resp, dict):
+        refund_id = resp.get("id")
+    if not refund_id:
+        raise RazorpayRefundError(
+            "Razorpay returned no refund id.",
+            status_code=502,
+        )
+    return str(refund_id)
+
+
+def apply_approved_refund_fulfillment(
+    *,
+    order: Order,
+    rr: RefundRequest,
+    actor,
+    razorpay_refund_id: str | None,
+) -> None:
+    """
+    After gateway refund succeeds: remove access (enrollments), then if cumulative approved
+    refunds cover ``order.amount_paid``, mark order REFUNDED and reverse commissions.
+    """
+    if order.status != Order.Status.PAID:
+        raise ValueError(f"Order must be PAID to fulfill refund (got {order.status})")
+
+    if rr.order_line_id:
+        line = rr.order_line
+        Enrollment.objects.filter(
+            order_id=order.pk,
+            user_id=order.user_id,
+            ebook_id=line.ebook_id,
+        ).delete()
+    else:
+        Enrollment.objects.filter(order_id=order.pk).delete()
+
+    paid = order.amount_paid.quantize(Decimal("0.01"))
+    prev = sum_approved_refund_amounts(order.pk)
+    total = (prev + rr.amount).quantize(Decimal("0.01"))
+    if total + REFUND_SUM_TOLERANCE >= paid:
+        order.status = Order.Status.REFUNDED
+        order.save(update_fields=["status"])
+        CommissionEngine.reverse_commissions(order)
+        Enrollment.objects.filter(order_id=order.pk).delete()
+
+    audit_payload: dict = {"order_number": order.order_number, "refund_reference": rr.reference}
+    if razorpay_refund_id:
+        audit_payload["razorpay_refund_id"] = razorpay_refund_id
+    write_audit(
+        "refund.approved_fulfilled",
+        actor=actor,
+        target_type="Order",
+        target_id=str(order.pk),
+        payload=audit_payload,
+    )
+
+
+def submit_member_refund_request(
+    *,
+    user,
+    order_id: int,
+    member_note: str = "",
+    order_line_id: int | None = None,
+) -> RefundRequest:
+    """Create a pending refund request. Raises ValueError for business-rule violations."""
+    now = timezone.now()
+    note = (member_note or "").strip()
+    if len(note) > 4000:
+        raise ValueError("Note too long")
+
+    with transaction.atomic():
+        qs = Order.objects.select_for_update().filter(pk=order_id, user=user)
+        o = qs.first()
+        if not o:
+            raise ValueError("Order not found")
+        if o.status != Order.Status.PAID:
+            raise ValueError("Not refundable")
+        if o.refund_eligible_until and now > o.refund_eligible_until:
+            raise ValueError("Refund window closed")
+
+        target_line: OrderLine | None = None
+        if order_line_id is not None:
+            if not o.lines.exists():
+                raise ValueError("Line-based refund is not available for this order")
+            target_line = (
+                OrderLine.objects.select_for_update()
+                .filter(pk=int(order_line_id), order_id=o.pk)
+                .first()
+            )
+            if not target_line:
+                raise ValueError("Order line not found")
+            if refund_submission_blocked(o.pk, target_order_line_id=target_line.pk):
+                raise ValueError("Refund request already pending")
+            amount = remaining_refundable_for_order_line(o, target_line.pk)
+        else:
+            if refund_submission_blocked(o.pk, target_order_line_id=None):
+                raise ValueError("Refund request already pending")
+            amount = remaining_refundable_for_order(o)
+
+        if amount <= Decimal("0"):
+            raise ValueError("Nothing left to refund for this selection")
+
+        ref = _next_refund_reference_locked(o.pk)
+        return RefundRequest.objects.create(
+            reference=ref,
+            order=o,
+            user=o.user,
+            order_line=target_line,
+            amount=amount,
+            payment_method=payment_method_for_refund(o),
+            status=RefundRequest.Status.PENDING,
+            member_note=note,
+        )

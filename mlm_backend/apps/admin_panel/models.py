@@ -19,6 +19,10 @@ class SystemConfig(models.Model):
     tds_194r_rate = models.DecimalField(max_digits=6, decimal_places=4, default=0.1000)
     tds_cash_trigger = models.DecimalField(max_digits=12, decimal_places=2, default=20000)
     refund_window_days = models.PositiveIntegerField(default=7)
+    cooling_off_days = models.PositiveIntegerField(
+        default=7,
+        help_text="Days recent wallet credits are excluded from withdrawable balance.",
+    )
     placement_manual_window_hours = models.PositiveIntegerField(default=24)
     auto_placement_strategy = models.CharField(
         max_length=20,
@@ -47,6 +51,19 @@ class SystemConfig(models.Model):
     nodal_officer_email = models.EmailField(blank=True, default="")
     nodal_officer_phone = models.CharField(max_length=32, blank=True, default="")
     grievance_sla_hours = models.PositiveIntegerField(default=48)
+    refund_request_sla_hours = models.PositiveIntegerField(
+        default=48,
+        help_text="Hours from member request submission for open refund SLA (dashboard metrics).",
+    )
+    default_company_referral_code = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text=(
+            "When set, overrides DEFAULT_COMPANY_REFERRAL_CODE from the environment. "
+            "Empty means use the env value."
+        ),
+    )
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,

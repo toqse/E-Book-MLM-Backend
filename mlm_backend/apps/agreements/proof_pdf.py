@@ -1,8 +1,12 @@
-"""Agreement acceptance proof PDF (ReportLab): logo, attestation block, declaration, HMAC."""
+"""Agreement acceptance proof PDF (ReportLab): logo, attestation block, declaration, HMAC.
+
+Layout is compact for a single A4 page; very long declarations or many documents may still spill.
+"""
 
 from __future__ import annotations
 
 import os
+import re
 from io import BytesIO
 from xml.sax.saxutils import escape
 
@@ -15,6 +19,15 @@ from reportlab.lib.units import mm
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 ACCENT = colors.HexColor("#2c73a9")
+
+# A4 content width for 12mm side margins (keeps tables/logo aligned).
+_PAGE_W = float(A4[0])
+_MARGIN_X = 12 * mm
+_CONTENT_W = _PAGE_W - 2 * _MARGIN_X
+
+# Header logo: cap both width and height. Tall PNGs used to blow up height when only width was set.
+_LOGO_BOX_MAX_W = 20 * mm
+_LOGO_BOX_MAX_H = 9 * mm
 
 DIGITAL_SIGN_REASON = "OTP verified agreement acceptance"
 
@@ -34,9 +47,17 @@ def _logo_flowable():
     if not os.path.exists(logo_path):
         return None
     logo = Image(logo_path)
-    logo.drawWidth = 48 * mm
-    ih, iw = float(logo.imageHeight), float(logo.imageWidth)
-    logo.drawHeight = logo.drawWidth * (ih / iw) if iw else 48 * mm
+    iw = float(logo.imageWidth) or 1.0
+    ih = float(logo.imageHeight) or 1.0
+    max_w, max_h = _LOGO_BOX_MAX_W, _LOGO_BOX_MAX_H
+    # Fit inside box preserving aspect ratio (width- or height-limited).
+    dw = max_w
+    dh = dw * (ih / iw)
+    if dh > max_h:
+        dh = max_h
+        dw = dh * (iw / ih)
+    logo.drawWidth = dw
+    logo.drawHeight = dh
     logo.hAlign = "CENTER"
     return logo
 
@@ -60,45 +81,47 @@ def build_acceptance_proof_pdf_bytes(
     issued_at_signature_display: e.g. 2020.09.08 13:18:17 +0530
     """
     buffer = BytesIO()
+    margin_y = 10 * mm
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
-        rightMargin=18 * mm,
-        leftMargin=18 * mm,
-        topMargin=14 * mm,
-        bottomMargin=16 * mm,
+        rightMargin=_MARGIN_X,
+        leftMargin=_MARGIN_X,
+        topMargin=margin_y,
+        bottomMargin=margin_y,
         title="Agreement acceptance proof",
     )
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
         "ProofTitle",
         parent=styles["Heading1"],
-        fontSize=16,
+        fontSize=14,
         textColor=ACCENT,
-        spaceAfter=8,
+        spaceAfter=4,
+        leading=17,
         alignment=TA_CENTER,
     )
-    body = ParagraphStyle("ProofBody", parent=styles["Normal"], fontSize=10, leading=14)
+    body = ParagraphStyle("ProofBody", parent=styles["Normal"], fontSize=9, leading=12)
     body_center = ParagraphStyle("ProofBodyC", parent=body, alignment=TA_CENTER)
-    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=9, leading=12)
-    sig_label = ParagraphStyle("SigLbl", parent=small, fontSize=9, leading=13)
+    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=8, leading=11)
+    sig_label = ParagraphStyle("SigLbl", parent=small, fontSize=8, leading=11)
 
     story: list = []
 
     logo = _logo_flowable()
     if logo:
-        story.append(Table([[logo]], colWidths=[174 * mm]))
+        story.append(Table([[logo]], colWidths=[_CONTENT_W]))
         story[-1].setStyle(
             TableStyle(
                 [
                     ("ALIGN", (0, 0), (-1, -1), "CENTER"),
                     ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                     ("TOPPADDING", (0, 0), (-1, -1), 0),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2 * mm),
                 ]
             )
         )
-        story.append(Spacer(1, 4 * mm))
+        story.append(Spacer(1, 2 * mm))
 
     story.append(Paragraph("Agreement acceptance — verification record", title_style))
     story.append(
@@ -108,7 +131,7 @@ def build_acceptance_proof_pdf_bytes(
             body_center,
         )
     )
-    story.append(Spacer(1, 8 * mm))
+    story.append(Spacer(1, 3 * mm))
 
     signed_line = escape(signed_by_display or "Member")
     loc_line = escape(location_display or _signature_location_line())
@@ -121,72 +144,90 @@ def build_acceptance_proof_pdf_bytes(
     )
     left_cell = Paragraph(left_txt, sig_label)
     check_para = Paragraph(
-        "<font size='28' color='#22aa44'><b>✓</b></font>",
-        ParagraphStyle("Chk", parent=styles["Normal"], alignment=TA_RIGHT, fontSize=28),
+        "<font size='25' color='#22aa44'><b>✓</b></font>",
+        ParagraphStyle("Chk", parent=styles["Normal"], alignment=TA_RIGHT, fontSize=22),
     )
-    sig_tbl = Table([[left_cell, check_para]], colWidths=[142 * mm, 28 * mm])
+    check_col_w = 26 * mm
+    sig_w = _CONTENT_W - check_col_w
+    sig_tbl = Table([[left_cell, check_para]], colWidths=[sig_w, check_col_w])
     sig_tbl.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-                ("BOX", (0, 0), (-1, -1), 0.6, colors.grey),
-                ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING", (0, 0), (-1, -1), 10),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
                 ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fafafa")),
             ]
         )
     )
     story.append(sig_tbl)
-    story.append(Spacer(1, 8 * mm))
+    story.append(Spacer(1, 3 * mm))
 
-    decl_heading = ParagraphStyle("DeclH", parent=styles["Heading2"], fontSize=12, textColor=ACCENT)
+    decl_heading = ParagraphStyle(
+        "DeclH", parent=styles["Heading2"], fontSize=10, textColor=ACCENT, spaceAfter=2
+    )
     story.append(Paragraph("Declaration", decl_heading))
     decl_body = (declaration_text or "").strip() or "—"
-    story.append(Paragraph(escape(decl_body).replace("\n", "<br/>"), body))
-    story.append(Spacer(1, 8 * mm))
+    decl_style = ParagraphStyle(
+        "DeclBody",
+        parent=styles["Normal"],
+        fontSize=8.5,
+        leading=11,
+    )
+    story.append(Paragraph(escape(decl_body).replace("\n", "<br/>"), decl_style))
+    story.append(Spacer(1, 3 * mm))
 
     meta_html = (
-        f"<b>Member user id:</b> {user_id}<br/>"
         f"<b>Name:</b> {escape(user_display_name or '')}<br/>"
         f"<b>Acceptance batch id:</b> {escape(acceptance_batch_id)}<br/>"
         f"<b>Issued at (server):</b> {escape(issued_at_display)}<br/>"
         f"<b>Client IP(s) recorded:</b> {escape(accepted_ips or '—')}"
     )
-    story.append(Paragraph(meta_html, body))
-    story.append(Spacer(1, 6 * mm))
+    story.append(Paragraph(meta_html, small))
+    story.append(Spacer(1, 3 * mm))
 
     tbl_data = [["Document", "Id", "Version accepted"]]
     for name, did, ver in document_rows:
         tbl_data.append([escape(name), escape(did), escape(ver)])
 
-    t = Table(tbl_data, colWidths=[95 * mm, 22 * mm, 45 * mm])
+    doc_col = _CONTENT_W * 0.58
+    id_col = _CONTENT_W * 0.14
+    ver_col = _CONTENT_W - doc_col - id_col
+    t = Table(tbl_data, colWidths=[doc_col, id_col, ver_col])
     t.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, 0), ACCENT),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 9),
+                ("FONTSIZE", (0, 0), (-1, 0), 8.5),
+                ("FONTSIZE", (0, 1), (-1, -1), 8.5),
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ]
         )
     )
     story.append(t)
-    story.append(Spacer(1, 8 * mm))
+    story.append(Spacer(1, 3 * mm))
 
-    sig_style = ParagraphStyle("Sig", parent=body, fontName="Courier", fontSize=8, leading=10)
-    story.append(Paragraph("<b>HMAC-SHA256 (hex)</b>", body))
+    sig_style = ParagraphStyle("Sig", parent=body, fontName="Courier", fontSize=7, leading=9)
+    story.append(Paragraph("<b>HMAC-SHA256 (hex)</b>", small))
     story.append(Paragraph(escape(signature_hex), sig_style))
 
     doc.build(story)
     out = buffer.getvalue()
     buffer.close()
     return out
+
+
+def acceptance_proof_pdf_page_count(pdf_bytes: bytes) -> int:
+    """Count page objects (excludes /Type /Pages parent). Best-effort for ReportLab output."""
+    return len(re.findall(rb"/Type\s*/Page(?!\w)", pdf_bytes))

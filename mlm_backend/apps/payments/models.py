@@ -125,3 +125,81 @@ class GSTInvoice(models.Model):
 
     class Meta:
         db_table = "payments_gst_invoice"
+
+
+class RefundRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        PROCESSING = "PROCESSING", "Processing"
+        APPROVED = "APPROVED", "Approved"
+        REJECTED = "REJECTED", "Rejected"
+
+    class PaymentMethod(models.TextChoices):
+        GATEWAY = "GATEWAY", "Gateway"
+        DIRECT = "DIRECT", "Direct"
+
+    reference = models.CharField(max_length=48, unique=True)
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name="refund_requests",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="refund_requests",
+    )
+    order_line = models.ForeignKey(
+        "payments.OrderLine",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="refund_requests",
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    payment_method = models.CharField(
+        max_length=16,
+        choices=PaymentMethod.choices,
+        default=PaymentMethod.GATEWAY,
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    member_note = models.TextField(blank=True, default="")
+    reject_reason = models.TextField(blank=True, default="")
+    razorpay_refund_id = models.CharField(max_length=64, null=True, blank=True)
+    processing_at = models.DateTimeField(null=True, blank=True)
+    processing_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="refund_requests_marked_processing",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="approved_refund_requests",
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="rejected_refund_requests",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "payments_refundrequest"
+        indexes = [
+            models.Index(fields=["status", "-created_at"]),
+            models.Index(fields=["user", "-created_at"]),
+        ]

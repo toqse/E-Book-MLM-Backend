@@ -130,6 +130,7 @@ def test_user_orders_lists_invoice_url(system_config):
     assert hit["thumbnail_url"] is None
     assert hit["invoice_url"] is not None
     assert hit["invoice_url"].startswith("http://testserver/api/v1/user/orders/")
+    assert hit.get("can_refund") is True
 
     # Invoice endpoint should force a download (Content-Disposition: attachment)
     r2 = client.get(hit["invoice_url"])

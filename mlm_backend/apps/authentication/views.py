@@ -18,7 +18,12 @@ from apps.admin_panel.utils import get_system_config
 from apps.mlm_tree.models import BinaryNode
 from apps.users.models import User
 from apps.users import team_services
-from apps.users.services import allocate_member_identity, resolve_sponsor_by_code
+from apps.users.services import (
+    allocate_member_identity,
+    effective_company_referral_code,
+    environment_company_referral_code,
+    resolve_sponsor_by_code,
+)
 from apps.wallet.services.member_money import build_band_ladder, get_wallet_row
 
 from .models import OTPRecord
@@ -496,6 +501,15 @@ def _me_payload(user: User):
         else "neutral",
         "subtree_member_count": max(0, len(ctx.subtree_user_ids) - 1) if ctx.subtree_user_ids else 0,
     }
+    if user.is_staff and getattr(user, "role", None) in (
+        User.Role.SUPER_ADMIN,
+        User.Role.FINANCE,
+        User.Role.SUPPORT,
+    ):
+        data["admin"] = {
+            "default_company_referral_code": effective_company_referral_code(),
+            "default_company_referral_code_environment": environment_company_referral_code(),
+        }
     return data
 
 
@@ -505,7 +519,39 @@ def me(request: Request):
     user = request.user
     if request.method == "GET":
         return envelope_response(_me_payload(user))
-    ser = ProfileUpdateSerializer(data=request.data, partial=True, context={"user": user})
+    data_in = request.data or {}
+    if "default_company_referral_code" in data_in:
+        if getattr(user, "role", None) != User.Role.SUPER_ADMIN:
+            return envelope_response(
+                None,
+                message="Forbidden",
+                success=False,
+                errors={"detail": "super_admin_only"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        raw = data_in.get("default_company_referral_code")
+        if raw is not None and not isinstance(raw, str):
+            return envelope_response(
+                None,
+                message="Invalid default_company_referral_code",
+                success=False,
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        code = (raw or "").strip()
+        if len(code) > 64:
+            return envelope_response(
+                None,
+                message="default_company_referral_code too long",
+                success=False,
+                errors={"default_company_referral_code": "max_length_64"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        cfg = get_system_config()
+        cfg.default_company_referral_code = code
+        cfg.updated_by = user
+        cfg.save()
+    payload = {k: request.data[k] for k in request.data if k != "default_company_referral_code"}
+    ser = ProfileUpdateSerializer(data=payload, partial=True, context={"user": user})
     ser.is_valid(raise_exception=True)
     data = ser.validated_data
 

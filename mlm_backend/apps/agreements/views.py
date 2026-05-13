@@ -133,7 +133,16 @@ def legal_documents_compliance_legal_list(request: Request):
         many=True,
         context={"request": request, "accepted_versions": accepted_versions},
     )
-    return envelope_response({"results": ser.data})
+    user = request.user
+    return envelope_response(
+        {
+            "results": ser.data,
+            "user": {
+                "id": user.pk,
+                "full_name": user.full_name,
+            },
+        }
+    )
 
 
 @api_view(["POST"])

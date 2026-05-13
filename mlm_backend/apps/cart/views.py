@@ -146,6 +146,8 @@ def cart_checkout(request: Request):
     except Exception as e:
         return envelope_response(None, message=str(e), success=False, status=500)
 
+    user = request.user
+    buyer = {"full_name": user.full_name, "phone": user.phone}
     if rz is None:
         return envelope_response(
             {
@@ -155,6 +157,7 @@ def cart_checkout(request: Request):
                 "razorpay_order_id": None,
                 "key_id": get_razorpay_key_id(),
                 "status": order.status,
+                **buyer,
             }
         )
     return envelope_response(
@@ -164,5 +167,6 @@ def cart_checkout(request: Request):
             "amount_paise": rz["amount"],
             "razorpay_order_id": rz["id"],
             "key_id": get_razorpay_key_id(),
+            **buyer,
         }
     )

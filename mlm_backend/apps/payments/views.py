@@ -1,6 +1,7 @@
 import json
 import logging
 import secrets
+from collections import defaultdict
 
 from django.conf import settings
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
@@ -10,18 +11,21 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from apps.audit.services import write_audit
-from apps.commissions.engine import CommissionEngine
 from apps.common.permissions import IsFinanceAdmin, IsSuperAdmin
 from apps.common.responses import envelope_response
-from apps.courses.models import EBook, Enrollment
+from apps.courses.models import EBook
 
-from .models import GSTInvoice, Order
+from .models import GSTInvoice, Order, RefundRequest
 from .services import (
     create_checkout_order,
     ensure_gst_invoice_pdf,
     finalize_order_as_paid,
     get_razorpay_key_id,
     normalize_billing_from_payload,
+    refund_submission_blocked,
+    remaining_refundable_for_order,
+    remaining_refundable_for_order_line,
+    submit_member_refund_request,
     verify_payment,
     verify_webhook_signature,
 )
@@ -170,17 +174,128 @@ def webhook(request):
     return envelope_response({"received": True, "event": payload.get("event")})
 
 
+def _open_refund_ebook_title(rr: RefundRequest) -> str | None:
+    if rr.order_line_id and rr.order_line:
+        return rr.order_line.ebook.title if rr.order_line.ebook_id else None
+    if rr.order.ebook_id and rr.order.ebook:
+        return rr.order.ebook.title
+    return None
+
+
+def _primary_open_refund_row(open_list: list[RefundRequest]) -> RefundRequest | None:
+    for r in open_list:
+        if r.order_line_id is None:
+            return r
+    return open_list[0] if open_list else None
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_orders(request):
-    qs = (
-        Order.objects.filter(user=request.user, status=Order.Status.PAID)
+    from decimal import Decimal as D
+
+    qs = list(
+        Order.objects.filter(
+            user=request.user,
+            status__in=(Order.Status.PAID, Order.Status.REFUNDED),
+        )
         .select_related("ebook")
+        .prefetch_related("lines__ebook")
         .order_by("-id")[:50]
     )
+    order_ids = [o.id for o in qs]
+    open_refunds_list = list(
+        RefundRequest.objects.filter(
+            user=request.user,
+            order_id__in=order_ids,
+            status__in=(
+                RefundRequest.Status.PENDING,
+                RefundRequest.Status.PROCESSING,
+            ),
+        )
+        .select_related("order_line__ebook", "order__ebook")
+        .order_by("id")
+    )
+    opens_by_order: dict[int, list[RefundRequest]] = defaultdict(list)
+    for r in open_refunds_list:
+        opens_by_order[r.order_id].append(r)
+
+    approved_latest_by_order: dict[int, RefundRequest] = {}
+    for ar in RefundRequest.objects.filter(
+        user=request.user,
+        order_id__in=order_ids,
+        status=RefundRequest.Status.APPROVED,
+    ).order_by("-id"):
+        if ar.order_id not in approved_latest_by_order:
+            approved_latest_by_order[ar.order_id] = ar
+
+    now = timezone.now()
     data = []
     for o in qs:
         purchased_at = o.paid_at or o.created_at
+        in_refund_window = not (o.refund_eligible_until and now > o.refund_eligible_until)
+        opens = opens_by_order.get(o.id, [])
+        primary_open = _primary_open_refund_row(opens)
+
+        can_any = False
+        if o.status == Order.Status.PAID and in_refund_window:
+            if remaining_refundable_for_order(o) > D("0") and not refund_submission_blocked(
+                o.pk, target_order_line_id=None
+            ):
+                can_any = True
+            else:
+                for line in o.lines.all():
+                    if remaining_refundable_for_order_line(o, line.pk) > D("0") and not refund_submission_blocked(
+                        o.pk, target_order_line_id=line.pk
+                    ):
+                        can_any = True
+                        break
+
+        items = []
+        lines_sorted = sorted(o.lines.all(), key=lambda ln: ln.pk)
+        if lines_sorted:
+            for line in lines_sorted:
+                eb = line.ebook
+                rem_ln = remaining_refundable_for_order_line(o, line.pk)
+                can_line = bool(
+                    o.status == Order.Status.PAID
+                    and in_refund_window
+                    and rem_ln > D("0")
+                    and not refund_submission_blocked(o.pk, target_order_line_id=line.pk)
+                )
+                items.append(
+                    {
+                        "order_line_id": line.pk,
+                        "ebook_id": line.ebook_id,
+                        "slug": eb.slug if eb else None,
+                        "title": eb.title if eb else None,
+                        "thumbnail_url": _ebook_thumbnail_url(request, eb),
+                        "unit_base_price": str(line.unit_base_price),
+                        "refundable_amount": str(rem_ln),
+                        "can_refund": can_line,
+                    }
+                )
+        elif o.ebook_id:
+            rem_full = remaining_refundable_for_order(o) if o.status == Order.Status.PAID else D("0")
+            can_legacy = bool(
+                o.status == Order.Status.PAID
+                and in_refund_window
+                and rem_full > D("0")
+                and not refund_submission_blocked(o.pk, target_order_line_id=None)
+            )
+            items.append(
+                {
+                    "order_line_id": None,
+                    "ebook_id": o.ebook_id,
+                    "slug": o.ebook.slug if o.ebook else None,
+                    "title": o.ebook.title if o.ebook else None,
+                    "thumbnail_url": _ebook_thumbnail_url(request, o.ebook),
+                    "unit_base_price": str(o.base_price),
+                    "refundable_amount": str(rem_full),
+                    "can_refund": can_legacy,
+                }
+            )
+
         row = {
             "id": o.id,
             "order_number": o.order_number,
@@ -189,8 +304,41 @@ def my_orders(request):
             "ebook_title": o.ebook.title if o.ebook else None,
             "thumbnail_url": _ebook_thumbnail_url(request, o.ebook),
             "amount_paid": str(o.amount_paid),
+            "order_refundable_amount": str(remaining_refundable_for_order(o))
+            if o.status == Order.Status.PAID
+            else "0",
+            "items": items,
             "invoice_url": None,
+            "refund_request": None,
+            "open_refund_requests": [],
+            "can_refund": can_any,
         }
+        for r in opens:
+            row["open_refund_requests"].append(
+                {
+                    "reference": r.reference,
+                    "status": r.status,
+                    "order_line_id": r.order_line_id,
+                    "ebook_title": _open_refund_ebook_title(r),
+                }
+            )
+        if primary_open:
+            row["refund_request"] = {
+                "reference": primary_open.reference,
+                "status": primary_open.status,
+                "order_line_id": primary_open.order_line_id,
+                "ebook_title": _open_refund_ebook_title(primary_open),
+            }
+        elif o.status == Order.Status.REFUNDED:
+            ar = approved_latest_by_order.get(o.id)
+            if ar:
+                row["refund_request"] = {
+                    "reference": ar.reference,
+                    "status": ar.status,
+                    "razorpay_refund_id": ar.razorpay_refund_id or None,
+                    "order_line_id": ar.order_line_id,
+                    "ebook_title": _open_refund_ebook_title(ar),
+                }
         try:
             inv = GSTInvoice.objects.filter(order_id=o.id).first()
             if inv:
@@ -262,16 +410,42 @@ def order_invoice(request, pk: int):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def order_refund(request, pk: int):
-    o = Order.objects.filter(pk=pk, user=request.user).first()
-    if not o or o.status != Order.Status.PAID:
-        return envelope_response(None, message="Not refundable", success=False, status=400)
-    if o.refund_eligible_until and timezone.now() > o.refund_eligible_until:
-        return envelope_response(None, message="Refund window closed", success=False, status=400)
-    o.status = Order.Status.REFUNDED
-    o.save(update_fields=["status"])
-    CommissionEngine.reverse_commissions(o)
-    Enrollment.objects.filter(order=o).delete()
-    return envelope_response({"status": "REFUNDED"})
+    """Submit a refund request for admin approval (does not refund immediately)."""
+    note = (request.data.get("note") or request.data.get("member_note") or "").strip()
+    raw_line = request.data.get("order_line_id")
+    order_line_id = None
+    if raw_line not in (None, ""):
+        try:
+            order_line_id = int(raw_line)
+        except (TypeError, ValueError):
+            return envelope_response(
+                None,
+                message="Invalid order_line_id",
+                success=False,
+                errors={"detail": "invalid_order_line_id"},
+                status=400,
+            )
+    try:
+        rr = submit_member_refund_request(
+            user=request.user,
+            order_id=int(pk),
+            member_note=note,
+            order_line_id=order_line_id,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if msg == "Order not found":
+            return envelope_response(None, message=msg, success=False, status=404)
+        return envelope_response(None, message=msg, success=False, status=400)
+    return envelope_response(
+        {
+            "reference": rr.reference,
+            "status": rr.status,
+            "created_at": rr.created_at.isoformat(),
+            "amount": str(rr.amount),
+            "order_line_id": rr.order_line_id,
+        }
+    )
 
 
 def _resolve_order_for_admin_verify(order_ref: str) -> Order | None:
