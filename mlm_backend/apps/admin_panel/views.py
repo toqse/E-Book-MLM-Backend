@@ -15,6 +15,8 @@ from apps.common.permissions import (
     IsSupportAdmin,
 )
 from apps.common.responses import envelope_response
+from apps.finance.services.aggregates import build_gst_report, build_tds_report_rollup
+from apps.finance.services.date_range import parse_finance_range
 from apps.payments.models import GSTInvoice, Order
 from apps.payments.services import ensure_gst_invoice_pdf
 from apps.users.models import User
@@ -940,13 +942,15 @@ def system_config_view(request):
 @api_view(["GET"])
 @permission_classes([IsFinanceAdmin])
 def report_tds(request):
-    return envelope_response({"fy": "2026-27", "total": "0.00"})
+    fr = parse_finance_range(request.query_params)
+    return envelope_response(build_tds_report_rollup(fr))
 
 
 @api_view(["GET"])
 @permission_classes([IsFinanceAdmin])
 def report_gst(request):
-    return envelope_response({"collected": "0.00"})
+    fr = parse_finance_range(request.query_params)
+    return envelope_response(build_gst_report(fr))
 
 
 @api_view(["GET"])

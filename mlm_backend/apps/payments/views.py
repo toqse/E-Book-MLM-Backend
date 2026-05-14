@@ -13,6 +13,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from apps.audit.services import write_audit
 from apps.common.permissions import IsFinanceAdmin, IsSuperAdmin
 from apps.common.responses import envelope_response
+from apps.finance.services.aggregates import build_gst_report, build_revenue_rollup, orders_finance_page
+from apps.finance.services.date_range import parse_finance_range
 from apps.courses.models import EBook
 
 from .models import GSTInvoice, Order, RefundRequest
@@ -21,11 +23,14 @@ from .services import (
     ensure_gst_invoice_pdf,
     finalize_order_as_paid,
     get_razorpay_key_id,
+    latest_applicable_refund_status,
     normalize_billing_from_payload,
     refund_submission_blocked,
     remaining_refundable_for_order,
     remaining_refundable_for_order_line,
+    resolve_gateway_payment_method,
     submit_member_refund_request,
+    submit_member_refund_requests_for_lines,
     verify_payment,
     verify_webhook_signature,
 )
@@ -160,7 +165,17 @@ def verify(request):
         verify_payment(order, payment_id, signature)
     except Exception as exc:
         return envelope_response(None, message=str(exc), success=False, status=400)
-    return envelope_response({"status": "PAID", "order_number": order.order_number})
+    order.refresh_from_db()
+    paid_at = order.paid_at
+    return envelope_response(
+        {
+            "status": "PAID",
+            "order_number": order.order_number,
+            "amount": str(order.amount_paid),
+            "payment_verified_at": paid_at.isoformat() if paid_at else None,
+            "payment_method": resolve_gateway_payment_method(order, payment_id),
+        }
+    )
 
 
 @api_view(["POST"])
@@ -187,6 +202,10 @@ def _primary_open_refund_row(open_list: list[RefundRequest]) -> RefundRequest | 
         if r.order_line_id is None:
             return r
     return open_list[0] if open_list else None
+
+
+def _item_refund_status(rlist: list[RefundRequest], *, item_line_id: int | None) -> str | None:
+    return latest_applicable_refund_status(rlist, item_line_id=item_line_id)
 
 
 @api_view(["GET"])
@@ -220,14 +239,22 @@ def my_orders(request):
     for r in open_refunds_list:
         opens_by_order[r.order_id].append(r)
 
-    approved_latest_by_order: dict[int, RefundRequest] = {}
+    refunds_by_order: dict[int, list[RefundRequest]] = defaultdict(list)
+    for rr in (
+        RefundRequest.objects.filter(user=request.user, order_id__in=order_ids)
+        .select_related("order_line__ebook", "order__ebook")
+        .order_by("-id")
+    ):
+        refunds_by_order[rr.order_id].append(rr)
+
+    approved_latest_any_by_order: dict[int, RefundRequest] = {}
     for ar in RefundRequest.objects.filter(
         user=request.user,
         order_id__in=order_ids,
         status=RefundRequest.Status.APPROVED,
     ).order_by("-id"):
-        if ar.order_id not in approved_latest_by_order:
-            approved_latest_by_order[ar.order_id] = ar
+        if ar.order_id not in approved_latest_any_by_order:
+            approved_latest_any_by_order[ar.order_id] = ar
 
     now = timezone.now()
     data = []
@@ -237,30 +264,18 @@ def my_orders(request):
         opens = opens_by_order.get(o.id, [])
         primary_open = _primary_open_refund_row(opens)
 
-        can_any = False
-        if o.status == Order.Status.PAID and in_refund_window:
-            if remaining_refundable_for_order(o) > D("0") and not refund_submission_blocked(
-                o.pk, target_order_line_id=None
-            ):
-                can_any = True
-            else:
-                for line in o.lines.all():
-                    if remaining_refundable_for_order_line(o, line.pk) > D("0") and not refund_submission_blocked(
-                        o.pk, target_order_line_id=line.pk
-                    ):
-                        can_any = True
-                        break
-
         items = []
         lines_sorted = sorted(o.lines.all(), key=lambda ln: ln.pk)
         if lines_sorted:
             for line in lines_sorted:
                 eb = line.ebook
                 rem_ln = remaining_refundable_for_order_line(o, line.pk)
+                line_refund_st = _item_refund_status(refunds_by_order[o.id], item_line_id=line.pk)
                 can_line = bool(
                     o.status == Order.Status.PAID
                     and in_refund_window
                     and rem_ln > D("0")
+                    and line_refund_st != RefundRequest.Status.REJECTED
                     and not refund_submission_blocked(o.pk, target_order_line_id=line.pk)
                 )
                 items.append(
@@ -273,14 +288,19 @@ def my_orders(request):
                         "unit_base_price": str(line.unit_base_price),
                         "refundable_amount": str(rem_ln),
                         "can_refund": can_line,
+                        "refund_status": _item_refund_status(
+                            refunds_by_order[o.id], item_line_id=line.pk
+                        ),
                     }
                 )
         elif o.ebook_id:
             rem_full = remaining_refundable_for_order(o) if o.status == Order.Status.PAID else D("0")
+            legacy_refund_st = _item_refund_status(refunds_by_order[o.id], item_line_id=None)
             can_legacy = bool(
                 o.status == Order.Status.PAID
                 and in_refund_window
                 and rem_full > D("0")
+                and legacy_refund_st != RefundRequest.Status.REJECTED
                 and not refund_submission_blocked(o.pk, target_order_line_id=None)
             )
             items.append(
@@ -293,8 +313,22 @@ def my_orders(request):
                     "unit_base_price": str(o.base_price),
                     "refundable_amount": str(rem_full),
                     "can_refund": can_legacy,
+                    "refund_status": _item_refund_status(
+                        refunds_by_order[o.id], item_line_id=None
+                    ),
                 }
             )
+
+        if items:
+            # False only when every line is explicitly false; true/null/omitted on any line keeps the order true.
+            can_any = not all(item.get("can_refund") is False for item in items)
+        else:
+            can_any = False
+            if o.status == Order.Status.PAID and in_refund_window:
+                if remaining_refundable_for_order(o) > D("0") and not refund_submission_blocked(
+                    o.pk, target_order_line_id=None
+                ):
+                    can_any = True
 
         row = {
             "id": o.id,
@@ -330,7 +364,7 @@ def my_orders(request):
                 "ebook_title": _open_refund_ebook_title(primary_open),
             }
         elif o.status == Order.Status.REFUNDED:
-            ar = approved_latest_by_order.get(o.id)
+            ar = approved_latest_any_by_order.get(o.id)
             if ar:
                 row["refund_request"] = {
                     "reference": ar.reference,
@@ -412,6 +446,61 @@ def order_invoice(request, pk: int):
 def order_refund(request, pk: int):
     """Submit a refund request for admin approval (does not refund immediately)."""
     note = (request.data.get("note") or request.data.get("member_note") or "").strip()
+
+    if "order_line_ids" in request.data:
+        raw_batch = request.data.get("order_line_ids")
+        if raw_batch is None:
+            return envelope_response(
+                None,
+                message="order_line_ids must be a non-empty list of integers",
+                success=False,
+                errors={"detail": "invalid_order_line_ids"},
+                status=400,
+            )
+        if not isinstance(raw_batch, (list, tuple)):
+            return envelope_response(
+                None,
+                message="order_line_ids must be a list",
+                success=False,
+                errors={"detail": "invalid_order_line_ids"},
+                status=400,
+            )
+        if len(raw_batch) == 0:
+            return envelope_response(
+                None,
+                message="order_line_ids must be a non-empty list",
+                success=False,
+                errors={"detail": "invalid_order_line_ids"},
+                status=400,
+            )
+        try:
+            rows = submit_member_refund_requests_for_lines(
+                user=request.user,
+                order_id=int(pk),
+                order_line_ids=list(raw_batch),
+                member_note=note,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if msg == "Order not found":
+                return envelope_response(None, message=msg, success=False, status=404)
+            return envelope_response(None, message=msg, success=False, status=400)
+        return envelope_response(
+            {
+                "count": len(rows),
+                "results": [
+                    {
+                        "reference": rr.reference,
+                        "status": rr.status,
+                        "created_at": rr.created_at.isoformat(),
+                        "amount": str(rr.amount),
+                        "order_line_id": rr.order_line_id,
+                    }
+                    for rr in rows
+                ],
+            }
+        )
+
     raw_line = request.data.get("order_line_id")
     order_line_id = None
     if raw_line not in (None, ""):
@@ -508,17 +597,40 @@ def admin_verify_payment_manual(request, order_ref: str):
 @api_view(["GET"])
 @permission_classes([IsFinanceAdmin])
 def admin_orders(request):
-    qs = Order.objects.all().order_by("-id")[:200]
-    return envelope_response({"results": [{"id": x.id, "status": x.status} for x in qs]})
+    """
+    Paid orders in the finance date window (from/to or preset); pagination + search.
+    """
+    fr = parse_finance_range(request.query_params)
+    q = (request.query_params.get("q") or "").strip()
+    try:
+        page = max(1, int(request.query_params.get("page", 1) or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(request.query_params.get("page_size", 20) or 20)
+    except (TypeError, ValueError):
+        page_size = 20
+    page_size = max(1, min(page_size, 100))
+    return envelope_response(
+        orders_finance_page(
+            d0=fr.date_from,
+            d1=fr.date_to,
+            q=q,
+            page=page,
+            page_size=page_size,
+        )
+    )
 
 
 @api_view(["GET"])
 @permission_classes([IsFinanceAdmin])
 def admin_revenue(request):
-    return envelope_response({"today": "0", "week": "0", "month": "0"})
+    fr = parse_finance_range(request.query_params)
+    return envelope_response(build_revenue_rollup(fr))
 
 
 @api_view(["GET"])
 @permission_classes([IsFinanceAdmin])
 def admin_gst_report(request):
-    return envelope_response({"gstr1": []})
+    fr = parse_finance_range(request.query_params)
+    return envelope_response(build_gst_report(fr))

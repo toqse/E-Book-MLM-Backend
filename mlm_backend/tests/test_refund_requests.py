@@ -1,7 +1,9 @@
 from datetime import timedelta
 from decimal import Decimal
+from urllib.parse import urlparse
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -55,6 +57,11 @@ def _published_ebook():
         price=200,
         status=EBook.Status.PUBLISHED,
         file_url="https://example.com/r.pdf",
+        full_pdf=SimpleUploadedFile(
+            "full_r.pdf",
+            b"%PDF-1.4 refund",
+            content_type="application/pdf",
+        ),
         is_primary=False,
         is_active=True,
     )
@@ -181,7 +188,7 @@ def test_member_submits_refund_request_and_orders_list_shows_placeholder(
 
 
 @pytest.mark.django_db
-def test_refund_request_rejected_and_second_request_allowed(system_config):
+def test_refund_request_rejected_blocks_resubmit(system_config):
     buyer = _buyer()
     ebook = _published_ebook()
     order = _paid_order_with_window(buyer, ebook)
@@ -203,8 +210,15 @@ def test_refund_request_rejected_and_second_request_allowed(system_config):
     order.refresh_from_db()
     assert order.status == Order.Status.PAID
 
+    r_list = client.get("/api/v1/user/orders/")
+    hit = next(x for x in r_list.json()["data"]["results"] if x["id"] == order.id)
+    assert hit["items"][0]["refund_status"] == "REJECTED"
+    assert hit["items"][0]["can_refund"] is False
+    assert hit.get("can_refund") is False
+
     r2 = client.post(f"/api/v1/user/orders/{order.pk}/refund/", {}, format="json")
-    assert r2.status_code == 200
+    assert r2.status_code == 400
+    assert "rejected" in r2.json().get("message", "").lower()
 
 
 @pytest.mark.django_db
@@ -471,3 +485,302 @@ def test_multi_line_partial_refund_then_full_reverses_commissions(
     ).exists()
     w = Wallet.objects.get(user=sponsor)
     assert w.cash_balance == Decimal("0")
+
+
+@pytest.mark.django_db
+def test_batch_order_line_ids_creates_two_requests(system_config):
+    buyer = _buyer()
+    eb1, eb2 = _published_ebook_pair()
+    order = _two_line_paid_order(buyer, eb1, eb2)
+    line1 = OrderLine.objects.filter(order=order, ebook=eb1).first()
+    line2 = OrderLine.objects.filter(order=order, ebook=eb2).first()
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    r = client.post(
+        f"/api/v1/user/orders/{order.pk}/refund/",
+        {"order_line_ids": [line1.pk, line2.pk]},
+        format="json",
+    )
+    assert r.status_code == 200, r.content
+    data = r.json()["data"]
+    assert data["count"] == 2
+    assert len(data["results"]) == 2
+    assert RefundRequest.objects.filter(order=order).count() == 2
+    lids = {x["order_line_id"] for x in data["results"]}
+    assert lids == {line1.pk, line2.pk}
+
+
+@pytest.mark.django_db
+def test_batch_order_line_ids_dedupes_to_one(system_config):
+    buyer = _buyer()
+    eb1, eb2 = _published_ebook_pair()
+    order = _two_line_paid_order(buyer, eb1, eb2)
+    line1 = OrderLine.objects.filter(order=order, ebook=eb1).first()
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    r = client.post(
+        f"/api/v1/user/orders/{order.pk}/refund/",
+        {"order_line_ids": [line1.pk, line1.pk]},
+        format="json",
+    )
+    assert r.status_code == 200, r.content
+    assert r.json()["data"]["count"] == 1
+    assert RefundRequest.objects.filter(order=order).count() == 1
+
+
+@pytest.mark.django_db
+def test_batch_order_line_ids_rollbacks_on_invalid_id(system_config):
+    buyer = _buyer()
+    eb1, eb2 = _published_ebook_pair()
+    order = _two_line_paid_order(buyer, eb1, eb2)
+    line1 = OrderLine.objects.filter(order=order, ebook=eb1).first()
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    r = client.post(
+        f"/api/v1/user/orders/{order.pk}/refund/",
+        {"order_line_ids": [line1.pk, 999999999]},
+        format="json",
+    )
+    assert r.status_code == 400
+    assert RefundRequest.objects.filter(order=order).count() == 0
+
+
+@pytest.mark.django_db
+def test_batch_order_line_ids_precedence_over_order_line_id(system_config):
+    buyer = _buyer()
+    eb1, eb2 = _published_ebook_pair()
+    order = _two_line_paid_order(buyer, eb1, eb2)
+    line1 = OrderLine.objects.filter(order=order, ebook=eb1).first()
+    line2 = OrderLine.objects.filter(order=order, ebook=eb2).first()
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    r = client.post(
+        f"/api/v1/user/orders/{order.pk}/refund/",
+        {"order_line_ids": [line1.pk], "order_line_id": line2.pk},
+        format="json",
+    )
+    assert r.status_code == 200, r.content
+    assert r.json()["data"]["count"] == 1
+    rr = RefundRequest.objects.get(order=order)
+    assert rr.order_line_id == line1.pk
+
+
+@pytest.mark.django_db
+def test_my_orders_per_item_refund_after_partial_approve(system_config, razorpay_refund_stub_ok):
+    buyer = _buyer()
+    eb1, eb2 = _published_ebook_pair()
+    order = _two_line_paid_order(buyer, eb1, eb2)
+    line1 = OrderLine.objects.filter(order=order, ebook=eb1).first()
+    line2 = OrderLine.objects.filter(order=order, ebook=eb2).first()
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    client.post(
+        f"/api/v1/user/orders/{order.pk}/refund/",
+        {"order_line_id": line1.pk},
+        format="json",
+    )
+    rr1 = RefundRequest.objects.get(order=order, order_line_id=line1.pk)
+    fac = APIClient()
+    fac.force_authenticate(user=_finance_admin())
+    assert fac.post(f"/api/v1/admin/refunds/{rr1.id}/approve/", {}, format="json").status_code == 200
+
+    r = client.get("/api/v1/user/orders/")
+    hit = next(x for x in r.json()["data"]["results"] if x["id"] == order.id)
+    by_line = {it["order_line_id"]: it for it in hit["items"]}
+    assert by_line[line1.pk]["refund_status"] == "APPROVED"
+    assert by_line[line2.pk]["refund_status"] is None
+
+
+@pytest.mark.django_db
+def test_my_orders_can_refund_false_when_all_line_items_false(system_config, razorpay_refund_stub_ok):
+    """Top-level can_refund matches items: false when every line has can_refund false."""
+    buyer = _buyer()
+    eb1, eb2 = _published_ebook_pair()
+    order = _two_line_paid_order(buyer, eb1, eb2)
+    line1 = OrderLine.objects.filter(order=order, ebook=eb1).first()
+    line2 = OrderLine.objects.filter(order=order, ebook=eb2).first()
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    client.post(
+        f"/api/v1/user/orders/{order.pk}/refund/",
+        {"order_line_id": line1.pk},
+        format="json",
+    )
+    rr1 = RefundRequest.objects.get(order=order, order_line_id=line1.pk)
+    fac = APIClient()
+    fac.force_authenticate(user=_finance_admin())
+    assert fac.post(f"/api/v1/admin/refunds/{rr1.id}/approve/", {}, format="json").status_code == 200
+
+    client.post(
+        f"/api/v1/user/orders/{order.pk}/refund/",
+        {"order_line_id": line2.pk},
+        format="json",
+    )
+    assert RefundRequest.objects.filter(order=order, order_line_id=line2.pk, status=RefundRequest.Status.PENDING).exists()
+
+    r = client.get("/api/v1/user/orders/")
+    hit = next(x for x in r.json()["data"]["results"] if x["id"] == order.id)
+    assert all(not it["can_refund"] for it in hit["items"])
+    assert hit["can_refund"] is False
+
+
+@pytest.mark.django_db
+def test_my_orders_item_refund_status_rejected(system_config):
+    buyer = _buyer()
+    eb1, eb2 = _published_ebook_pair()
+    order = _two_line_paid_order(buyer, eb1, eb2)
+    line1 = OrderLine.objects.filter(order=order, ebook=eb1).first()
+    line2 = OrderLine.objects.filter(order=order, ebook=eb2).first()
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    client.post(
+        f"/api/v1/user/orders/{order.pk}/refund/",
+        {"order_line_id": line1.pk},
+        format="json",
+    )
+    rr = RefundRequest.objects.get(order=order, order_line_id=line1.pk)
+    fac = APIClient()
+    fac.force_authenticate(user=_finance_admin())
+    assert (
+        fac.post(
+            f"/api/v1/admin/refunds/{rr.id}/reject/",
+            {"reason": "not eligible"},
+            format="json",
+        ).status_code
+        == 200
+    )
+
+    r = client.get("/api/v1/user/orders/")
+    hit = next(x for x in r.json()["data"]["results"] if x["id"] == order.id)
+    by_line = {it["order_line_id"]: it for it in hit["items"]}
+    assert by_line[line1.pk]["refund_status"] == "REJECTED"
+    assert by_line[line1.pk]["can_refund"] is False
+    assert by_line[line2.pk]["refund_status"] is None
+    assert by_line[line2.pk]["can_refund"] is True
+
+    r_retry = client.post(
+        f"/api/v1/user/orders/{order.pk}/refund/",
+        {"order_line_id": line1.pk},
+        format="json",
+    )
+    assert r_retry.status_code == 400
+    assert "rejected" in r_retry.json().get("message", "").lower()
+
+
+def _enrolled_flat_book_ids(envelope_data: dict) -> list[int]:
+    out = []
+    for group in envelope_data.get("results", []):
+        for book in group.get("books", []):
+            out.append(book["id"])
+    return out
+
+
+@pytest.mark.django_db
+def test_after_full_refund_enrolled_omits_ebook_and_repurchase_create_order(
+    system_config,
+    monkeypatch,
+    razorpay_refund_stub_ok,
+):
+    """Refund approval removes enrollment; enrolled list drops book; create-order works again."""
+
+    def _fake_rz_client():
+        class OrderApi:
+            @staticmethod
+            def create(payload):
+                return {"id": "rzord_fake_repurchase", "amount": payload["amount"]}
+
+        class Client:
+            order = OrderApi()
+
+        return Client()
+
+    monkeypatch.setattr("apps.payments.services._client", _fake_rz_client)
+
+    buyer = _buyer()
+    ebook = _published_ebook()
+    order = _paid_order_with_window(buyer, ebook)
+    assert Enrollment.objects.filter(user=buyer, ebook=ebook).exists()
+
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    r_en = client.get("/api/v1/user/courses/enrolled/")
+    assert r_en.status_code == 200
+    body = r_en.json()["data"]
+    assert ebook.id in _enrolled_flat_book_ids(body)
+    book_row = next(
+        b
+        for grp in body["results"]
+        for b in grp["books"]
+        if b["id"] == ebook.id
+    )
+    pdf_url = book_row["pdf_url"]
+    assert "/api/v1/user/courses/" in pdf_url and "/download/" in pdf_url and "token=" in pdf_url
+    assert not pdf_url.startswith("https://example.com")
+
+    parsed = urlparse(pdf_url)
+    dl_path = parsed.path
+    if parsed.query:
+        dl_path = f"{dl_path}?{parsed.query}"
+    anon = APIClient()
+    r_pdf = anon.get(dl_path)
+    assert r_pdf.status_code == 200
+    assert r_pdf["Content-Type"].startswith("application/pdf")
+    pdf_head = b"".join(r_pdf.streaming_content)[:8]
+    assert pdf_head[:4] == b"%PDF"
+    r_meta = anon.get(f"{dl_path}&meta=1")
+    assert r_meta.status_code == 200
+    dl_data = r_meta.json()["data"]
+    assert "download_url" in dl_data
+    assert "token=" in (dl_data.get("download_url") or "")
+
+    assert client.post(f"/api/v1/user/orders/{order.pk}/refund/", {}, format="json").status_code == 200
+    rr = RefundRequest.objects.get(order=order)
+    fac = APIClient()
+    fac.force_authenticate(user=_finance_admin())
+    assert fac.post(f"/api/v1/admin/refunds/{rr.id}/approve/", {}, format="json").status_code == 200
+
+    assert not Enrollment.objects.filter(user=buyer, ebook=ebook).exists()
+    r_en2 = client.get("/api/v1/user/courses/enrolled/")
+    assert ebook.id not in _enrolled_flat_book_ids(r_en2.json()["data"])
+    r_detail = client.get(f"/api/v1/user/courses/enrolled/{ebook.slug}/")
+    assert r_detail.status_code == 403
+
+    r_co = client.post(
+        "/api/v1/payments/create-order/",
+        {"ebook_id": ebook.id, "is_retail": True},
+        format="json",
+    )
+    assert r_co.status_code == 200, r_co.content
+    assert r_co.json()["data"].get("order_id")
+
+
+@pytest.mark.django_db
+def test_download_token_forbidden_after_refund(
+    system_config,
+    razorpay_refund_stub_ok,
+):
+    buyer = _buyer()
+    ebook = _published_ebook()
+    order = _paid_order_with_window(buyer, ebook)
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    r_en = client.get("/api/v1/user/courses/enrolled/")
+    book_row = next(
+        b
+        for grp in r_en.json()["data"]["results"]
+        for b in grp["books"]
+        if b["id"] == ebook.id
+    )
+    pdf_url = book_row["pdf_url"]
+    parsed = urlparse(pdf_url)
+    dl_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+
+    client.post(f"/api/v1/user/orders/{order.pk}/refund/", {}, format="json")
+    rr = RefundRequest.objects.get(order=order)
+    fac = APIClient()
+    fac.force_authenticate(user=_finance_admin())
+    assert fac.post(f"/api/v1/admin/refunds/{rr.id}/approve/", {}, format="json").status_code == 200
+
+    anon = APIClient()
+    r_dl = anon.get(dl_path)
+    assert r_dl.status_code == 403

@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 
 from apps.admin_panel.utils import get_system_config
-from apps.common.permissions import IsFinanceAdmin
+from apps.common.permissions import IsFinanceAdmin, require_kyc_verified_and_compliant
 from apps.common.responses import envelope_response
 from apps.wallet.services.member_money import (
     build_commissions_summary,
@@ -35,6 +35,9 @@ from .services import build_user_milestones_dashboard
 @permission_classes([IsAuthenticated])
 def user_earnings_bundle(request: Request):
     """Consolidated earnings: overview and/or paginated ledger (see GET /api/v1/user/earnings/)."""
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     include = request.query_params.get("include")
     period = request.query_params.get("period", "all") or "all"
     typ = request.query_params.get("type", "all") or "all"
@@ -60,6 +63,9 @@ def user_earnings_bundle(request: Request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_commissions(request):
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     qs = (
         request.user.commissions_received.select_related("source_user", "order")
         .order_by("-id")[:100]
@@ -81,6 +87,9 @@ def user_commissions(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_commissions_summary(request: Request):
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     u = request.user
     cfg = get_system_config()
     wallet = get_wallet_row(u)
@@ -90,12 +99,18 @@ def user_commissions_summary(request: Request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_milestones(request):
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     return envelope_response(build_user_milestones_dashboard(request.user))
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_tds(request):
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     from apps.wallet.models import Wallet
 
     w, _ = Wallet.objects.get_or_create(user=request.user)
@@ -195,6 +210,8 @@ def admin_commissions_pending(request):
         status="pending",
         level=base.level,
         exclude_milestone=base.exclude_milestone,
+        date_from=base.date_from,
+        date_to=base.date_to,
     )
     qs = apply_admin_commission_filters(base_ledger_queryset(), flt).order_by("-id")[:100]
     return envelope_response(
@@ -246,7 +263,18 @@ def admin_force_credit(request):
 @api_view(["GET"])
 @permission_classes([IsFinanceAdmin])
 def admin_tds_report(request):
-    return envelope_response({"month": "2026-04", "tds": "0.00"})
+    from apps.finance.services.aggregates import build_tds_detail
+    from apps.finance.services.date_range import parse_finance_range
+
+    fr = parse_finance_range(request.query_params)
+    detail = build_tds_detail(fr)
+    return envelope_response(
+        {
+            "month": fr.date_to.strftime("%Y-%m"),
+            "tds": detail["total_tds"],
+            "detail": detail,
+        }
+    )
 
 
 @api_view(["GET"])

@@ -79,12 +79,12 @@ FLOWS (high level)
    - Cart (Bearer): GET /api/v1/user/cart/ — items + totals preview; POST /api/v1/user/cart/items/ — body ebook_id or ebook_slug; DELETE /api/v1/user/cart/items/<id>/; DELETE /api/v1/user/cart/ — clear; POST /api/v1/user/cart/checkout/ — same billing/sponsor/is_retail as create-order; response = create-order fields + full_name + phone for the buyer (then POST /api/v1/payments/verify/ with order_id)
    - Purchase (direct buy): POST /api/v1/payments/create-order/ (Bearer) — ebook_id or ebook_slug (optional; both → id wins), sponsor_code / sponsor_slot_code, is_retail, optional billing_* snapshot fields for the GST invoice
    - Zero-amount path when valid sponsor slot; else Razorpay order (amount_paise, razorpay_order_id, key_id).
-   - POST /api/v1/payments/verify/ (Bearer) — order_id + Razorpay payment id/signature; on success order is PAID, enrollment + GST invoice PDF generated when applicable
-   - GET /api/v1/user/orders/ (Bearer) — PAID and REFUNDED orders; each row includes `items[]` (per checkout line: order_line_id, ebook_id, title, thumbnail, refundable_amount, can_refund) plus legacy `ebook_title`/`thumbnail_url` from the order’s primary ebook; `order_refundable_amount` for remaining full-order refund cap; `open_refund_requests` lists open PENDING/PROCESSING requests (with optional order_line_id); `can_refund` when any line or full remainder can still be requested (per-line / full-order open-request rules)
+   - POST /api/v1/payments/verify/ (Bearer) — order_id + Razorpay payment id/signature; on success order is PAID, enrollment + GST invoice PDF generated when applicable; success payload: status, order_number, amount, payment_verified_at, payment_method
+   - GET /api/v1/user/orders/ (Bearer) — PAID and REFUNDED orders; each `items[]` row includes **`refund_status`**: latest `RefundRequest.status` for that line (`PENDING`, `PROCESSING`, `APPROVED`, `REJECTED`) or `null` if none; includes order-wide requests (`order_line_id` null) when they apply to that line. When the latest applicable status is **REJECTED**, `items[].can_refund` is false and the member cannot submit again for that line/order-wide scope. Legacy top-level `ebook_title`/`thumbnail_url`; `order_refundable_amount`; `open_refund_requests`; top-level `refund_request` is summary-only
    - GET /api/v1/user/orders/<id>/invoice/ (Bearer OR signed token) — downloads invoice PDF (Content-Disposition: attachment)
-   - GET /api/v1/user/courses/enrolled/ — same grouped shape as GET /courses/ for published books you are enrolled in; optional category/language/search and pagination
-   - GET /api/v1/user/courses/enrolled/<slug>/ | /enrolled/<id>/ — same body as GET /courses/<slug>|<id>/ (pdf_url + is_already_purchased); 403 if not enrolled
-   - GET /api/v1/user/courses/<slug>/download/ — URL + expires_at (SAS in production)
+   - GET /api/v1/user/courses/enrolled/ — grouped catalog like GET /courses/; each enrolled book includes pdf_url as signed …/courses/<slug-or-by-id-N>/download/?token=… (not raw storage; empty slug uses ``by-id-<id>``)
+   - GET /api/v1/user/courses/enrolled/<slug>/ | /enrolled/<id>/ — detail when enrolled; pdf_url signed download URL
+   - GET /api/v1/user/courses/<slug>/download/ — serves enrolled full PDF (inline); Bearer OR ?token= (no Bearer). Append ``&meta=1`` for JSON ``download_url`` + ``expires_at`` only.
 
 6) Binary tree (after qualifying MLM purchase)
    - GET /api/v1/user/tree/, /subtree/, /uplines/, /downlines/, /level/<n>/
@@ -814,6 +814,7 @@ Shared query params (list, summary, export; not on detail):
       processed → ledger CREDITED; pending → PENDING + HELD; reversed → REVERSED; held → HELD only.
   - level: all (default) | L1 | L2 | L3 | L4 | passive  (L1=DIRECT; L2..L4=upline types; passive=all uplines).
   - exclude_milestone: default true (book MLM ledger). Pass false | 0 | off to include MILESTONE rows.
+  - from, to: optional YYYY-MM-DD — filter `CommissionLedger.created_at` date (inclusive).
 List pagination:
   - page (default 1), page_size (default 20, max 100).
 
@@ -883,11 +884,13 @@ POST /api/v1/admin/commissions/force-credit/
     - 404 — user_id does not exist (data includes ok: false, detail: user_not_found)
 
 GET /api/v1/admin/commissions/tds-report/
-  Demo stub: { "month": "2026-04", "tds": "0.00" }
+  Auth: IsFinanceAdmin.
+  Same date query params as finance (default 30d).
+  Success: { "month": "<YYYY-MM of range `to`>", "tds": "<total TDS string>", "detail": <same object as GET /api/v1/admin/finance/tds/> }
 
 GET /api/v1/admin/commissions/export/
   Auth: Bearer + IsFinanceAdmin.
-  Binary attachment (not JSON envelope). Same filters as list (q, status, level, exclude_milestone).
+  Binary attachment (not JSON envelope). Same filters as list (q, status, level, exclude_milestone, from, to on ledger created_at).
   Query: export_format=csv (default) | pdf
     Do not use query name "format" — Django REST framework reserves it for content negotiation and can yield 404.
   CSV: header row then one row per ledger line (id, created_at, order_number, razorpay_order_id, earner_member_id,
@@ -1224,6 +1227,7 @@ GET /api/v1/courses/
     flat ordering, then merges consecutive rows of the same category in the page slice.
   pdf_url is not included on list items; use GET /courses/<slug>/ or /courses/<id>/ for pdf_url.
     When authenticated, enrollment for each book on the current page is batched — is_already_purchased matches course detail semantics.
+    When Bearer + enrolled for a book, course detail pdf_url is a short-lived signed app URL to GET …/user/courses/<slug>/download/?token=… (not raw storage URL).
 
 GET /api/v1/courses/<slug>/
 GET /api/v1/courses/<id>/
@@ -1232,27 +1236,30 @@ GET /api/v1/courses/<id>/
     + when Bearer present: "is_already_purchased" (true|false, enrollment for this book) }
   pdf_url selection:
     - anonymous (no token): preview pdf URL
-    - authenticated + purchased/enrolled for this book: full pdf URL
+    - authenticated + purchased/enrolled for this book: signed URL to GET /api/v1/user/courses/<slug>/download/?token=… (same host; valid ~24h; use token without Bearer if needed)
     - authenticated + not purchased: preview pdf URL
   Errors: 404 (unknown or non-published book).
 
 GET /api/v1/user/courses/enrolled/
   Auth: Bearer.
   Query (same as GET /api/v1/courses/): category, language, search | q, page, page_size.
-  Success data: same shape as GET /api/v1/courses/ — grouped catalog without pdf_url; each book includes is_already_purchased (always true here),
+  Success data: same grouped shape as GET /api/v1/courses/; each book includes is_already_purchased (always true),
+    pdf_url: signed absolute URL to GET …/user/courses/<slug>/download/?token=… (not raw storage),
     count / page / page_size / total_pages for your enrolled published books only (one row per ebook even if multiple orders).
 
 GET /api/v1/user/courses/enrolled/<slug>/
 GET /api/v1/user/courses/enrolled/<id>/
   Auth: Bearer.
   Success data: same fields as GET /api/v1/courses/<slug>/ or /courses/<id>/ including pdf_url and is_already_purchased.
-    For this route you must be enrolled on the book; when allowed, pdf_url is the full PDF (same as purchased on public detail).
+    For this route you must be enrolled on the book; pdf_url when allowed is the signed download URL (not raw storage).
   Errors: 404 unknown or unpublished book; 403 not enrolled for this book.
 
 GET /api/v1/user/courses/<slug>/download/
-  Auth: Bearer.
-  Success: { "download_url": "<ebook full_pdf url>", "expires_at": "<ISO, +15 min>" }
-  Errors: 404 book; 403 not enrolled.
+  Path segment is normally the book ``slug``. For legacy rows with an empty slug, ``pdf_url`` uses ``by-id-<ebook_pk>`` as the segment (same route pattern).
+  Auth: optional — either Bearer (must be enrolled) OR query ``?token=<signed>`` (no Bearer; token binds user_id:ebook_id; must still be enrolled at request time).
+  Success (default): response body is the PDF (``Content-Type: application/pdf``; inline disposition so browsers can display it). If the book has no uploaded ``full_pdf`` but has ``file_url``, redirects (302) to that URL.
+  Optional query ``meta=1`` (e.g. ``...?token=...&meta=1``): JSON ``{ "download_url": "<signed URL>", "expires_at": "<ISO, ~24h from signing>" }`` for clients that need metadata without loading the file.
+  Errors: 404 book; 401 invalid/expired token; 403 not enrolled (e.g. after refund removed enrollment).
 
 GET /api/v1/admin/courses/
   Auth: Bearer + IsAdminRole.
@@ -1361,7 +1368,14 @@ POST /api/v1/payments/verify/
     "razorpay_payment_id": "<string>",
     "razorpay_signature": "<string>"
   }
-  Success data: { "status": "PAID", "order_number" }
+  Success data: {
+    "status": "PAID",
+    "order_number",
+    "amount" — decimal string (amount paid on the order),
+    "payment_verified_at" — ISO datetime when the order was marked paid (null if absent),
+    "payment_method" — Razorpay method when fetch succeeds (e.g. card, upi, netbanking, wallet, emi); "manual" for admin-marked
+      payments; "razorpay" if the gateway is unavailable or fetch fails; "unknown" when no payment id is stored
+  }
   Side effects when transitioning to PAID (same pattern as manual admin verify):
     enrollment for the purchased e-book, MLM placement queue when applicable,
     GST invoice row + invoice PDF attachment (generated server-side; see pdf_url below).
@@ -1409,29 +1423,24 @@ GET /api/v1/user/orders/
             "thumbnail_url": "<absolute URL|null>",
             "unit_base_price": "<decimal string>",
             "refundable_amount": "<decimal string>",
-            "can_refund": <boolean> — per line: PAID, in refund window, positive refundable_amount, and no open request for that line
+            "can_refund": <boolean> — per line: PAID, in refund window, positive refundable_amount, no open request for that line,
+              and the latest applicable `refund_status` is not REJECTED (once finance rejects for that item, resubmit is disabled).
+            "refund_status": "PENDING" | "PROCESSING" | "APPROVED" | "REJECTED" | null — status of the **most recent** (highest id)
+              RefundRequest that applies to this line: rows with this `order_line_id`, plus order-wide rows (`order_line_id` null).
+              `null` when no refund request exists for this item. REJECTED appears when the latest applicable request was rejected.
           }, ...
         ],
         "invoice_url": "<absolute HTTPS/HTTP URL string|null>",
         "open_refund_requests": [
           { "reference", "status", "order_line_id": <int|null>, "ebook_title": "<string|null>" }, ...
         ],
-        "refund_request": null | {
-          "reference": "<string>",
-          "status": "PENDING" | "PROCESSING",
-          "order_line_id": <int|null>,
-          "ebook_title": "<string|null>"
-        } | {
-          "reference": "<string>",
-          "status": "APPROVED",
-          "razorpay_refund_id": "<string|null>",
-          "order_line_id": <int|null>,
-          "ebook_title": "<string|null>"
-        } — when order status is REFUNDED and an approved RefundRequest exists, the APPROVED shape is returned
-          (latest APPROVED per order); open requests (PENDING/PROCESSING) take precedence on PAID orders.
-        "can_refund": <boolean> — true when status is PAID, now <= refund_eligible_until, and at least one of:
-          a full-order remainder refund can be submitted, or a line-item refund can be submitted for some line
-          (see open-refund blocking: at most one open full-order request, and at most one open request per order line).
+        "refund_request": null | { ... } — **summary only** for backward compatibility; use `items[].refund_status` for per-line truth.
+          On PAID: primary open (full-order open first, else first open). On REFUNDED: most recent APPROVED request **any** scope
+          (highest id); not a merge of multiple line refunds.
+        "can_refund": <boolean> — when `items` is non-empty, **false only if every** `items[].can_refund` is **strictly false**
+          (boolean `false` in JSON). If any item is `true`, or `null`, or omits `can_refund`, the order value is **true**.
+          When there are no `items` rows, legacy rule: PAID, in refund window, positive `order_refundable_amount`, and not
+          blocked by an open refund request for a full-order submission.
       },
       ... newest first, max 50 (PAID and REFUNDED only; CREATED/FAILED excluded)
     ]
@@ -1455,26 +1464,40 @@ Invoice PDF branding (operators): optional environment variables COMPANY_NAME, G
 POST /api/v1/user/orders/<id>/refund/
   Auth: Bearer; <id> must be your order primary key.
   Allowed only when status is PAID and now <= refund_eligible_until (snapshot from SystemConfig.refund_window_days at payment).
-  Effect: submits a refund **request** (PENDING) for finance admin approval — does **not** refund instantly.
+  Effect: submits one or more refund **requests** (PENDING) for finance admin approval — does **not** refund instantly.
   Body (optional JSON): {
-    "note" | "member_note": "<string>" — trimmed; max ~4000 chars stored as member_note.
-    "order_line_id": <int> — optional; when set, request targets that checkout line (multi-item cart orders). Omit for a
-      order-wide refund of the **remaining** captured amount (after any approved refunds). Legacy orders without OrderLine
-      rows must omit order_line_id.
+    "note" | "member_note": "<string>" — trimmed; max ~4000 chars; applied to every request created in this call.
+    **Precedence** (only one mode applies):
+      1) If the key **order_line_ids** is present in the JSON body and the value is a **non-empty** array → **batch mode**:
+         one PENDING RefundRequest per **distinct** line id (duplicates removed, first-seen order kept). All succeed or none (single DB transaction).
+      2) Else if **order_line_id** is set → single-line request (one RefundRequest).
+      3) Else → order-wide refund of the **remaining** captured amount (one RefundRequest, order_line null).
+    "order_line_ids": [ <int>, ... ] — batch mode only; requires the order to have OrderLine rows (cart checkout). Same
+      per-line rules as a single line request; also rejected if any open full-order refund request exists on this order.
+    "order_line_id": <int> — optional when order_line_ids is absent or not used; see (2).
   }
-  Success data: {
+  Success data — **non-batch** (single line or full order): {
     "reference": "RET-<year>-<order_pk>-<seq>",
     "status": "PENDING",
     "created_at": "<ISO datetime>",
-    "amount": "<decimal string>" — line share of amount_paid (including proportional gateway) or full remaining for order-wide,
+    "amount": "<decimal string>",
     "order_line_id": <int|null>
   }
+  Success data — **batch** (order_line_ids non-empty array): {
+    "count": <int>,
+    "results": [
+      { "reference", "status", "created_at", "amount", "order_line_id" }, ...
+    ]
+  }
+  Finance approves each RefundRequest separately (each triggers its own partial gateway refund when applicable).
   Errors:
     • 401 — unauthenticated.
     • 404 — order not yours / not found.
-    • 400 — not PAID / refund window closed / invalid order_line_id / nothing left to refund / blocked because an open
-      request already exists for that scope (full-order open blocks all new requests; line open blocks the same line and
-      blocks new full-order requests while any line-specific request is open).
+    • 400 — not PAID / refund window closed / invalid order_line_id / invalid order_line_ids (wrong type, empty array,
+      null value for order_line_ids) / nothing left to refund / order line not found / order_line_ids not available (no lines)
+      / blocked because an open request already exists for that scope (full-order open blocks all new requests; line open
+      blocks that line and blocks new full-order requests while any line-specific request is open).
+    • 400 — latest applicable refund for that line or order-wide scope is **REJECTED** (member cannot resubmit after rejection).
 
 GET /api/v1/user/refund-requests/
   Auth: Bearer.
@@ -1560,7 +1583,21 @@ POST /api/v1/admin/refunds/<id>/reject/
 
 GET /api/v1/admin/orders/
   Auth: IsFinanceAdmin.
-  Success: { "results": [ { "id", "status" }, ... ] }
+  Date window (same as finance module): optional query `from`, `to` (YYYY-MM-DD), or `preset`
+    (today|7d|30d|fy), or `fy` label (e.g. 2025-26). Default when omitted: last 30 local days.
+  Pagination: `page` (default 1), `page_size` (default 20, max 100).
+  Optional `q`: order_number, razorpay_order_id, member_id, buyer full_name (icontains).
+  Only **PAID** orders with `paid_at` in the resolved window.
+  Success: {
+    "count", "page", "page_size",
+    "results": [
+      {
+        "id", "order_number", "status", "amount_paid", "base_price", "gst_amount", "gateway_charge",
+        "paid_at", "is_retail_purchase", "is_sponsor_slot_redemption", "line_count",
+        "user": { "id", "member_id", "full_name" }, "ebook_id", "ebook_title"
+      }, ...
+    ]
+  }
 
 POST /api/v1/admin/orders/<order_ref>/verify-payment-manual/
   Path `order_ref`: numeric **database id** (e.g. `6`) **or** the string **order_number**
@@ -1580,10 +1617,83 @@ POST /api/v1/admin/orders/<order_ref>/verify-payment-manual/
   Errors: 404 order; 400 status message; 403 non–super-admin.
 
 GET /api/v1/admin/revenue/
-  Demo stub: { "today", "week", "month" } as "0" strings.
+  Auth: IsFinanceAdmin.
+  Rolling windows (local dates): `today`, `week` (last 7 days incl. today), `month` (calendar month to date)
+    as decimal strings (gross `amount_paid` on PAID orders).
+  Optional same date query params as finance (`from`, `to`, `preset`, `fy`): when present, adds
+    `range`: { "from", "to", "gross_amount_paid", "paid_orders" } for that inclusive paid_at window.
 
 GET /api/v1/admin/gst-report/
-  Demo stub: { "gstr1": [] }
+  Auth: IsFinanceAdmin.
+  Same date query params as finance (default 30d).
+  Success: {
+    "collected": "<sum GSTInvoice.total_gst in window; if none, sum Order.gst_amount for PAID in window>",
+    "gstr1": [ { "invoice_number", "order_number", "base_amount", "total_gst", "grand_total", "created_at" }, ... ]
+    (max 500 rows, newest first)
+  }
+
+
+MODULE: Admin Finance & Reports (aggregates)
+--------------------------------------------------------------------------------
+  Shared query/body params for date resolution (GET query string; POST body also read for `from`/`to`/`preset`/`fy`):
+    - `from`, `to`: inclusive YYYY-MM-DD (server local timezone).
+    - `preset`: today | 7d | 30d | fy (Indian FY containing today when fy preset).
+    - `fy`: label e.g. `2025-26` → 1 Apr 2025 – 31 Mar 2026.
+    Priority: both `from`+`to` > `fy` label > `preset` > default **30d** ending today.
+    If only one of `from`/`to` is sent, the missing bound is inferred (±29 days, capped to today for `to`).
+
+GET /api/v1/admin/finance/overview/
+  Auth: IsFinanceAdmin.
+  Success `data`: KPI pack + `charts` (monthly gross by month for the Indian FY containing range end;
+    `revenue_distribution_percent_of_gross` slices). Net platform income formula (documented in code):
+    sum(PAID `amount_paid`) − credited commission net − milestone net − paid withdrawal net
+    − approved refund amounts − gateway charges (all in the same date window).
+
+GET /api/v1/admin/finance/income-streams/
+  Auth: IsFinanceAdmin.
+  DB-derived streams (mutually exclusive, `amount_paid`):
+    retail → `is_retail_purchase`; multi_cart → line_count>1; sponsor_slot → `is_sponsor_slot_redemption`
+    (after retail/multi); mlm_standard → remaining non-retail single-line; other → remainder.
+  Each row: `category_key`, `label`, `amount`, `share_percent`, `trend_percent` vs prior equal-length window.
+
+GET /api/v1/admin/finance/tab-counts/
+  Auth: IsFinanceAdmin.
+  Success: { "commission_ledger": <int>, "audit_trail": <int> } (ledger rows and audit rows with
+    `created_at` date in window).
+
+GET /api/v1/admin/finance/tds/
+  Auth: IsFinanceAdmin.
+  TDS in window: credited commission ledger `tds_deducted`, credited milestone `tds_deducted`,
+    paid withdrawal `tds_amount` (by `tds_section` where set).
+
+GET /api/v1/admin/finance/expenditure/
+  Auth: IsFinanceAdmin.
+  Rows: gateway charges on PAID orders in window; approved refunds (`RefundRequest` APPROVED, `approved_at` in window).
+
+GET /api/v1/admin/finance/audit-trail/
+  Auth: IsFinanceAdmin.
+  Pagination: `page`, `page_size` (max 100). Optional `q` on action/target_id/target_type.
+  Optional `finance_actions_only=true`: filter actions starting with payment., refund., commission., withdrawal, payout, finance.
+  Row: `id`, `actor`, `action`, `ref`, `timestamp`, `target_type`, `target_id`.
+
+GET /api/v1/admin/finance/search/
+  Auth: IsFinanceAdmin.
+  Query `q` (required for useful results). Optional `limit` (default 8, max 25).
+  Success: { "q", "commissions", "withdrawals", "orders" } (short lists in the date window).
+
+GET /api/v1/admin/finance/orders/
+  Auth: IsFinanceAdmin.
+  Same payload contract as GET /api/v1/admin/orders/ (paid orders in window); kept under finance namespace for UI routing.
+
+POST /api/v1/admin/finance/export/
+  Auth: IsFinanceAdmin.
+  Body JSON: `scope` (overview|income|commissions|withdrawals|tds|expenditure for CSV), `format` (`csv` or `zip`).
+  For `format=zip`, require `scope=all` (bundle of CSVs). Writes audit `finance.export`.
+
+POST /api/v1/admin/finance/generate-report/
+  Auth: IsFinanceAdmin.
+  Body/query: same date params as other finance GETs.
+  Returns PDF (tabular KPI flatten). Writes audit `finance.report_generated`.
 
 
 MODULE: Admin panel & compliance
@@ -1769,10 +1879,13 @@ POST /api/v1/admin/milestones/queue/process/
   Success data: { processed_ids:[...], skipped:[{id, reason}, ...] }
 
 GET /api/v1/admin/reports/tds/
-  Auth: IsFinanceAdmin. Stub: { "fy", "total" }.
+  Auth: IsFinanceAdmin.
+  Same date query params as finance (default 30d).
+  Success: { "fy": "<YY-YY for Indian FY containing window end>", "total": "<total TDS string>", "window": { "from", "to" } }
 
 GET /api/v1/admin/reports/gst/
-  Stub: { "collected" }.
+  Auth: IsFinanceAdmin.
+  Same response shape as GET /api/v1/admin/gst-report/ (delegates to same implementation).
 
 GET /api/v1/admin/reports/retail-ratio/
   Success: { "retail_ratio", "total_orders", "retail_orders" }.

@@ -1,6 +1,10 @@
+import logging
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
+from django.contrib.auth import get_user_model
+from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
+from django.http import FileResponse, HttpResponseRedirect
 from django.db.models import Count, Q
 from django.db.utils import IntegrityError
 from django.utils import timezone
@@ -13,6 +17,24 @@ from apps.common.permissions import IsAdminRole
 from apps.common.responses import envelope_response
 
 from .models import EBook, Enrollment
+
+logger = logging.getLogger(__name__)
+_ebook_download_signer = TimestampSigner(salt="courses.ebook.download")
+_EBOOK_DOWNLOAD_MAX_AGE_SECONDS = 60 * 60 * 24  # 24h, same order of magnitude as invoice links
+
+
+def _course_download_path_segment(b: EBook) -> str:
+    """URL path segment for GET …/user/courses/<segment>/download/ (must never be empty)."""
+    s = (b.slug or "").strip()
+    if s:
+        return s
+    return f"by-id-{b.pk}"
+
+
+def _ebook_download_signed_url(request, b: EBook, user_id: int) -> str:
+    token = _ebook_download_signer.sign(f"{user_id}:{b.pk}")
+    seg = _course_download_path_segment(b)
+    return request.build_absolute_uri(f"/api/v1/user/courses/{seg}/download/?token={token}")
 
 
 def _media_url(request, file_field):
@@ -73,9 +95,13 @@ def _public_catalog_book_payload(
     if enrolled_book_ids is not None:
         payload["is_already_purchased"] = b.pk in enrolled_book_ids
         if include_pdf_url and payload["is_already_purchased"]:
-            # Only include the full PDF URL for enrolled items.
-            _preview_url, full_url = _preview_full_urls(request, b)
-            payload["pdf_url"] = full_url
+            u = getattr(request, "user", None)
+            if u and getattr(u, "is_authenticated", False):
+                # Signed app URL only (no raw storage URL in list payloads).
+                payload["pdf_url"] = _ebook_download_signed_url(request, b, u.id)
+            else:
+                _preview_url, full_url = _preview_full_urls(request, b)
+                payload["pdf_url"] = full_url
     return payload
 
 
@@ -92,6 +118,11 @@ def _book_detail_payload(request, b: EBook):
             in_cart = CartItem.objects.filter(cart__user=u, ebook=b).exists()
         except Exception:
             in_cart = False
+    pdf_for_response = preview_url
+    if enrolled and u:
+        pdf_for_response = _ebook_download_signed_url(request, b, u.id)
+    elif enrolled:
+        pdf_for_response = full_url
     payload = {
         "id": b.id,
         "slug": b.slug,
@@ -105,7 +136,7 @@ def _book_detail_payload(request, b: EBook):
         "status": b.status,
         "is_primary": b.is_primary,
         "is_active": b.is_active,
-        "pdf_url": full_url if enrolled else preview_url,
+        "pdf_url": pdf_for_response,
         "is_already_in_cart": in_cart,
     }
     if auth:
@@ -475,19 +506,78 @@ def my_enrolled_ebook_detail_by_id(request, pk: int):
     return envelope_response(_book_detail_payload(request, b))
 
 
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def download_signed(request, slug: str):
-    b = EBook.objects.filter(slug=slug, status=EBook.Status.PUBLISHED).first()
+def _lookup_ebook_for_course_download(segment: str) -> EBook | None:
+    """Resolve ebook from URL path segment (real slug, or synthetic ``by-id-<pk>`` for legacy blank slugs)."""
+    segment = (segment or "").strip()
+    if not segment:
+        return None
+    by_slug = EBook.objects.filter(slug=segment, status=EBook.Status.PUBLISHED).first()
+    if by_slug:
+        return by_slug
+    if segment.startswith("by-id-") and segment[6:].isdigit():
+        return EBook.objects.filter(pk=int(segment[6:]), status=EBook.Status.PUBLISHED).first()
+    return None
+
+
+def _resolve_ebook_download(request, segment: str) -> tuple[object | None, EBook | None, tuple[str, int] | None]:
+    """
+    Resolve authorized user + ebook for download. Returns (user, ebook, None) or (None, None, (message, status)).
+    """
+    b = _lookup_ebook_for_course_download(segment)
     if not b:
-        return envelope_response(None, message="Not found", success=False, status=404)
-    if not Enrollment.objects.filter(user=request.user, ebook=b).exists():
-        return envelope_response(None, message="Not enrolled", success=False, status=403)
-    url = _media_url(request, b.full_pdf) or b.file_url
-    if not url:
+        return None, None, ("Not found", 404)
+    token = (request.query_params.get("token") or "").strip()
+    if token:
+        try:
+            payload = _ebook_download_signer.unsign(
+                token, max_age=_EBOOK_DOWNLOAD_MAX_AGE_SECONDS
+            )
+            uid_s, eid_s = payload.split(":", 1)
+            uid, eid = int(uid_s), int(eid_s)
+        except (BadSignature, SignatureExpired, ValueError):
+            return None, None, ("Unauthorized", 401)
+        if eid != b.pk:
+            return None, None, ("Unauthorized", 401)
+        User = get_user_model()
+        u = User.objects.filter(pk=uid).first()
+        if not u:
+            return None, None, ("Unauthorized", 401)
+        if not Enrollment.objects.filter(user=u, ebook=b).exists():
+            return None, None, ("Not enrolled", 403)
+        return u, b, None
+    u = getattr(request, "user", None)
+    if u and getattr(u, "is_authenticated", False):
+        if not Enrollment.objects.filter(user=u, ebook=b).exists():
+            return None, None, ("Not enrolled", 403)
+        return u, b, None
+    return None, None, ("Unauthorized", 401)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def download_signed(request, slug: str):
+    u, b, err = _resolve_ebook_download(request, slug)
+    if err:
+        msg, status = err
+        return envelope_response(None, message=msg, success=False, status=status)
+    if not ((_media_url(request, b.full_pdf) or b.file_url)):
         return envelope_response(None, message="Book PDF missing", success=False, status=400)
-    exp = (timezone.now() + timedelta(minutes=15)).isoformat()
-    return envelope_response({"download_url": url, "expires_at": exp})
+    signed = _ebook_download_signed_url(request, b, u.pk)
+    exp = (timezone.now() + timedelta(seconds=_EBOOK_DOWNLOAD_MAX_AGE_SECONDS)).isoformat()
+    # Optional JSON for clients that need expiry / URL metadata only.
+    if (request.query_params.get("meta") or "").strip() in ("1", "true", "yes"):
+        return envelope_response({"download_url": signed, "expires_at": exp})
+    if b.full_pdf and getattr(b.full_pdf, "name", ""):
+        try:
+            fh = b.full_pdf.open("rb")
+        except Exception:
+            logger.exception("ebook_full_pdf_open_failed segment=%s ebook_id=%s", slug, b.pk)
+            return envelope_response(None, message="Book PDF unavailable", success=False, status=500)
+        base_name = ((b.slug or "").strip() or f"ebook-{b.pk}")
+        fname = (b.full_pdf.name.rsplit("/", 1)[-1] if b.full_pdf.name else f"{base_name}.pdf") or f"{base_name}.pdf"
+        # inline so browsers / WebViews can display the PDF instead of forcing download
+        return FileResponse(fh, as_attachment=False, filename=fname, content_type="application/pdf")
+    return HttpResponseRedirect(b.file_url)
 
 
 @api_view(["GET", "POST"])

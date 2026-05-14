@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 from rest_framework.test import APIClient
 
+from apps.agreements.models import MemberComplianceProfile
 from apps.commissions.models import MilestoneRecord
 from apps.commissions.services.milestone_payload import build_user_milestones_dashboard
 from apps.users.models import User
@@ -94,6 +95,9 @@ def test_milestones_endpoint_envelope(system_config):
     )
     u.set_unusable_password()
     u.save()
+    u.kyc_status = User.KYCStatus.VERIFIED
+    u.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=u)
 
     client = APIClient()
     client.force_authenticate(user=u)

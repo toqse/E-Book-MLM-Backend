@@ -66,6 +66,7 @@ INSTALLED_APPS = [
     "apps.courses",
     "apps.cart",
     "apps.payments",
+    "apps.finance",
     "apps.admin_panel",
     "apps.notifications",
     "apps.audit",

@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.admin_panel.models import SystemConfig
+from apps.agreements.models import MemberComplianceProfile
 from apps.commissions.engine import CommissionEngine
 from apps.commissions.models import CommissionLedger
 from apps.mlm_tree.services import BinaryTreeService
@@ -69,6 +70,8 @@ def _three_level_tree():
     buyer.is_member = True
     buyer.save()
     BinaryTreeService.place_member(buyer, sponsor)
+    for u in (root, sponsor, buyer):
+        MemberComplianceProfile.objects.get_or_create(user=u)
     return root, sponsor, buyer
 
 
@@ -167,6 +170,9 @@ def test_user_payouts_bundle_ladder_length(system_config):
     sponsor.is_member = True
     sponsor.save()
     BinaryTreeService.place_member(sponsor, None)
+    sponsor.kyc_status = User.KYCStatus.VERIFIED
+    sponsor.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=sponsor)
     Wallet.objects.filter(user=sponsor).update(total_earned=Decimal("5000"))
     User.objects.filter(pk=sponsor.pk).update(
         bank_account_number="123456789012",
@@ -238,6 +244,9 @@ def test_payouts_bundle_query_budget(system_config):
     sponsor.is_member = True
     sponsor.save()
     BinaryTreeService.place_member(sponsor, None)
+    sponsor.kyc_status = User.KYCStatus.VERIFIED
+    sponsor.save(update_fields=["kyc_status"])
+    MemberComplianceProfile.objects.create(user=sponsor)
 
     client = APIClient()
     client.force_authenticate(user=sponsor)

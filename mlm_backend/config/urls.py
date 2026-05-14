@@ -10,6 +10,7 @@ from apps.commissions import user_views as comm_views
 from apps.commissions import admin_milestone_views as admin_ms_views
 from apps.courses import views as course_views
 from apps.banners import views as banner_views
+from apps.finance import views as finance_views
 from apps.payments import refund_request_views as pay_refunds
 from apps.payments import views as pay_views
 from apps.sponsor_slots import views as slot_views
@@ -188,6 +189,16 @@ urlpatterns = [
         "api/v1/admin/orders/<str:order_ref>/verify-payment-manual/",
         pay_views.admin_verify_payment_manual,
     ),
+    path("api/v1/admin/finance/overview/", finance_views.finance_overview),
+    path("api/v1/admin/finance/income-streams/", finance_views.finance_income_streams),
+    path("api/v1/admin/finance/tab-counts/", finance_views.finance_tab_counts),
+    path("api/v1/admin/finance/tds/", finance_views.finance_tds),
+    path("api/v1/admin/finance/expenditure/", finance_views.finance_expenditure),
+    path("api/v1/admin/finance/audit-trail/", finance_views.finance_audit_trail),
+    path("api/v1/admin/finance/search/", finance_views.finance_search_view),
+    path("api/v1/admin/finance/orders/", finance_views.finance_orders),
+    path("api/v1/admin/finance/export/", finance_views.finance_export),
+    path("api/v1/admin/finance/generate-report/", finance_views.finance_generate_report),
     path("api/v1/admin/revenue/", pay_views.admin_revenue),
     path("api/v1/admin/gst-report/", pay_views.admin_gst_report),
     # Admin panel

@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 
-from apps.common.permissions import IsAdminRole
+from apps.common.permissions import IsAdminRole, require_kyc_verified_and_compliant
 from apps.common.responses import envelope_response
 from apps.admin_panel.utils import get_system_config
 from apps.wallet.bands import BAND_EDGES
@@ -44,6 +44,9 @@ def _days_remaining(expires_at) -> int:
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_slots(request):
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     batches = SponsorSlotBatch.objects.filter(issued_to=request.user).prefetch_related("codes")
     data = []
     for b in batches:
@@ -77,6 +80,9 @@ def bundle(request):
     - active slots list for cards
     - paginated history list for table
     """
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     user = request.user
     now = timezone.now()
     cfg = get_system_config()
@@ -188,6 +194,9 @@ def bundle(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def share_code(request, code: str):
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     c = SponsorSlotCode.objects.filter(code__iexact=code, issued_to=request.user).first()
     if not c:
         return envelope_response(None, message="Not found", success=False, status=404)

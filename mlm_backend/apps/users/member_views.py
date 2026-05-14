@@ -102,12 +102,12 @@ def referral_stats(request: Request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def referral_list(request: Request):
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     qs = request.user.direct_referrals.all().order_by("-id")
     pending = _truthy_query_param(request.query_params.get("pending_placement"))
     if pending:
-        blocked = require_kyc_verified_and_compliant(request)
-        if blocked is not None:
-            return blocked
         mlm_paid_order = Order.objects.filter(
             user_id=OuterRef("pk"),
             status=Order.Status.PAID,
@@ -155,13 +155,12 @@ def _parse_max_depth(request: Request, default: int = 3, cap: int = 10) -> int:
 @permission_classes([IsAuthenticated])
 def team_network(request: Request):
     """Bundled My Network payload: summary, pending, tree, optional roster (see include)."""
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     viewer = request.user
     ctx = team_services.build_subtree_context(viewer)
     include = team_services.parse_include(request.query_params.get("include"))
-    if "pending" in include or "roster" in include:
-        blocked = require_kyc_verified_and_compliant(request)
-        if blocked is not None:
-            return blocked
     max_depth = team_services.parse_max_depth(
         request.query_params.get("tree_max_depth"),
         default=3,

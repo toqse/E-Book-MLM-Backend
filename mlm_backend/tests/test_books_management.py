@@ -1,5 +1,6 @@
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from urllib.parse import urlparse
 from rest_framework.test import APIClient
 
 from apps.cart.models import Cart, CartItem
@@ -273,8 +274,10 @@ def test_course_detail_pdf_url_by_access_level_slug_and_id():
     assert resp_id_buy.status_code == 200
     d_slug_buy = resp_slug_buy.json()["data"]
     d_id_buy = resp_id_buy.json()["data"]
-    assert "/ebooks/full/" in d_slug_buy["pdf_url"]
-    assert "/ebooks/full/" in d_id_buy["pdf_url"]
+    assert "/api/v1/user/courses/access-book/download/" in d_slug_buy["pdf_url"]
+    assert "token=" in d_slug_buy["pdf_url"]
+    assert "/api/v1/user/courses/access-book/download/" in d_id_buy["pdf_url"]
+    assert "token=" in d_id_buy["pdf_url"]
     assert d_slug_buy["is_already_in_cart"] is False
     assert d_id_buy["is_already_in_cart"] is False
     assert d_slug_buy["is_already_purchased"] is True
@@ -462,8 +465,58 @@ def test_my_enrolled_detail_matches_public_catalog_detail_and_requires_enrollmen
     for resp in (r_slug, r_id):
         payload = resp.json()["data"]
         assert payload["slug"] == book.slug
-        assert "/ebooks/full/" in payload["pdf_url"]
+        assert f"/api/v1/user/courses/{book.slug}/download/" in payload["pdf_url"]
+        assert "token=" in payload["pdf_url"]
         assert payload["is_already_purchased"] is True
+
+
+@pytest.mark.django_db
+def test_enrolled_pdf_url_and_download_use_by_id_when_slug_blank_in_db():
+    book = EBook.objects.create(
+        title="Legacy Blank Slug Book",
+        slug="legacy-blank-temp",
+        category="HEALTH",
+        description="x",
+        pages_count=1,
+        language="English",
+        price=10,
+        status=EBook.Status.PUBLISHED,
+        file_url="https://example.com/x.pdf",
+        is_active=True,
+        full_pdf=_sample_pdf("fullBLANK.pdf"),
+    )
+    EBook.objects.filter(pk=book.pk).update(slug="")
+    book.refresh_from_db()
+    assert book.slug == ""
+
+    buyer = _member_user("+919877700001", "MBR700001", "MBR701", "+919877700001")
+    order = Order.objects.create(
+        user=buyer,
+        ebook=book,
+        order_number="ORD-BLANK-SLUG",
+        amount_paid="10.00",
+        status=Order.Status.PAID,
+    )
+    Enrollment.objects.create(user=buyer, ebook=book, order=order, is_retail=False)
+
+    client = APIClient()
+    client.force_authenticate(user=buyer)
+    r = client.get("/api/v1/user/courses/enrolled/")
+    assert r.status_code == 200
+    flat = _flatten_courses_catalog_results(r.json()["data"]["results"])
+    row = next(b for b in flat if b["id"] == book.id)
+    pdf_url = row["pdf_url"]
+    assert f"/api/v1/user/courses/by-id-{book.pk}/download/" in pdf_url
+    assert "token=" in pdf_url
+
+    parsed = urlparse(pdf_url)
+    dl_path = f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
+    anon = APIClient()
+    r_pdf = anon.get(dl_path)
+    assert r_pdf.status_code == 200
+    assert r_pdf["Content-Type"].startswith("application/pdf")
+    head = b"".join(r_pdf.streaming_content)[:8]
+    assert head[:4] == b"%PDF"
 
 
 @pytest.mark.django_db

@@ -15,7 +15,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 
 from apps.admin_panel.utils import get_system_config
-from apps.common.permissions import IsFinanceAdmin
+from apps.common.permissions import IsFinanceAdmin, require_kyc_verified_and_compliant, require_kyc_verified_and_compliant
 from apps.common.responses import envelope_response
 from apps.users.models import User
 from apps.tds.services import calculate_and_apply_194h_tds
@@ -139,6 +139,9 @@ def _payout_destination_hint(user: User, payout_method: str) -> str:
 @permission_classes([IsAuthenticated])
 def user_payouts_bundle(request: Request):
     """Consolidated payouts: wallet, band ladder, withdrawals (see GET /api/v1/user/payouts/)."""
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
     raw = (request.query_params.get("movements") or "").strip().lower()
     include_movements = raw in ("1", "true", "yes", "on")
     return envelope_response(build_payouts_bundle(request.user, include_movements=include_movements))

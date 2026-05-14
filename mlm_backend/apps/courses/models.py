@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils.text import slugify
 
 
 class EBook(models.Model):
@@ -29,6 +30,28 @@ class EBook(models.Model):
 
     class Meta:
         db_table = "courses_ebook"
+
+    def _assign_slug_if_blank(self) -> None:
+        if (self.slug or "").strip():
+            return
+        base = slugify((self.title or "").strip() or "ebook").strip("-") or "ebook"
+        base = base[:50]
+        slug = base
+        suffix_n = 0
+        while True:
+            qs = EBook.objects.filter(slug=slug)
+            if self.pk:
+                qs = qs.exclude(pk=self.pk)
+            if not qs.exists():
+                break
+            suffix_n += 1
+            suffix = f"-{suffix_n}"
+            slug = f"{base[: max(1, 50 - len(suffix))].rstrip('-')}{suffix}"
+        self.slug = slug[:50]
+
+    def save(self, *args, **kwargs):
+        self._assign_slug_if_blank()
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return self.title

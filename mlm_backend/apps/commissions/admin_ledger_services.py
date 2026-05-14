@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
 from django.db.models import Q, QuerySet, Sum
+from django.utils.dateparse import parse_date as django_parse_date
 
 from apps.admin_panel.utils import get_system_config
 
@@ -22,6 +24,8 @@ class AdminCommissionFilters:
     status: str  # all | processed | pending | reversed | held
     level: str  # all | L1 | L2 | L3 | L4 | passive
     exclude_milestone: bool
+    date_from: date | None
+    date_to: date | None
 
 
 def _norm(s: str | None) -> str:
@@ -45,11 +49,19 @@ def parse_admin_commission_filters(query_params: dict[str, Any]) -> AdminCommiss
     else:
         s = str(em).strip().lower()
         exclude_milestone = s not in ("0", "false", "no", "off", "")
+    raw_df = _norm(query_params.get("from"))
+    raw_dt = _norm(query_params.get("to"))
+    d_from = django_parse_date(raw_df) if raw_df else None
+    d_to = django_parse_date(raw_dt) if raw_dt else None
+    if d_from and d_to and d_from > d_to:
+        d_from, d_to = d_to, d_from
     return AdminCommissionFilters(
         q=_norm(query_params.get("q")),
         status=raw_status,
         level=raw_level,
         exclude_milestone=exclude_milestone,
+        date_from=d_from,
+        date_to=d_to,
     )
 
 
@@ -92,6 +104,10 @@ def apply_admin_commission_filters(
         qs = qs.filter(status=st.REVERSED)
     elif flt.status == "held":
         qs = qs.filter(status=st.HELD)
+    if flt.date_from is not None:
+        qs = qs.filter(created_at__date__gte=flt.date_from)
+    if flt.date_to is not None:
+        qs = qs.filter(created_at__date__lte=flt.date_to)
     return qs
 
 

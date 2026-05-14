@@ -134,3 +134,111 @@ def test_place_direct_requires_kyc_verified_and_profile(system_config):
         format="json",
     )
     assert r3.status_code == 200, r3.content
+
+
+@pytest.mark.django_db
+def test_referral_list_all_requires_kyc_verified(system_config):
+    sponsor = _member("+919100000011")
+    sponsor.is_member = True
+    sponsor.save(update_fields=["is_member"])
+    BinaryTreeService.place_member(sponsor, None)
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+
+    r = client.get("/api/v1/user/referral/list/")
+    assert r.status_code == 403
+    assert (r.json().get("errors") or {}).get("detail") in (
+        "kyc_required",
+        "compliance_profile_required",
+    )
+
+
+@pytest.mark.django_db
+def test_team_network_tree_only_requires_kyc_verified(system_config):
+    sponsor = _member("+919100000012")
+    sponsor.is_member = True
+    sponsor.save(update_fields=["is_member"])
+    BinaryTreeService.place_member(sponsor, None)
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+
+    r = client.get("/api/v1/user/team/network/?include=summary,tree")
+    assert r.status_code == 403
+    assert (r.json().get("errors") or {}).get("detail") in (
+        "kyc_required",
+        "compliance_profile_required",
+    )
+
+
+@pytest.mark.django_db
+def test_earnings_bundle_requires_kyc_verified(system_config):
+    sponsor = _member("+919100000013")
+    sponsor.is_member = True
+    sponsor.save(update_fields=["is_member"])
+    BinaryTreeService.place_member(sponsor, None)
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+
+    r = client.get("/api/v1/user/earnings/?include=overview,ledger&page=1")
+    assert r.status_code == 403
+    assert (r.json().get("errors") or {}).get("detail") in (
+        "kyc_required",
+        "compliance_profile_required",
+    )
+
+
+@pytest.mark.django_db
+def test_commissions_milestones_requires_kyc_verified(system_config):
+    sponsor = _member("+919100000014")
+    sponsor.is_member = True
+    sponsor.save(update_fields=["is_member"])
+    BinaryTreeService.place_member(sponsor, None)
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+
+    r = client.get("/api/v1/user/commissions/milestones/")
+    assert r.status_code == 403
+    assert (r.json().get("errors") or {}).get("detail") in (
+        "kyc_required",
+        "compliance_profile_required",
+    )
+
+
+@pytest.mark.django_db
+def test_sponsor_slots_bundle_requires_kyc_verified(system_config):
+    sponsor = _member("+919100000015")
+    sponsor.is_member = True
+    sponsor.save(update_fields=["is_member"])
+    BinaryTreeService.place_member(sponsor, None)
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+
+    r = client.get("/api/v1/user/sponsor-slots/bundle/")
+    assert r.status_code == 403
+    assert (r.json().get("errors") or {}).get("detail") in (
+        "kyc_required",
+        "compliance_profile_required",
+    )
+
+
+@pytest.mark.django_db
+def test_payouts_bundle_requires_kyc_verified(system_config):
+    sponsor = _member("+919100000016")
+    sponsor.is_member = True
+    sponsor.save(update_fields=["is_member"])
+    BinaryTreeService.place_member(sponsor, None)
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+
+    r = client.get("/api/v1/user/payouts/?movements=true")
+    assert r.status_code == 403
+    assert (r.json().get("errors") or {}).get("detail") in (
+        "kyc_required",
+        "compliance_profile_required",
+    )

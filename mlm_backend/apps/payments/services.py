@@ -417,6 +417,25 @@ def verify_payment(order: Order, payment_id: str, signature: str):
     return finalize_order_as_paid(order, payment_id=payment_id)
 
 
+def resolve_gateway_payment_method(order: Order, payment_id_fallback: str | None = None) -> str:
+    """Razorpay instrument (card, upi, netbanking, …) when fetch succeeds; else gateway/manual label."""
+    pid = (order.razorpay_payment_id or payment_id_fallback or "").strip()
+    if not pid:
+        return "unknown"
+    if pid.upper().startswith("MANUAL-"):
+        return "manual"
+    client = _client()
+    if client is None:
+        return "razorpay"
+    try:
+        p = client.payment.fetch(pid)
+        m = (p.get("method") or "").strip().lower()
+        return m if m else "razorpay"
+    except Exception:
+        logger.debug("resolve_gateway_payment_method fetch failed for %s", pid, exc_info=True)
+        return "razorpay"
+
+
 def _ensure_gst_invoice(order: Order):
     existing = GSTInvoice.objects.filter(order_id=order.pk).first()
     if existing is None:
@@ -527,6 +546,33 @@ def refund_submission_blocked(order_id: int, *, target_order_line_id: int | None
     if target_order_line_id is not None:
         return open_q.filter(order_line_id=target_order_line_id).exists()
     return open_q.exists()
+
+
+def latest_applicable_refund_request(
+    rlist: list[RefundRequest],
+    *,
+    item_line_id: int | None,
+) -> RefundRequest | None:
+    """
+    Highest-id RefundRequest that applies to this catalog item: line-scoped rows for ``item_line_id``,
+    plus order-wide rows (``order_line_id`` null). Legacy single-ebook synthetic item uses only order-wide rows.
+    """
+    if item_line_id is not None:
+        applicable = [r for r in rlist if r.order_line_id == item_line_id or r.order_line_id is None]
+    else:
+        applicable = [r for r in rlist if r.order_line_id is None]
+    if not applicable:
+        return None
+    return max(applicable, key=lambda r: r.pk)
+
+
+def latest_applicable_refund_status(
+    rlist: list[RefundRequest],
+    *,
+    item_line_id: int | None,
+) -> str | None:
+    r = latest_applicable_refund_request(rlist, item_line_id=item_line_id)
+    return r.status if r else None
 
 
 def _next_refund_reference_locked(order_pk: int) -> str:
@@ -670,6 +716,8 @@ def submit_member_refund_request(
             raise ValueError("Refund window closed")
 
         target_line: OrderLine | None = None
+        rlist = list(RefundRequest.objects.filter(order_id=o.pk))
+
         if order_line_id is not None:
             if not o.lines.exists():
                 raise ValueError("Line-based refund is not available for this order")
@@ -680,10 +728,18 @@ def submit_member_refund_request(
             )
             if not target_line:
                 raise ValueError("Order line not found")
+            if latest_applicable_refund_status(rlist, item_line_id=target_line.pk) == RefundRequest.Status.REJECTED:
+                raise ValueError(
+                    "Refund was already rejected for this item; resubmission is not allowed."
+                )
             if refund_submission_blocked(o.pk, target_order_line_id=target_line.pk):
                 raise ValueError("Refund request already pending")
             amount = remaining_refundable_for_order_line(o, target_line.pk)
         else:
+            if latest_applicable_refund_status(rlist, item_line_id=None) == RefundRequest.Status.REJECTED:
+                raise ValueError(
+                    "Refund was already rejected for this item; resubmission is not allowed."
+                )
             if refund_submission_blocked(o.pk, target_order_line_id=None):
                 raise ValueError("Refund request already pending")
             amount = remaining_refundable_for_order(o)
@@ -702,3 +758,92 @@ def submit_member_refund_request(
             status=RefundRequest.Status.PENDING,
             member_note=note,
         )
+
+
+def submit_member_refund_requests_for_lines(
+    *,
+    user,
+    order_id: int,
+    order_line_ids: list[int],
+    member_note: str = "",
+) -> list[RefundRequest]:
+    """
+    Create one pending RefundRequest per distinct order line id, in a single transaction.
+    Same business rules as single-line submit per line; fails entirely if any line is invalid or blocked.
+    """
+    now = timezone.now()
+    note = (member_note or "").strip()
+    if len(note) > 4000:
+        raise ValueError("Note too long")
+
+    if not order_line_ids:
+        raise ValueError("order_line_ids must be a non-empty list")
+    try:
+        raw_ids = [int(x) for x in order_line_ids]
+    except (TypeError, ValueError):
+        raise ValueError("order_line_ids must be a list of integers")
+    deduped = list(dict.fromkeys(raw_ids))
+    if not deduped:
+        raise ValueError("order_line_ids must be a non-empty list")
+
+    created: list[RefundRequest] = []
+    with transaction.atomic():
+        qs = Order.objects.select_for_update().filter(pk=order_id, user=user)
+        o = qs.first()
+        if not o:
+            raise ValueError("Order not found")
+        if o.status != Order.Status.PAID:
+            raise ValueError("Not refundable")
+        if o.refund_eligible_until and now > o.refund_eligible_until:
+            raise ValueError("Refund window closed")
+        if not o.lines.exists():
+            raise ValueError("order_line_ids is not available for this order")
+
+        if RefundRequest.objects.filter(
+            order_id=o.pk,
+            order_line__isnull=True,
+            status__in=(
+                RefundRequest.Status.PENDING,
+                RefundRequest.Status.PROCESSING,
+            ),
+        ).exists():
+            raise ValueError("Refund request already pending")
+
+        rlist = list(RefundRequest.objects.filter(order_id=o.pk))
+
+        lines_to_create: list[tuple[OrderLine, Decimal]] = []
+        for lid in deduped:
+            line = (
+                OrderLine.objects.select_for_update()
+                .filter(pk=int(lid), order_id=o.pk)
+                .first()
+            )
+            if not line:
+                raise ValueError("Order line not found")
+            if latest_applicable_refund_status(rlist, item_line_id=line.pk) == RefundRequest.Status.REJECTED:
+                raise ValueError(
+                    "Refund was already rejected for this item; resubmission is not allowed."
+                )
+            if refund_submission_blocked(o.pk, target_order_line_id=line.pk):
+                raise ValueError("Refund request already pending")
+            amount = remaining_refundable_for_order_line(o, line.pk)
+            if amount <= Decimal("0"):
+                raise ValueError("Nothing left to refund for this selection")
+            lines_to_create.append((line, amount))
+
+        pm = payment_method_for_refund(o)
+        for line, amount in lines_to_create:
+            ref = _next_refund_reference_locked(o.pk)
+            created.append(
+                RefundRequest.objects.create(
+                    reference=ref,
+                    order=o,
+                    user=o.user,
+                    order_line=line,
+                    amount=amount,
+                    payment_method=pm,
+                    status=RefundRequest.Status.PENDING,
+                    member_note=note,
+                )
+            )
+    return created
