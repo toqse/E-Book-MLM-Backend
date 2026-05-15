@@ -151,14 +151,15 @@ POST /api/v1/auth/verify-otp-register/
   Creates user from data stored on the matching unused REGISTER OTP (full_name, optional email, sponsor).
   Success data: {
     "user": { id, member_id, full_name, phone, email, referral_code, is_member, role },
-    "tokens": { "access" }
+    "tokens": { "access" },
+    "is_book_purchased": <bool; true if the user has at least one PAID ebook order (single- or multi-item)>
   }
   Errors: 400 invalid OTP / expired session data / duplicate phone-email; note: complete within OTP TTL after send.
 
 POST /api/v1/auth/verify-otp-login/
   Auth: None.
   Body (JSON): identifier — phone (strict E.164 with +, same as send-otp) or email — plus otp_code (6 chars).
-  Success data: same user + tokens shape as register.
+  Success data: same user + tokens shape as register, plus "role" (session role) and the same is_book_purchased flag.
   Errors: 423 account locked (otp_locked_until); 404 user not found; 400 OTP errors.
 
 POST /api/v1/auth/logout/
@@ -168,7 +169,8 @@ POST /api/v1/auth/logout/
 GET/PATCH /api/v1/auth/me/
   Auth: Bearer.
   GET — Success data: user stub plus profile blocks for the profile screen:
-    - Base user: id, member_id, full_name, phone, email, referral_code, is_member, role
+    - Base user: id, member_id, full_name, phone, email, referral_code, is_member, role, is_book_purchased
+      (same semantics as verify-otp-register / verify-otp-login: true if at least one PAID ebook order)
     - personal_information: full_name, email_address, mobile_number, date_of_birth (DD/MM/YYYY), gender
     - member_information: member_id, joined_date (ISO), address, city, state, pin_code, country
     - display: profile_initial, avatar_url
@@ -1695,14 +1697,55 @@ POST /api/v1/admin/finance/generate-report/
   Body/query: same date params as other finance GETs.
   Returns PDF (tabular KPI flatten). Writes audit `finance.report_generated`.
 
-
+h
 MODULE: Admin panel & compliance
 --------------------------------------------------------------------------------
 GET /api/v1/admin/dashboard/
   Auth: IsAdminRole.
-  Success: {
-    "total_members", "new_orders_today", "pending_withdrawals", "pending_kyc"
+  Query params (optional):
+    - Revenue chart window (same as finance): `from`, `to` (YYYY-MM-DD), or `preset` (today|7d|30d|fy), or `fy` label.
+    - `revenue_granularity`: daily (default) | weekly | monthly — buckets for `revenue_series.points`.
+    - `activity_limit`: 1–50, default 10 — rows in `sponsor_slot_activity`.
+    - `recent_joiners_limit`: 1–50, default 10.
+    - `top_earners_limit`: 1–50, default 10.
+  Success `data`: {
+    "summary_cards": [
+      {
+        "id": "total_members" | "active_today" | "book_sales_24h" | "pending_payouts" | "active_slots" | "compliance_score",
+        "label", "value" (int, or decimal string for INR pending payouts),
+        "delta_percent": float | null,
+        "compare_label": string (explains baseline; e.g. vs_yesterday, vs_prior_24h),
+        "unit": "count" | "orders" | "INR" | "score_0_100",
+        "subtitle": optional string
+      }, ... 6 cards
+    ],
+    "revenue_series": {
+      "granularity", "date_from", "date_to", "preset",
+      "points": [
+        {
+          "period_start", "period_end" (ISO dates),
+          "book_sales", "commission_turnover", "combined" (decimal strings, INR)
+        }, ...
+      ]
+    },
+    "sponsor_slot_activity": [
+      {
+        "code", "event_type", "actor_member_id", "actor_full_name", "actor_is_system",
+        "metadata", "created_at"
+      }, ...
+    ],
+    "recent_joiners": [
+      { "member_id", "full_name", "state", "kyc_status", "joined_at" (YYYY-MM-DD) }, ...
+    ],
+    "top_earners": [
+      { "member_id", "full_name", "band", "referrals", "earnings" (decimal string) }, ...
+    ],
+    "total_members", "new_orders_today", "pending_withdrawals" (count of PENDING withdrawal requests only),
+    "pending_kyc"
   }
+  Notes:
+    - Book sales (24H) KPI counts all PAID orders with paid_at in the rolling last 24 hours.
+    - Pending payouts card value sums net_payable for withdrawals in PENDING, APPROVED, or PROCESSING.
 
 GET /api/v1/admin/users/
   Auth: IsAdminRole.

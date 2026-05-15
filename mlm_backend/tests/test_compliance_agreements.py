@@ -6,11 +6,13 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APIClient
 
 from apps.agreements.models import (
+    AgreementCategory,
     LegalDocument,
     MemberComplianceProfile,
     UserAgreementAcceptance,
     UserAgreementAcceptanceDeclaration,
 )
+from apps.agreements.proof_pdf import acceptance_proof_pdf_page_count
 from apps.agreements.proof_service import verify_hmac_for_batch
 from apps.courses.models import EBook
 from apps.payments.models import Order
@@ -446,11 +448,11 @@ def test_agreements_compliance_legal_list_filters():
 def test_agreements_get_user_invoices_acceptance_proof_and_download(system_config):
     LegalDocument.objects.create(
         name="Terms Proof",
-        category="LEGAL DOCUMENT",
+        category=AgreementCategory.KYC_IDENTITY,
         document_type="terms",
         year=2026,
         description="d",
-        content_html="<p>x</p>",
+        content_html="<p>KYC agreement body for PDF appendix.</p>",
         version="1.0",
         requires_acceptance_for_compliance=True,
         is_active=True,
@@ -541,6 +543,7 @@ def test_agreements_get_user_invoices_acceptance_proof_and_download(system_confi
     assert "attachment" in (dl.get("Content-Disposition") or "").lower()
     pdf_bytes = b"".join(dl.streaming_content)
     assert pdf_bytes[:4] == b"%PDF"
+    assert acceptance_proof_pdf_page_count(pdf_bytes) >= 2
     # Declaration is bound in HMAC v2 and stored on UserAgreementAcceptanceDeclaration;
     # embedded PDF text may be compressed so we do not assert raw substring here.
 

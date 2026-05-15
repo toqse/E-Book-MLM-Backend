@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -8,6 +9,8 @@ from rest_framework.test import APIClient
 from apps.agreements.models import MemberComplianceProfile
 from apps.authentication.models import OTPRecord
 from apps.authentication.otp import normalize_otp_code, verify_otp
+from apps.courses.models import EBook
+from apps.payments.models import Order
 
 User = get_user_model()
 
@@ -62,6 +65,7 @@ def test_register_full_payload_and_company_referral():
     )
     assert finish.status_code == 200, finish.content
     data = finish.json()["data"]
+    assert data["is_book_purchased"] is False
     assert data["tokens"]["access"]
     assert data["user"]["referral_code"] != "Admin"
     u = User.objects.get(phone=REGISTER_PHONE)
@@ -239,7 +243,69 @@ def test_verify_otp_login_returns_role_user():
         format="json",
     )
     assert verify.status_code == 200, verify.content
-    assert verify.json()["data"]["role"] == "user"
+    body = verify.json()["data"]
+    assert body["role"] == "user"
+    assert body["is_book_purchased"] is False
+
+
+@pytest.mark.django_db
+def test_verify_otp_login_is_book_purchased_true_when_paid_ebook_order():
+    login_phone = "+919444444444"
+    u = User.objects.create_user(
+        login_identifier=login_phone,
+        password="pw",
+        phone=login_phone,
+        full_name="Book Buyer",
+        member_id="MBR000301",
+        referral_code="MBR301",
+        referral_link="http://localhost:3000/join?ref=MBR301",
+        role=User.Role.MEMBER,
+        is_staff=False,
+    )
+    book = EBook.objects.create(
+        title="OTP Login Book",
+        slug="otp-login-book",
+        category="Business",
+        description="d",
+        pages_count=10,
+        language="English",
+        price=Decimal("100.00"),
+        status=EBook.Status.PUBLISHED,
+        file_url="https://example.com/x.pdf",
+        is_active=True,
+    )
+    Order.objects.create(
+        user=u,
+        ebook=book,
+        order_number="ORD-OTP-BOOK-1",
+        base_price=Decimal("100"),
+        gst_amount=Decimal("18"),
+        gateway_charge=Decimal("5.72"),
+        total_amount=Decimal("123.72"),
+        discount_amount=Decimal("0"),
+        amount_paid=Decimal("123.72"),
+        status=Order.Status.PAID,
+    )
+    client = APIClient()
+    assert (
+        client.post(
+            "/api/v1/auth/send-otp/",
+            {"phone": login_phone, "purpose": "LOGIN"},
+            format="json",
+        ).status_code
+        == 200
+    )
+    otp = OTPRecord.objects.filter(
+        phone=login_phone,
+        purpose=OTPRecord.Purpose.LOGIN,
+    ).latest("id").otp_code
+    verify = client.post(
+        "/api/v1/auth/verify-otp-login/",
+        {"phone": login_phone, "otp_code": otp},
+        format="json",
+    )
+    assert verify.status_code == 200, verify.content
+    assert verify.json()["data"]["is_book_purchased"] is True
 
 
 @pytest.mark.django_db
@@ -340,6 +406,7 @@ def test_me_includes_personal_and_member_info_blocks():
     resp = client.get("/api/v1/auth/me/")
     assert resp.status_code == 200, resp.content
     data = resp.json()["data"]
+    assert data["is_book_purchased"] is False
     assert data["personal_information"]["full_name"] == "Me User"
     assert data["personal_information"]["email_address"] == "me@test.dev"
     assert data["personal_information"]["mobile_number"] == "+919444444444"

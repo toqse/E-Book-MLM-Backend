@@ -26,6 +26,11 @@ class CommissionEngine:
         )
         if active.exists():
             return
+        # Purge stale REVERSED rows so they don't pollute the ledger or the
+        # "reversed" summary figure after an admin reverse + re-placement cycle.
+        CommissionLedger.objects.filter(
+            order=order, status=CommissionLedger.Status.REVERSED
+        ).delete()
         buyer = order.user
         cfg = get_system_config()
         direct_amt = cfg.direct_commission

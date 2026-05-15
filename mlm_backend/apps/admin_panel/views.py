@@ -4,9 +4,10 @@ from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
+from apps.admin_panel.dashboard_service import build_admin_dashboard_payload
 from apps.admin_panel.models import Grievance
-from apps.agreements.models import MemberComplianceProfile
 from apps.admin_panel.utils import get_system_config
+from apps.agreements.models import MemberComplianceProfile
 from apps.commissions.milestone_tiers import get_milestones
 from apps.common.permissions import (
     IsAdminRole,
@@ -162,19 +163,7 @@ def _approve_compliance_by_user_ids(user_ids: list[int]):
 @api_view(["GET"])
 @permission_classes([IsAdminRole])
 def dashboard(request):
-    today = timezone.localdate()
-    members = User.objects.filter(role=User.Role.MEMBER).count()
-    orders_today = Order.objects.filter(
-        status=Order.Status.PAID, paid_at__date=today
-    ).count()
-    return envelope_response(
-        {
-            "total_members": members,
-            "new_orders_today": orders_today,
-            "pending_withdrawals": 0,
-            "pending_kyc": User.objects.filter(kyc_status=User.KYCStatus.PENDING).count(),
-        }
-    )
+    return envelope_response(build_admin_dashboard_payload(request.query_params))
 
 
 @api_view(["GET"])

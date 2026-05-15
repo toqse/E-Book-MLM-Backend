@@ -1,10 +1,12 @@
-"""Agreement acceptance proof PDF (ReportLab): logo, attestation block, declaration, HMAC.
+"""Agreement acceptance proof PDF (ReportLab): agreement text first, verification record last.
 
-Layout is compact for a single A4 page; very long declarations or many documents may still spill.
+Leading pages embed plain-text copies of accepted KYC & Identity / Legal documents (from HTML).
+The final page(s) hold the OTP verification record (logo, declaration, HMAC).
 """
 
 from __future__ import annotations
 
+import html as html_stdlib
 import os
 import re
 from io import BytesIO
@@ -16,7 +18,7 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 ACCENT = colors.HexColor("#2c73a9")
 
@@ -30,6 +32,24 @@ _LOGO_BOX_MAX_W = 20 * mm
 _LOGO_BOX_MAX_H = 9 * mm
 
 DIGITAL_SIGN_REASON = "OTP verified agreement acceptance"
+
+
+def _html_to_plain_text(raw: str) -> str:
+    """Strip admin-authored HTML to plain text for safe Paragraph rendering."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"(?is)<script[^>]*>.*?</script>", "", s)
+    s = re.sub(r"(?is)<style[^>]*>.*?</style>", "", s)
+    s = re.sub(r"(?i)<br\s*/?>", "\n", s)
+    s = re.sub(r"(?i)</\s*(p|div|h[1-6]|section|article|header|footer|blockquote)\s*>", "\n\n", s)
+    s = re.sub(r"(?i)</\s*li\s*>", "\n", s)
+    s = re.sub(r"(?i)<\s*li[^>]*>", "\n• ", s)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = html_stdlib.unescape(s)
+    s = re.sub(r"[ \t]+\n", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
 
 
 def _signature_location_line() -> str:
@@ -75,9 +95,12 @@ def build_acceptance_proof_pdf_bytes(
     declaration_text: str,
     signed_by_display: str,
     location_display: str,
+    agreement_appendix: list[tuple[str, str, str]] | None = None,
 ) -> bytes:
     """
-    document_rows: list of (document_name, document_id_str, version_accepted)
+    document_rows: list of (document_name, document_id_str, version_accepted).
+    agreement_appendix: optional (document_name, version_accepted, content_html) per accepted doc;
+        plain-text extracts are rendered first; verification record follows on the last page(s).
     issued_at_signature_display: e.g. 2020.09.08 13:18:17 +0530
     """
     buffer = BytesIO()
@@ -107,6 +130,59 @@ def build_acceptance_proof_pdf_bytes(
     sig_label = ParagraphStyle("SigLbl", parent=small, fontSize=8, leading=11)
 
     story: list = []
+
+    if agreement_appendix:
+        appendix_heading = ParagraphStyle(
+            "AppendixH",
+            parent=styles["Heading1"],
+            fontSize=12,
+            textColor=ACCENT,
+            spaceAfter=6,
+            leading=15,
+            alignment=TA_CENTER,
+        )
+        story.append(Paragraph("KYC &amp; Compliance — accepted agreement text", appendix_heading))
+        story.append(Spacer(1, 2 * mm))
+        appendix_doc_title = ParagraphStyle(
+            "AppendixDoc",
+            parent=styles["Heading2"],
+            fontSize=10,
+            textColor=ACCENT,
+            spaceAfter=4,
+            spaceBefore=2,
+            leading=13,
+        )
+        appendix_body = ParagraphStyle(
+            "AppendixBody",
+            parent=styles["Normal"],
+            fontSize=8.5,
+            leading=11,
+        )
+        for idx, (name, ver, html) in enumerate(agreement_appendix):
+            if idx:
+                story.append(PageBreak())
+            story.append(
+                Paragraph(
+                    f"{escape(name)} <font size='9' color='#555555'>(version {escape(ver)})</font>",
+                    appendix_doc_title,
+                )
+            )
+            plain = _html_to_plain_text(html)
+            blocks = [b.strip() for b in re.split(r"\n\n+", plain) if b.strip()] if plain else []
+            if not blocks:
+                story.append(
+                    Paragraph(
+                        "No embedded agreement text on file for this version; refer to the official "
+                        "document PDF or the member portal.",
+                        appendix_body,
+                    )
+                )
+            else:
+                for block in blocks:
+                    story.append(Paragraph(escape(block).replace("\n", "<br/>"), appendix_body))
+                    story.append(Spacer(1, 2 * mm))
+            story.append(Spacer(1, 3 * mm))
+        story.append(PageBreak())
 
     logo = _logo_flowable()
     if logo:

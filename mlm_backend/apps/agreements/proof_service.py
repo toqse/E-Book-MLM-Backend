@@ -15,6 +15,7 @@ from django.db.models import Max
 from django.utils import timezone
 
 from apps.agreements.models import (
+    AgreementCategory,
     UserAgreementAcceptance,
     UserAgreementAcceptanceDeclaration,
     UserAgreementAcceptanceProof,
@@ -208,6 +209,13 @@ def ensure_proof_for_batch(user: User, batch_id: UUID) -> Optional[UserAgreement
         else:
             loc_line = "India"
 
+        # Embedded policy text begins on PDF page 2: KYC & Identity agreements accepted in this batch.
+        kyc_identity = AgreementCategory.KYC_IDENTITY.value
+        agreement_appendix = [
+            (r.document.name, r.version_accepted, r.document.content_html or "")
+            for r in rows
+            if (r.document.category or "").strip() == kyc_identity
+        ]
         pdf_bytes = build_acceptance_proof_pdf_bytes(
             user_id=user.id,
             user_display_name=full_name,
@@ -220,6 +228,7 @@ def ensure_proof_for_batch(user: User, batch_id: UUID) -> Optional[UserAgreement
             declaration_text=declaration,
             signed_by_display=signed_by,
             location_display=loc_line,
+            agreement_appendix=agreement_appendix,
         )
         safe_batch = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(batch_id))[:48]
         filename = f"acceptance_proof_{user.id}_{safe_batch}.pdf"

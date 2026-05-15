@@ -2,6 +2,7 @@ import logging
 
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.decorators import api_view, permission_classes
@@ -12,6 +13,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.audit.services import write_audit
 from apps.common.responses import envelope_response
+from apps.payments.models import Order, OrderLine
 from apps.agreements.models import AgreementCategory, LegalDocument, MemberComplianceProfile
 from apps.agreements.services import accepted_version_for_document, user_missing_acceptances
 from apps.admin_panel.utils import get_system_config
@@ -44,6 +46,15 @@ from .serializers import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+def _user_has_paid_ebook_purchase(user: User) -> bool:
+    """True when the user has at least one PAID order that includes an ebook (legacy or cart line items)."""
+    return (
+        Order.objects.filter(user=user, status=Order.Status.PAID)
+        .filter(Q(ebook_id__isnull=False) | Exists(OrderLine.objects.filter(order_id=OuterRef("pk"))))
+        .exists()
+    )
 
 
 def _otp_send_payload(rec: OTPRecord, *, purpose_label: str, recipient_hint: str) -> dict:
@@ -263,7 +274,14 @@ def verify_otp_register(request: Request):
     user.set_unusable_password()
     user.save()
     write_audit("user.registered", actor=user, target_type="User", target_id=user.id)
-    return envelope_response({"user": _user_payload(user), "tokens": _tokens_for(user)}, message="Registered")
+    return envelope_response(
+        {
+            "user": _user_payload(user),
+            "tokens": _tokens_for(user),
+            "is_book_purchased": _user_has_paid_ebook_purchase(user),
+        },
+        message="Registered",
+    )
 
 
 @api_view(["POST"])
@@ -306,6 +324,7 @@ def verify_otp_login(request: Request):
             "user": _user_payload(user),
             "tokens": _tokens_for(user),
             "role": _session_role(user),
+            "is_book_purchased": _user_has_paid_ebook_purchase(user),
         },
         message="Logged in",
     )
@@ -431,6 +450,7 @@ def _me_payload(user: User):
         "country": profile.country if profile and profile.country else None,
     }
     data = _user_payload(user)
+    data["is_book_purchased"] = _user_has_paid_ebook_purchase(user)
     data["personal_information"] = personal_information
     data["member_information"] = member_information
     data["display"] = {
