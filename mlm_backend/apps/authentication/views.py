@@ -18,6 +18,12 @@ from apps.agreements.models import AgreementCategory, LegalDocument, MemberCompl
 from apps.agreements.services import accepted_version_for_document, user_missing_acceptances
 from apps.admin_panel.utils import get_system_config
 from apps.mlm_tree.models import BinaryNode
+from apps.agreements.kyc_invite_token import parse_kyc_invite_token
+from apps.users.kyc_eligibility import (
+    user_kyc_access_context,
+    user_kyc_invitation_should_send,
+    user_kyc_submission_allowed,
+)
 from apps.users.models import User
 from apps.users import team_services
 from apps.users.services import (
@@ -412,26 +418,10 @@ def _compliance_submitted_payload(
 def _me_payload(user: User):
     user = User.objects.select_related("sponsor").filter(pk=user.pk).first() or user
     profile = MemberComplianceProfile.objects.filter(user=user).first()
-    wallet = get_wallet_row(user)
-    cfg = get_system_config()
-    band_ladder = build_band_ladder(wallet, cfg)
-    current_band = next((b for b in band_ladder if b.get("is_current")), None)
-    ctx = team_services.build_subtree_context(user)
-    bn = BinaryNode.objects.filter(user_id=user.pk).only("position", "level").first()
-
-    used = wallet.total_earned
-    cap = cfg.earning_cap
-    used_percent = float((used / cap) * 100) if cap and cap > 0 else 0.0
-    remaining = cap - used if cap and cap > 0 else 0
-
+    kyc_ctx = user_kyc_access_context(user)
     pan_present = bool((user.pan_number or "").strip())
     kyc_verified = user.kyc_status == User.KYCStatus.VERIFIED
-    if pan_present and kyc_verified:
-        tds_rate_percent = float(cfg.tds_194h_rate) * 100
-        tds_rate_reason = "PAN on file"
-    else:
-        tds_rate_percent = 20.0
-        tds_rate_reason = "PAN not available"
+    mlm_unlocked = kyc_ctx["mlm_features_unlocked"]
 
     personal_information = {
         "full_name": user.full_name or None,
@@ -450,6 +440,8 @@ def _me_payload(user: User):
         "country": profile.country if profile and profile.country else None,
     }
     data = _user_payload(user)
+    if not mlm_unlocked:
+        data["referral_code"] = None
     data["is_book_purchased"] = _user_has_paid_ebook_purchase(user)
     data["personal_information"] = personal_information
     data["member_information"] = member_information
@@ -457,37 +449,41 @@ def _me_payload(user: User):
         "profile_initial": (user.full_name or "").strip()[:1].upper() or None,
         "avatar_url": None,
     }
+    kyc_eligible_at = kyc_ctx.get("kyc_eligible_at")
     data["account_status"] = {
         "account_status": user.account_status,
         "account_status_label": user.get_account_status_display() if user.account_status else None,
         "kyc_status": user.kyc_status,
         "kyc_status_label": user.get_kyc_status_display() if user.kyc_status else None,
         "pan_submitted": pan_present,
-        "tds_rate_percent": tds_rate_percent,
+        "tds_rate_percent": None,
         "withdrawals_blocked": not kyc_verified,
-        "referral_link": user.referral_link or None,
-        "referral_link_active": bool(user.is_active and user.account_status == User.AccountStatus.ACTIVE),
-    }
-    data["tax_withholding"] = {
-        "tds_rate_percent": tds_rate_percent,
-        "reason": tds_rate_reason,
-    }
-    data["withdrawal_band"] = {
-        "current_band": current_band,
-        "bands": band_ladder,
-    }
-    data["earning_cap"] = {
-        "limit": str(cap),
-        "used": str(used),
-        "used_percent": round(used_percent, 2),
-        "remaining": str(max(0, remaining)),
-    }
-    data["kyc_notice"] = {
-        "message": (
-            "Complete KYC to unlock cash withdrawals."
-            if not kyc_verified
-            else None
+        "kyc_submission_allowed": kyc_ctx["kyc_submission_allowed"],
+        "kyc_submission_mode": kyc_ctx["kyc_submission_mode"],
+        "trigger_instant_kyc_submission": kyc_ctx["trigger_instant_kyc_submission"],
+        "kyc_eligible_at": kyc_eligible_at.isoformat() if kyc_eligible_at else None,
+        "kyc_invitation_sent_at": (
+            user.kyc_invitation_sent_at.isoformat() if user.kyc_invitation_sent_at else None
         ),
+        "referral_link": None,
+        "referral_link_active": False,
+    }
+    data["feature_access"] = {
+        "team_network": mlm_unlocked,
+        "earnings": mlm_unlocked,
+        "withdrawals": mlm_unlocked and user.account_status == User.AccountStatus.ACTIVE,
+        "milestones": mlm_unlocked,
+        "sponsor_slots": mlm_unlocked,
+        "referral_program": mlm_unlocked,
+        "compliance_submit": kyc_ctx["kyc_submission_allowed"]
+        and user.kyc_status != User.KYCStatus.VERIFIED,
+    }
+    data["tax_withholding"] = None
+    data["withdrawal_band"] = None
+    data["earning_cap"] = None
+    data["kyc_notice"] = {
+        "message": kyc_ctx.get("kyc_notice_message"),
+        "code": kyc_ctx.get("kyc_notice_code"),
     }
     data["sponsor"] = (
         {
@@ -497,30 +493,76 @@ def _me_payload(user: User):
         if user.sponsor_id and user.sponsor
         else None
     )
-    data["binary_placement"] = {
-        "position": bn.position if bn else None,
-        "level": bn.level if bn else None,
-        "position_label": (
-            f"{bn.get_position_display()} (L{bn.level})" if bn and bn.position and bn.level else None
-        ),
-    }
-    weaker = team_services.suggested_leg(ctx.left_leg_count, ctx.right_leg_count)
-    data["team_legs"] = {
-        "left_leg_count": ctx.left_leg_count,
-        "right_leg_count": ctx.right_leg_count,
-        "weaker_leg": weaker,
-        "left_leg_label": "strong"
-        if ctx.left_leg_count > ctx.right_leg_count
-        else "weak"
-        if ctx.left_leg_count < ctx.right_leg_count
-        else "neutral",
-        "right_leg_label": "strong"
-        if ctx.right_leg_count > ctx.left_leg_count
-        else "weak"
-        if ctx.right_leg_count < ctx.left_leg_count
-        else "neutral",
-        "subtree_member_count": max(0, len(ctx.subtree_user_ids) - 1) if ctx.subtree_user_ids else 0,
-    }
+    data["binary_placement"] = None
+    data["team_legs"] = None
+
+    if mlm_unlocked:
+        wallet = get_wallet_row(user)
+        cfg = get_system_config()
+        band_ladder = build_band_ladder(wallet, cfg)
+        current_band = next((b for b in band_ladder if b.get("is_current")), None)
+        ctx = team_services.build_subtree_context(user)
+        bn = BinaryNode.objects.filter(user_id=user.pk).only("position", "level").first()
+
+        used = wallet.total_earned
+        cap = cfg.earning_cap
+        used_percent = float((used / cap) * 100) if cap and cap > 0 else 0.0
+        remaining = cap - used if cap and cap > 0 else 0
+
+        if pan_present and kyc_verified:
+            tds_rate_percent = float(cfg.tds_194h_rate) * 100
+            tds_rate_reason = "PAN on file"
+        else:
+            tds_rate_percent = 20.0
+            tds_rate_reason = "PAN not available"
+
+        data["account_status"]["tds_rate_percent"] = tds_rate_percent
+        data["account_status"]["referral_link"] = user.referral_link or None
+        data["account_status"]["referral_link_active"] = bool(
+            user.is_active and user.account_status == User.AccountStatus.ACTIVE
+        )
+        data["tax_withholding"] = {
+            "tds_rate_percent": tds_rate_percent,
+            "reason": tds_rate_reason,
+        }
+        data["withdrawal_band"] = {
+            "current_band": current_band,
+            "bands": band_ladder,
+        }
+        data["earning_cap"] = {
+            "limit": str(cap),
+            "used": str(used),
+            "used_percent": round(used_percent, 2),
+            "remaining": str(max(0, remaining)),
+        }
+        data["binary_placement"] = {
+            "position": bn.position if bn else None,
+            "level": bn.level if bn else None,
+            "position_label": (
+                f"{bn.get_position_display()} (L{bn.level})"
+                if bn and bn.position and bn.level
+                else None
+            ),
+        }
+        weaker = team_services.suggested_leg(ctx.left_leg_count, ctx.right_leg_count)
+        data["team_legs"] = {
+            "left_leg_count": ctx.left_leg_count,
+            "right_leg_count": ctx.right_leg_count,
+            "weaker_leg": weaker,
+            "left_leg_label": "strong"
+            if ctx.left_leg_count > ctx.right_leg_count
+            else "weak"
+            if ctx.left_leg_count < ctx.right_leg_count
+            else "neutral",
+            "right_leg_label": "strong"
+            if ctx.right_leg_count > ctx.left_leg_count
+            else "weak"
+            if ctx.right_leg_count < ctx.left_leg_count
+            else "neutral",
+            "subtree_member_count": max(0, len(ctx.subtree_user_ids) - 1)
+            if ctx.subtree_user_ids
+            else 0,
+        }
     if user.is_staff and getattr(user, "role", None) in (
         User.Role.SUPER_ADMIN,
         User.Role.FINANCE,
@@ -530,6 +572,10 @@ def _me_payload(user: User):
             "default_company_referral_code": effective_company_referral_code(),
             "default_company_referral_code_environment": environment_company_referral_code(),
         }
+    if user_kyc_invitation_should_send(user):
+        from apps.users.tasks import send_kyc_invitation_for_user
+
+        send_kyc_invitation_for_user.delay(user.pk)
     return data
 
 
@@ -616,6 +662,37 @@ def kyc_submit(request: Request):
 
 
 @api_view(["GET"])
+@permission_classes([permissions.AllowAny])
+def kyc_invite_validate(request: Request):
+    raw = (request.query_params.get("token") or "").strip()
+    uid = parse_kyc_invite_token(raw) if raw else None
+    if uid is None:
+        return envelope_response(
+            None,
+            message="Invalid or expired KYC invitation link.",
+            success=False,
+            errors={"detail": "invalid_kyc_invite_token"},
+            status=400,
+        )
+    user = User.objects.filter(pk=uid).only("id", "member_id", "full_name", "kyc_status").first()
+    if user is None:
+        return envelope_response(None, message="Not found", success=False, status=404)
+    from apps.users.kyc_eligibility import user_kyc_submission_mode
+
+    return envelope_response(
+        {
+            "valid": True,
+            "kyc_submission_allowed": user_kyc_submission_allowed(user),
+            "kyc_submission_mode": user_kyc_submission_mode(),
+            "kyc_status": user.kyc_status,
+            "member_id": user.member_id,
+            "full_name": user.full_name,
+            "redirect_hint": "compliance",
+        },
+    )
+
+
+@api_view(["GET"])
 @permission_classes([permissions.IsAuthenticated])
 def kyc_status(request: Request):
     u = request.user
@@ -632,9 +709,12 @@ def kyc_status(request: Request):
         if accepted_version_for_document(u.id, doc.id) != doc.version
     ]
     is_agreement_accepted = len(compliance_legal_missing) == 0
+    kyc_ctx = user_kyc_access_context(u)
     return envelope_response(
         {
             "kyc_status": u.kyc_status,
+            "kyc_submission_allowed": kyc_ctx["kyc_submission_allowed"],
+            "kyc_submission_mode": kyc_ctx["kyc_submission_mode"],
             "kyc_submitted_at": u.kyc_submitted_at.isoformat()
             if u.kyc_submitted_at
             else None,
@@ -663,6 +743,15 @@ def bank_update(request: Request):
         ),
         success=False,
         status=status.HTTP_410_GONE,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([permissions.AllowAny])
+def company_referral_code_public(request: Request):
+    """Active company referral code for signup (SystemConfig override or env default)."""
+    return envelope_response(
+        {"default_company_referral_code": effective_company_referral_code()},
     )
 
 

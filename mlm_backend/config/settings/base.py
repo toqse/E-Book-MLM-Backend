@@ -187,6 +187,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.mlm_tree.tasks.auto_place_pending_placements",
         "schedule": crontab(minute="*/5"),
     },
+    "kyc-invitations-after-refund": {
+        "task": "apps.users.tasks.send_kyc_invitations_after_refund",
+        "schedule": crontab(minute=15),
+    },
 }
 
 RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
@@ -195,6 +199,9 @@ RAZORPAY_PAYOUT_KEY_ID = os.environ.get("RAZORPAY_PAYOUT_KEY_ID", "")
 RAZORPAY_PAYOUT_KEY_SECRET = os.environ.get("RAZORPAY_PAYOUT_KEY_SECRET", "")
 
 FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000")
+KYC_INVITE_WEB_PATH = os.environ.get("KYC_INVITE_WEB_PATH", "/compliance")
+KYC_INVITE_MOBILE_URL = os.environ.get("KYC_INVITE_MOBILE_URL", "").strip()
+KYC_INVITE_TOKEN_MAX_AGE_DAYS = int(os.environ.get("KYC_INVITE_TOKEN_MAX_AGE_DAYS", "30"))
 # Reserved referral code for the company root; maps to the primary superuser (see users.services).
 DEFAULT_COMPANY_REFERRAL_CODE = (
     os.environ.get("DEFAULT_COMPANY_REFERRAL_CODE", "Admin") or "Admin"

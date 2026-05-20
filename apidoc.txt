@@ -61,7 +61,9 @@ FLOWS (high level)
    - POST /api/v1/auth/logout/ — Bearer optional; discard access token client-side after call.
    - Suspended/deactivated accounts: Bearer access tokens are rejected while the account is suspended (tokens become valid again after unsuspend).
 
-4) Compliance (agreements OTP + extended KYC/bank/nominee)
+4) Compliance (agreements OTP + extended KYC/bank/nominee). GET /api/v1/auth/me/ redacts referral_code,
+   referral_link, tax_withholding, withdrawal_band, earning_cap, binary_placement, and team_legs until KYC is
+   VERIFIED with a compliance profile on file.
    - GET /api/v1/agreements/ (Bearer) — active legal documents + `user` array (order invoice URLs, compliance acceptance proof download URL); optional category filter.
    - GET /api/v1/agreements/acceptance-proof/<uuid>/download/ — download agreement acceptance proof PDF (attachment). Use full `pdf_download_url` from agreements (includes signed `token` for browser) or Bearer.
    - GET /api/v1/agreements/compliance-legal/ (Bearer) — subset: active documents with category LEGAL DOCUMENT and requires_acceptance_for_compliance=true only; response includes `user` { id, full_name } for the authenticated member.
@@ -70,7 +72,11 @@ FLOWS (high level)
   - POST /api/v1/auth/compliance/submit/ — multipart form: identity, address, nominee, bank, payout; files pan_document,
     aadhar_front and aadhar_back (both required on first submit; optional on update if already stored). Dates in DD/MM/YYYY.
      Requires all active LegalDocuments with requires_acceptance_for_compliance=true at current version.
-   - GET /api/v1/auth/kyc/status/ — kyc_status, timestamps, missing_acceptances, has_compliance_profile, etc.
+     KYC timing: unless SystemConfig.trigger_instant_kyc_submission is true, submission is allowed only after the refund
+     window has closed on at least one PAID ebook order (403 errors.detail kyc_refund_window_active). Instant mode allows
+     submit immediately after purchase (no invitation email/SMS).
+   - GET /api/v1/auth/kyc/status/ — kyc_status, kyc_submission_allowed, kyc_submission_mode, timestamps, missing_acceptances, etc.
+   - GET /api/v1/auth/kyc/invite/?token=... (public) — validate post-refund invitation deep link before login.
    - Deprecated (410 Gone): POST /api/v1/auth/kyc/submit/, POST /api/v1/auth/bank/ — use compliance/submit/.
 
 5) Course catalog and enrollment
@@ -170,19 +176,28 @@ GET/PATCH /api/v1/auth/me/
   Auth: Bearer.
   GET — Success data: user stub plus profile blocks for the profile screen:
     - Base user: id, member_id, full_name, phone, email, referral_code, is_member, role, is_book_purchased
-      (same semantics as verify-otp-register / verify-otp-login: true if at least one PAID ebook order)
+      (same semantics as verify-otp-register / verify-otp-login: true if at least one PAID ebook order).
+      referral_code is null until kyc_status is VERIFIED and MemberComplianceProfile exists on file.
     - personal_information: full_name, email_address, mobile_number, date_of_birth (DD/MM/YYYY), gender
     - member_information: member_id, joined_date (ISO), address, city, state, pin_code, country
     - display: profile_initial, avatar_url
     - account_status: account_status (+ label), kyc_status (+ label), pan_submitted, withdrawals_blocked,
-      tds_rate_percent, referral_link, referral_link_active
-    - tax_withholding: tds_rate_percent, reason
-    - withdrawal_band: current_band, bands (band ladder rows)
-    - earning_cap: limit, used, used_percent, remaining
-    - kyc_notice: message (or null)
-    - sponsor: { member_id, full_name } or null
-    - binary_placement: position, level, position_label
-    - team_legs: left_leg_count, right_leg_count, weaker_leg, left_leg_label, right_leg_label, subtree_member_count
+      kyc_submission_allowed (bool), kyc_submission_mode ("instant"|"after_refund"),
+      trigger_instant_kyc_submission (bool, mirrors SystemConfig),
+      kyc_eligible_at (ISO datetime or null — earliest refund-window end when still blocked in after_refund mode),
+      kyc_invitation_sent_at (ISO datetime or null; null in instant mode),
+      tds_rate_percent (null until KYC approved), referral_link (null until KYC approved),
+      referral_link_active (false until KYC approved)
+    - feature_access: team_network, earnings, withdrawals, milestones, sponsor_slots, referral_program,
+      compliance_submit (booleans). MLM sections and referral_program are true only when kyc_status is VERIFIED
+      and MemberComplianceProfile exists. compliance_submit is true when submission is allowed and kyc is not VERIFIED.
+    - tax_withholding: null until KYC approved; then { tds_rate_percent, reason }
+    - withdrawal_band: null until KYC approved; then { current_band, bands }
+    - earning_cap: null until KYC approved; then { limit, used, used_percent, remaining }
+    - kyc_notice: { message, code } — code is refund_window | submit_kyc | pending_review | rejected | purchase_required | null
+    - sponsor: { member_id, full_name } or null (visible before KYC approval — upline only)
+    - binary_placement: null until KYC approved; then { position, level, position_label }
+    - team_legs: null until KYC approved; then left_leg_count, right_leg_count, weaker_leg, leg labels, subtree_member_count
     - admin (only when caller is staff with role SUPER_ADMIN, FINANCE, or SUPPORT):
       - default_company_referral_code: active value used for sponsor resolution and reserved-code checks
         (SystemConfig override when set, otherwise DEFAULT_COMPANY_REFERRAL_CODE from the environment).
@@ -226,9 +241,25 @@ GET/PATCH /api/v1/auth/me/
 POST /api/v1/auth/kyc/submit/
   Deprecated: returns 410 Gone — use POST /api/v1/auth/compliance/submit/.
 
+GET /api/v1/auth/kyc/invite/
+  Auth: None (public deep-link validator).
+  Query: token (required) — signed payload from invitation email/SMS ({FRONTEND_BASE_URL}{KYC_INVITE_WEB_PATH}?kyc_token=...).
+  Success data: {
+    "valid": true,
+    "kyc_submission_allowed": <bool>,
+    "kyc_submission_mode": "instant"|"after_refund",
+    "kyc_status": "PENDING"|"VERIFIED"|"REJECTED",
+    "member_id": "<string>",
+    "full_name": "<string>",
+    "redirect_hint": "compliance"
+  }
+  Errors: 400 invalid_kyc_invite_token; 404 user not found.
+  Note: member must still authenticate (OTP/JWT) to submit compliance; this endpoint only validates the link.
+
 GET /api/v1/auth/kyc/status/
   Auth: Bearer.
-  Success data includes: kyc_status, kyc_submitted_at, kyc_reviewed_at, kyc_rejection_reason (or null),
+  Success data includes: kyc_status, kyc_submission_allowed, kyc_submission_mode,
+    kyc_submitted_at, kyc_reviewed_at, kyc_rejection_reason (or null),
     pan_last4, missing_acceptances (list of docs needing acceptance at latest version),
     has_compliance_profile, compliance_submission_version,
     compliance_submission (null if no profile, else: personal_details from User + address/DOB/gender;
@@ -252,6 +283,8 @@ POST /api/v1/auth/compliance/submit/
   Files: pan_document, aadhar_front, aadhar_back (PDF or image types as accepted by storage).
   Server syncs PAN + masked Aadhaar onto User alongside MemberComplianceProfile; sets kyc_status PENDING pending admin review.
   Success: { "kyc_status", "compliance_submission_version" }; 400 if mandatory agreements missing.
+  Errors: 403 — { errors: { detail: "kyc_refund_window_active" } } when refund window still open (standard mode) or no PAID ebook purchase (instant mode).
+  POST /api/v1/agreements/send-otp/ also returns 403 kyc_refund_window_active when submission is not yet allowed.
 
 POST /api/v1/auth/validate-referral/
   Auth: None.
@@ -364,6 +397,36 @@ POST /api/v1/admin/users/<id>/kyc/verify/
 
 GET /api/v1/admin/users/kyc-queue/
   Deprecated minimal list: user ids only — prefer GET /api/v1/admin/compliance-queue/.
+
+POST /api/v1/admin/users/<id>/kyc/send-invitation/
+  Auth: IsSupportAdmin.
+  Manually send or resend the post-refund KYC invitation email/SMS (standard mode only).
+  Body (JSON, all optional except user id when using bulk URL):
+    - force (boolean, default false): resend even when kyc_invitation_sent_at is already set.
+    - skip_refund_check (boolean, default false): allow send before any PAID ebook refund window has closed.
+  When body omits user ids, uses <id> from URL.
+  Success data (single-user URL): {
+    "sent": true,
+    "user_id": <int>,
+    "member_id": "<string>",
+    "resent": <bool>,
+    "link": "<invitation URL with kyc_token>",
+    "email_sent": <bool>,
+    "sms_sent": <bool>,
+    "kyc_invitation_sent_at": "<ISO datetime>"
+  }
+  Errors (single-user URL): 400/404 with errors.detail one of:
+    instant_kyc_mode | kyc_already_verified | no_paid_ebook_purchase | refund_window_active |
+    already_sent | not_found
+
+POST /api/v1/admin/users/kyc/send-invitation/
+  Auth: IsSupportAdmin.
+  Bulk send/resend. Body: { "user_ids": [1, 2, 3], "force": false, "skip_refund_check": false }
+  Success data: {
+    "sent": [ { ...per-user success row... }, ... ],
+    "failed": [ { "user_id", "member_id", "reason", "kyc_invitation_sent_at" }, ... ]
+  }
+  Partial success: HTTP 200 with success=false when some ids fail; check sent vs failed arrays.
 
 
 MODULE: Admin auth (/api/v1/admin/auth/)
@@ -701,6 +764,8 @@ MODULE: User — Dashboard (member home)
 GET /api/v1/user/dashboard/
   Auth: Bearer.
   Purpose: single request for the member dashboard home screen (tiles + charts + recent activity).
+  Requires kyc_status VERIFIED and MemberComplianceProfile (same gate as GET /api/v1/user/earnings/).
+  Errors: 403 — { errors: { detail: "kyc_required" | "compliance_profile_required" } } when KYC not approved.
   Success data: {
     "profile": { "full_name", "member_id" },
     "tiles": {
@@ -1848,6 +1913,10 @@ GET/PATCH /api/v1/admin/config/
     "auto_process_milestone_bonuses" (boolean, default true) — when false, milestone
     bonuses are created as PENDING records and must be processed by admin via the
     Milestone Bonuses queue endpoints.
+    "trigger_instant_kyc_submission" (boolean, default false) — when true, members may submit
+    KYC/compliance immediately after a PAID ebook purchase (no refund-window wait; no invitation
+    email/SMS). When false, submission opens after any PAID ebook order refund window closes and
+    an invitation is sent (Celery beat, optional /auth/me safety net, or admin POST …/kyc/send-invitation/).
     Milestones (admin-configurable):
       - milestone_bonus_overrides: { "<threshold_int>": "<decimal|string|number>", ... }
         Example: { "10":"300", "25":"600", "50":"1000", "75":"1350", "100":"1600" }
@@ -1872,7 +1941,7 @@ GET/PATCH /api/v1/admin/config/
       - default_company_referral_code_environment: env/settings value only.
       - default_company_referral_code_override: stored override string or null when empty (env used).
       - PATCH accepts: default_company_referral_code (string, max 64 after trim; empty string clears override).
-  PATCH body: any subset of the above; includes refund_request_sla_hours (non-negative int, default 48 for open refund SLA dashboard). refund_window_days (buyer refund / placement cool-off eligibility) and cooling_off_days (wallet credit cooling for withdrawals) are independent non-negative ints. sets updated_by.
+  PATCH body: any subset of the above; includes refund_request_sla_hours (non-negative int, default 48 for open refund SLA dashboard). refund_window_days (buyer refund / placement cool-off eligibility) and cooling_off_days (wallet credit cooling for withdrawals) are independent non-negative ints. trigger_instant_kyc_submission accepts boolean. sets updated_by.
   Success PATCH: { "ok": true }
 
 

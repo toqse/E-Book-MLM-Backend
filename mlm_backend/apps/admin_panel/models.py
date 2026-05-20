@@ -37,6 +37,14 @@ class SystemConfig(models.Model):
         default=True,
         help_text="If true, milestone bonuses are credited automatically upon achievement; if false, they enter an admin queue for manual processing.",
     )
+    trigger_instant_kyc_submission = models.BooleanField(
+        default=False,
+        help_text=(
+            "When true, members may submit KYC/compliance immediately after a PAID ebook purchase "
+            "(no refund-window wait, no invitation email/SMS). When false, submission opens only "
+            "after any purchase refund window closes and an invitation is sent."
+        ),
+    )
     milestone_bonus_overrides = models.JSONField(
         default=dict,
         blank=True,

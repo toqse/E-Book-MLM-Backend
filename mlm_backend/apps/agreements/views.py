@@ -38,6 +38,10 @@ from .serializers import (
     LegalDocumentAdminSerializer,
     LegalDocumentPublicSerializer,
 )
+from apps.users.kyc_eligibility import (
+    kyc_submission_blocked_response,
+    user_kyc_submission_allowed,
+)
 from .services import (
     apply_profile_bank_to_user,
     record_agreement_acceptances,
@@ -149,6 +153,8 @@ def legal_documents_compliance_legal_list(request: Request):
 @permission_classes([permissions.IsAuthenticated])
 def agreement_send_otp(request: Request):
     user = request.user
+    if not user_kyc_submission_allowed(user):
+        return kyc_submission_blocked_response()
     ser = AgreementOTPSendSerializer(data=request.data)
     ser.is_valid(raise_exception=True)
     doc_ids = list(dict.fromkeys(ser.validated_data["document_ids"]))
@@ -356,6 +362,8 @@ def agreement_acceptance_proof_download(request: Request, acceptance_batch_id: u
 @permission_classes([permissions.IsAuthenticated])
 def compliance_submit(request: Request):
     user = request.user
+    if not user_kyc_submission_allowed(user):
+        return kyc_submission_blocked_response()
     if not user_has_required_acceptances(user):
         return envelope_response(
             {

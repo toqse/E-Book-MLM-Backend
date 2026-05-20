@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 ACCENT = colors.HexColor("#2c73a9")
 GREY_ROW = colors.HexColor("#f0f0f0")
+CONTENT_WIDTH = 174 * mm
+LOGO_WIDTH = 22 * mm
 
 
 def _fmt_money(amount) -> str:
@@ -76,8 +78,9 @@ def _company_logo() -> Image | None:
     if not os.path.exists(logo_path):
         return None
     logo = Image(logo_path)
-    logo.drawWidth = 36 * mm
-    logo.drawHeight = 36 * mm
+    aspect = logo.imageHeight / float(logo.imageWidth)
+    logo.drawWidth = LOGO_WIDTH
+    logo.drawHeight = LOGO_WIDTH * aspect
     logo.hAlign = "LEFT"
     return logo
 
@@ -134,56 +137,57 @@ def build_invoice_pdf_bytes(order: Order, inv: GSTInvoice) -> bytes:
     inv_date = timezone.localtime(paid).strftime("%d %B %Y").upper()
 
     clines = _company_lines()
-    # Top row: logo + company name (left), company details (right)
-    company_para = Paragraph(
-        "<b>" + escape(clines[0] if clines else settings.COMPANY_NAME or "Company") + "</b>",
-        ParagraphStyle("CompanyName", parent=label_style, fontSize=12),
-    )
-    left_flowables = []
     logo = _company_logo()
     if logo:
-        left_flowables.append(logo)
-        left_flowables.append(Spacer(1, 3 * mm))
-    left_flowables.append(company_para)
+        left_header = logo
+    else:
+        left_header = Paragraph(
+            "<b>" + escape(clines[0] if clines else settings.COMPANY_NAME or "Company") + "</b>",
+            ParagraphStyle("CompanyName", parent=label_style, fontSize=12),
+        )
 
-    hdr_right_body = "<br/>".join(escape(x) for x in (clines[1:] or [])) or "&nbsp;"
+    company_detail_lines = clines[1:]
+    hdr_right_body = "<br/>".join(escape(x) for x in company_detail_lines) or "&nbsp;"
     hdr_right = Paragraph(hdr_right_body, right_small)
-    top_table = Table([[left_flowables, hdr_right]], colWidths=[88 * mm, 86 * mm])
+    top_table = Table(
+        [[left_header, hdr_right]],
+        colWidths=[LOGO_WIDTH + 8 * mm, CONTENT_WIDTH - LOGO_WIDTH - 8 * mm],
+    )
     top_table.setStyle(
         TableStyle(
             [
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (1, 0), (1, 0), "RIGHT"),
                 ("ALIGN", (0, 0), (0, 0), "LEFT"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                 ("TOPPADDING", (0, 0), (-1, -1), 0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
             ]
         )
     )
     story.append(top_table)
-    story.append(Spacer(1, 8 * mm))
-    story.append(Paragraph("INVOICE", title_style))
     story.append(Spacer(1, 6 * mm))
+    story.append(Paragraph("INVOICE", title_style))
+    story.append(Spacer(1, 4 * mm))
+
+    meta_left_w = 68 * mm
+    meta_right_w = CONTENT_WIDTH - meta_left_w
 
     due_cell = Paragraph(
-        f"<b><font color='white' size='14'>{_fmt_money(order.amount_paid)}</font></b>",
-        ParagraphStyle("due", alignment=TA_LEFT, fontSize=12, leading=14),
+        f"<b><font color='white' size='12'>{_fmt_money(order.amount_paid)}</font></b>",
+        ParagraphStyle("due", alignment=TA_LEFT, fontSize=11, leading=13),
     )
-    due_tbl = Table(
-        [[due_cell]],
-        colWidths=[55 * mm],
-        rowHeights=[14 * mm],
-    )
+    due_tbl = Table([[due_cell]], colWidths=[48 * mm], rowHeights=[11 * mm])
     due_tbl.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), ACCENT),
-                ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ]
         )
     )
@@ -192,23 +196,26 @@ def build_invoice_pdf_bytes(order: Order, inv: GSTInvoice) -> bytes:
     left_meta = Paragraph(
         f"<b>INVOICE NO:</b> {inv_no}<br/>"
         f"<b>INVOICE DATE:</b> {inv_date}<br/>"
-        f"<b>DUE TOTAL:</b><br/>",
+        f"<b>AMOUNT PAID:</b>",
         label_style,
     )
-    left_block = Table([[left_meta], [due_tbl]], colWidths=[62 * mm])
+    left_block = Table([[left_meta], [due_tbl]], colWidths=[meta_left_w])
     left_block.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (0, 0), 4),
+                ("BOTTOMPADDING", (0, 1), (0, 1), 0),
             ]
         )
     )
 
     bill_lines = "<br/>".join(escape(x) for x in _buyer_lines(order, user))
     inv_to = Paragraph(f"<b>INVOICE TO:</b><br/>{bill_lines}", label_style)
-    right_block = Table([[inv_to]], colWidths=[112 * mm])
+    right_block = Table([[inv_to]], colWidths=[meta_right_w])
     right_block.setStyle(
         TableStyle(
             [
@@ -218,17 +225,16 @@ def build_invoice_pdf_bytes(order: Order, inv: GSTInvoice) -> bytes:
                 ("TOPPADDING", (0, 0), (-1, -1), 10),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
                 ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]
         )
     )
 
-    hdr_row = Table([[left_block, right_block]], colWidths=[62 * mm, 112 * mm])
+    hdr_row = Table([[left_block, right_block]], colWidths=[meta_left_w, meta_right_w])
     hdr_row.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ALIGN", (0, 0), (0, 0), "LEFT"),
-                ("ALIGN", (1, 0), (1, 0), "RIGHT"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                 ("TOPPADDING", (0, 0), (-1, -1), 0),
@@ -237,7 +243,7 @@ def build_invoice_pdf_bytes(order: Order, inv: GSTInvoice) -> bytes:
         )
     )
     story.append(hdr_row)
-    story.append(Spacer(1, 10 * mm))
+    story.append(Spacer(1, 8 * mm))
 
     hsn = escape(str(inv.hsn_sac_code))
     lines = list(order.lines.select_related("ebook").order_by("id"))
@@ -262,9 +268,13 @@ def build_invoice_pdf_bytes(order: Order, inv: GSTInvoice) -> bytes:
         line_total = _fmt_money(order.base_price)
         goods_data = [["Item Description", "Price", "Qty", "Total"], [desc, unit, qty, line_total]]
 
+    col_desc = 96 * mm
+    col_price = 28 * mm
+    col_qty = 20 * mm
+    col_total = CONTENT_WIDTH - col_desc - col_price - col_qty
     tbl = Table(
         goods_data,
-        colWidths=[80 * mm, 33 * mm, 21 * mm, 40 * mm],
+        colWidths=[col_desc, col_price, col_qty, col_total],
     )
     tbl.setStyle(
         TableStyle(
@@ -276,11 +286,15 @@ def build_invoice_pdf_bytes(order: Order, inv: GSTInvoice) -> bytes:
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
                 ("TOPPADDING", (0, 0), (-1, -1), 8),
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (0, 0), "LEFT"),
+                ("ALIGN", (1, 0), (-1, 0), "CENTER"),
+                ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                ("ALIGN", (2, 1), (2, -1), "CENTER"),
+                ("ALIGN", (3, 1), (3, -1), "RIGHT"),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, GREY_ROW]),
-                ("LEFTPADDING", (0, 0), (-1, -1), 7),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
             ]
         )
     )
@@ -303,52 +317,71 @@ def build_invoice_pdf_bytes(order: Order, inv: GSTInvoice) -> bytes:
     if order.discount_amount and order.discount_amount > 0:
         summary_rows.append(["Discount", f"-{_fmt_money(order.discount_amount)}"])
 
+    summary_w = 72 * mm
     grand_para = Paragraph(
-        f"<b><font color='white' size='12'>Grand Total: {_fmt_money(order.amount_paid)}</font></b>",
-        ParagraphStyle("gt", alignment=TA_RIGHT),
+        f"<b><font color='white' size='11'>Grand Total: {_fmt_money(order.amount_paid)}</font></b>",
+        ParagraphStyle("gt", alignment=TA_RIGHT, fontSize=10, leading=12),
     )
-    grand_box = Table([[grand_para]], colWidths=[70 * mm], rowHeights=[12 * mm])
+    grand_box = Table([[grand_para]], colWidths=[summary_w], rowHeights=[11 * mm])
     grand_box.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), ACCENT),
                 ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 8),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ]
         )
     )
 
-    sum_table = Table(summary_rows, colWidths=[54 * mm, 33 * mm])
+    sum_table = Table(summary_rows, colWidths=[summary_w - 36 * mm, 36 * mm])
     sum_table.setStyle(
         TableStyle(
             [
+                ("ALIGN", (0, 0), (0, -1), "LEFT"),
                 ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
                 ("LINEABOVE", (0, 0), (-1, 0), 0.25, colors.grey),
                 ("LINEBELOW", (0, -1), (-1, -1), 0.25, colors.grey),
             ]
         )
     )
 
+    summary_stack = Table(
+        [[sum_table], [Spacer(1, 3 * mm)], [grand_box]],
+        colWidths=[summary_w],
+    )
+    summary_stack.setStyle(
+        TableStyle(
+            [
+                ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+
+    footer_left_w = CONTENT_WIDTH - summary_w
     pay_hdr = Paragraph("<b>Payment</b>", label_style)
     bottom = Table(
         [
             [pay_hdr, ""],
-            [payment_para, sum_table],
-            [Spacer(1, 4 * mm), Spacer(1, 4 * mm)],
-            [Paragraph("<b>Terms &amp; conditions</b>", label_style), grand_box],
+            [payment_para, summary_stack],
         ],
-        colWidths=[87 * mm, 87 * mm],
+        colWidths=[footer_left_w, summary_w],
     )
     bottom.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ALIGN", (1, 1), (1, 1), "RIGHT"),
-                ("ALIGN", (1, 3), (1, 3), "RIGHT"),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                 ("TOPPADDING", (0, 0), (-1, -1), 0),
@@ -365,7 +398,9 @@ def build_invoice_pdf_bytes(order: Order, inv: GSTInvoice) -> bytes:
             "2. For support, contact us using the company details above.\n"
             "3. GST is split as CGST/SGST (intra-state) as shown."
         )
-    story.append(Spacer(1, 8 * mm))
+    story.append(Spacer(1, 10 * mm))
+    story.append(Paragraph("<b>Terms &amp; conditions</b>", label_style))
+    story.append(Spacer(1, 2 * mm))
     story.append(
         Paragraph("<br/>".join(escape(line) for line in terms.split("\n")), small)
     )

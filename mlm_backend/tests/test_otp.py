@@ -425,30 +425,21 @@ def test_me_includes_personal_and_member_info_blocks():
     assert data["account_status"]["kyc_status"] == User.KYCStatus.PENDING
     assert data["account_status"]["pan_submitted"] is False
     assert data["account_status"]["withdrawals_blocked"] is True
-    assert data["account_status"]["referral_link"] == "http://localhost:3000/join?ref=MBR301"
-    assert data["account_status"]["referral_link_active"] is True
+    assert data["referral_code"] is None
+    assert data["account_status"]["referral_link"] is None
+    assert data["account_status"]["referral_link_active"] is False
+    assert data["account_status"]["tds_rate_percent"] is None
 
-    assert "tds_rate_percent" in data["tax_withholding"]
-    assert "reason" in data["tax_withholding"]
-
-    assert "current_band" in data["withdrawal_band"]
-    assert isinstance(data["withdrawal_band"]["bands"], list)
-
-    assert "limit" in data["earning_cap"]
-    assert "used" in data["earning_cap"]
-    assert "used_percent" in data["earning_cap"]
-    assert "remaining" in data["earning_cap"]
+    assert data["tax_withholding"] is None
+    assert data["withdrawal_band"] is None
+    assert data["earning_cap"] is None
+    assert data["binary_placement"] is None
+    assert data["team_legs"] is None
+    assert data["feature_access"]["referral_program"] is False
 
     assert "message" in data["kyc_notice"]
 
     assert data["sponsor"] is None
-
-    assert data["binary_placement"]["position"] is None
-    assert data["binary_placement"]["level"] is None
-
-    assert data["team_legs"]["left_leg_count"] == 0
-    assert data["team_legs"]["right_leg_count"] == 0
-    assert data["team_legs"]["weaker_leg"] in ("LEFT", "RIGHT")
 
 
 @pytest.mark.django_db

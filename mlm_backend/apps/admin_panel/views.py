@@ -775,6 +775,93 @@ def kyc_verify(request, pk: int):
     return compliance_approve(request, pk)
 
 
+def _parse_admin_bool(val) -> bool:
+    return val is True or str(val).lower() in ("1", "true", "yes")
+
+
+@api_view(["POST"])
+@permission_classes([IsSupportAdmin])
+def admin_kyc_send_invitation(request, pk: int | None = None):
+    """
+    Manually send or resend the post-refund KYC invitation email/SMS.
+
+    Body:
+      - user_id (int) or user_ids (list[int])
+      - force (bool, default false): resend even if kyc_invitation_sent_at is set
+      - skip_refund_check (bool, default false): allow send before refund window ends
+    When body omits ids, uses URL <pk> (single user).
+    """
+    from apps.users.kyc_invitation_service import send_kyc_invitation_to_user
+
+    body_ids = _coerce_int_list(request.data.get("user_ids"))
+    if not body_ids:
+        body_ids = _coerce_int_list(request.data.get("user_id"))
+    if not body_ids and pk is not None:
+        body_ids = [int(pk)]
+
+    if not body_ids:
+        return envelope_response(
+            None,
+            message="user_id or user_ids is required",
+            success=False,
+            errors={"detail": "user_ids_required"},
+            status=400,
+        )
+
+    force = _parse_admin_bool(request.data.get("force"))
+    skip_refund_check = _parse_admin_bool(request.data.get("skip_refund_check"))
+
+    sent_rows: list[dict] = []
+    failed: list[dict] = []
+    for uid in dict.fromkeys(body_ids):
+        row = send_kyc_invitation_to_user(
+            uid, force=force, skip_refund_check=skip_refund_check
+        )
+        if row.get("sent"):
+            sent_rows.append(row)
+        else:
+            failed.append(row)
+
+    unique_count = len(dict.fromkeys(body_ids))
+    is_single_legacy = pk is not None and unique_count == 1
+
+    if is_single_legacy and not sent_rows:
+        row = failed[0] if failed else {"reason": "unknown"}
+        reason = row.get("reason") or "unknown"
+        status = 404 if reason == "not_found" else 400
+        return envelope_response(
+            row,
+            success=False,
+            message=reason.replace("_", " ").title(),
+            errors={"detail": reason},
+            status=status,
+        )
+
+    if not sent_rows and failed:
+        message = "No invitations sent"
+        if unique_count == 1:
+            message = (failed[0].get("reason") or "unknown").replace("_", " ")
+        return envelope_response(
+            {"sent": sent_rows, "failed": failed},
+            success=False,
+            message=message.title(),
+            errors={"detail": failed[0].get("reason") if len(failed) == 1 else message},
+            status=400,
+        )
+
+    message = "Invitation sent" if len(failed) == 0 else "Sent with some failures"
+    success = len(failed) == 0
+    payload = {"sent": sent_rows, "failed": failed}
+    if is_single_legacy and sent_rows:
+        payload = sent_rows[0]
+    return envelope_response(
+        payload,
+        success=success,
+        message=message,
+        errors=None if success else {"detail": message},
+    )
+
+
 @api_view(["GET"])
 @permission_classes([IsAdminRole])
 def users_delisted(request):
@@ -801,6 +888,7 @@ def system_config_view(request):
                 "auto_placement_strategy": cfg.auto_placement_strategy,
                 "is_repurchase_commission_allowed": cfg.is_repurchase_commission_allowed,
                 "auto_process_milestone_bonuses": cfg.auto_process_milestone_bonuses,
+                "trigger_instant_kyc_submission": cfg.trigger_instant_kyc_submission,
                 "milestone_bonus_overrides": cfg.milestone_bonus_overrides or {},
                 "milestones": [
                     {
@@ -857,6 +945,7 @@ def system_config_view(request):
         "auto_placement_strategy",
         "is_repurchase_commission_allowed",
         "auto_process_milestone_bonuses",
+        "trigger_instant_kyc_submission",
         "milestone_bonus_overrides",
         "razorpay_key_id",
         "razorpay_key_secret",
@@ -881,7 +970,11 @@ def system_config_view(request):
             else:
                 errors[field] = "must_be_string"
             continue
-        if field in ("is_repurchase_commission_allowed", "auto_process_milestone_bonuses"):
+        if field in (
+            "is_repurchase_commission_allowed",
+            "auto_process_milestone_bonuses",
+            "trigger_instant_kyc_submission",
+        ):
             setattr(
                 cfg,
                 field,

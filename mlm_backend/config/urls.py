@@ -31,6 +31,7 @@ urlpatterns = [
     path("api/v1/auth/me/", auth_views.me),
     path("api/v1/auth/kyc/submit/", auth_views.kyc_submit),
     path("api/v1/auth/kyc/status/", auth_views.kyc_status),
+    path("api/v1/auth/kyc/invite/", auth_views.kyc_invite_validate),
     path("api/v1/auth/bank/", auth_views.bank_update),
     path("api/v1/auth/compliance/submit/", agreement_views.compliance_submit),
     path("api/v1/agreements/", agreement_views.legal_documents_public_list),
@@ -45,6 +46,7 @@ urlpatterns = [
         agreement_views.agreement_acceptance_proof_download,
         name="agreement_acceptance_proof_download",
     ),
+    path("api/v1/auth/company-referral-code/", auth_views.company_referral_code_public),
     path("api/v1/auth/validate-referral/", auth_views.validate_referral),
     # Admin auth
     path("api/v1/admin/auth/login/", auth_views.admin_password_login),
@@ -210,6 +212,14 @@ urlpatterns = [
     path("api/v1/admin/users/kyc-queue/", adminv.kyc_queue),
     path("api/v1/admin/compliance-queue/", adminv.compliance_queue),
     path("api/v1/admin/users/<int:pk>/kyc/verify/", adminv.kyc_verify),
+    path(
+        "api/v1/admin/users/<int:pk>/kyc/send-invitation/",
+        adminv.admin_kyc_send_invitation,
+    ),
+    path(
+        "api/v1/admin/users/kyc/send-invitation/",
+        adminv.admin_kyc_send_invitation,
+    ),
     path(
         "api/v1/admin/users/<int:pk>/compliance/approve/",
         adminv.compliance_approve,

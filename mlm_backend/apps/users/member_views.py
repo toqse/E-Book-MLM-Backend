@@ -365,6 +365,10 @@ def user_dashboard(request: Request):
     """
     u: User = request.user
 
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked:
+        return blocked
+
     earnings = build_earnings_response(
         u,
         include_raw="overview",

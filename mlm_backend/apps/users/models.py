@@ -40,6 +40,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     kyc_submitted_at = models.DateTimeField(null=True, blank=True)
     kyc_reviewed_at = models.DateTimeField(null=True, blank=True)
     kyc_rejection_reason = models.TextField(blank=True, default="")
+    kyc_invitation_sent_at = models.DateTimeField(null=True, blank=True)
     compliance_submission_version = models.PositiveIntegerField(default=0)
 
     is_member = models.BooleanField(default=False)
