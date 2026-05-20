@@ -1,0 +1,28 @@
+name: Deploy to Azure VM
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd ~/E-Book-MLM-Backend/mlm_backend
+
+            git pull origin main
+
+            docker compose -f docker/docker-compose.yml down
+
+            docker compose -f docker/docker-compose.yml up --build -d
+
+            docker image prune -f
