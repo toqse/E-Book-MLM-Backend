@@ -413,7 +413,7 @@ POST /api/v1/admin/users/<id>/kyc/send-invitation/
     "link": "<invitation URL with kyc_token>",
     "email_sent": <bool>,
     "sms_sent": <bool>,
-    "kyc_invitation_sent_at": "<ISO datetime>"
+    "kyc_invitation_sent_at": "<ISO datetime>"...
   }
   Errors (single-user URL): 400/404 with errors.detail one of:
     instant_kyc_mode | kyc_already_verified | no_paid_ebook_purchase | refund_window_active |
