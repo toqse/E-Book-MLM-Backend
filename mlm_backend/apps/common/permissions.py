@@ -41,11 +41,12 @@ class IsSupportAdmin(BasePermission):
 
 class IsKycVerifiedAndCompliant(BasePermission):
     """
-    Gate for MLM placement-related user actions.
+    Sticky gate for MLM placement-related user actions.
 
-    Requires:
-    - user.kyc_status == VERIFIED
-    - MemberComplianceProfile exists for the user
+    Passes when the user has ever been admin-approved (User.kyc_first_approved_at
+    is set). Subsequent edits that flip kyc_status back to PENDING do NOT revoke
+    access, so a member who was previously approved keeps using the platform
+    while the latest re-submission is under review.
     """
 
     message = "Complete compliance verification (admin-approved) to access placements."
@@ -55,24 +56,22 @@ class IsKycVerifiedAndCompliant(BasePermission):
         if not u or not getattr(u, "is_authenticated", False):
             return False
         try:
-            from apps.agreements.models import MemberComplianceProfile
-            from apps.users.models import User
-
-            if getattr(u, "kyc_status", None) != User.KYCStatus.VERIFIED:
-                return False
-            return MemberComplianceProfile.objects.filter(user=u).exists()
+            return bool(getattr(u, "kyc_first_approved_at", None))
         except Exception:
             return False
 
 
 def require_kyc_verified_and_compliant(request):
     """
-    Envelope-friendly guard for endpoints that need KYC VERIFIED + compliance profile.
-    Returns a DRF Response (403) when blocked, else None.
+    Envelope-friendly sticky KYC guard.
+
+    Returns None (allowed) when the user has ever been admin-approved
+    (User.kyc_first_approved_at is set). Otherwise returns a 401/403 DRF
+    Response with an informative message based on how far along the user is
+    in the compliance flow (no profile yet vs. profile submitted/under review).
     """
 
     from apps.common.responses import envelope_response
-    from apps.users.models import User
     from apps.agreements.models import MemberComplianceProfile
 
     u = getattr(request, "user", None)
@@ -84,14 +83,12 @@ def require_kyc_verified_and_compliant(request):
             errors={"detail": "not_authenticated"},
             status=401,
         )
-    if getattr(u, "kyc_status", None) != User.KYCStatus.VERIFIED:
-        return envelope_response(
-            None,
-            message="Complete compliance verification (admin-approved) to access placements.",
-            success=False,
-            errors={"detail": "kyc_required"},
-            status=403,
-        )
+
+    # Sticky pass: once approved at least once, never revoke access here even
+    # if a later re-submission flipped kyc_status back to PENDING.
+    if getattr(u, "kyc_first_approved_at", None):
+        return None
+
     if not MemberComplianceProfile.objects.filter(user=u).exists():
         return envelope_response(
             None,
@@ -100,4 +97,10 @@ def require_kyc_verified_and_compliant(request):
             errors={"detail": "compliance_profile_required"},
             status=403,
         )
-    return None
+    return envelope_response(
+        None,
+        message="Complete compliance verification (admin-approved) to access placements.",
+        success=False,
+        errors={"detail": "kyc_required"},
+        status=403,
+    )

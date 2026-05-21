@@ -1,6 +1,7 @@
 from decimal import Decimal
 
-from django.db.models import F, Q
+from django.db.models import F, Q, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
@@ -153,6 +154,7 @@ def _approve_compliance_by_user_ids(user_ids: list[int]):
         User.objects.filter(id__in=ok_ids).update(
             kyc_status=User.KYCStatus.VERIFIED,
             kyc_reviewed_at=now,
+            kyc_first_approved_at=Coalesce(F("kyc_first_approved_at"), Value(now)),
             kyc_rejection_reason="",
             updated_at=now,
         )

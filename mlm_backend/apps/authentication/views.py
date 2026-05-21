@@ -443,6 +443,7 @@ def _me_payload(user: User):
     if not mlm_unlocked:
         data["referral_code"] = None
     data["is_book_purchased"] = _user_has_paid_ebook_purchase(user)
+    data["is_kyc_account_approved"] = bool(getattr(user, "kyc_first_approved_at", None))
     data["personal_information"] = personal_information
     data["member_information"] = member_information
     data["display"] = {
