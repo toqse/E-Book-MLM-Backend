@@ -1,3 +1,4 @@
+from rest_framework.exceptions import Throttled
 from rest_framework.views import exception_handler as drf_exception_handler
 
 
@@ -37,6 +38,17 @@ def envelope_exception_handler(exc, context):
     data = response.data
     if isinstance(data, dict) and "success" in data:
         return response
+
+    if isinstance(exc, Throttled):
+        wait = int(exc.wait) if exc.wait else None
+        response.data = {
+            "success": False,
+            "data": None,
+            "message": "OTP limit exceeded. Try again later",
+            "errors": {"detail": "rate_limited", "retry_after_seconds": wait},
+        }
+        return response
+
     errors = data
     message = _first_validation_message(data)
     response.data = {
