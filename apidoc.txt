@@ -417,7 +417,7 @@ POST /api/v1/admin/users/<id>/kyc/send-invitation/
   }
   Errors (single-user URL): 400/404 with errors.detail one of:
     instant_kyc_mode | kyc_already_verified | no_paid_ebook_purchase | refund_window_active |
-    already_sent | not_found
+    already_sent | not_found...
 
 POST /api/v1/admin/users/kyc/send-invitation/
   Auth: IsSupportAdmin.
