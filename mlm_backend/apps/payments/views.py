@@ -24,6 +24,7 @@ from .services import (
     ensure_gst_invoice_pdf,
     finalize_order_as_paid,
     get_razorpay_key_id,
+    latest_applicable_refund_request,
     latest_applicable_refund_status,
     normalize_billing_from_payload,
     refund_submission_blocked,
@@ -206,6 +207,15 @@ def _item_refund_status(rlist: list[RefundRequest], *, item_line_id: int | None)
     return latest_applicable_refund_status(rlist, item_line_id=item_line_id)
 
 
+def _item_refund_reject_reason(
+    rlist: list[RefundRequest], *, item_line_id: int | None
+) -> str | None:
+    rr = latest_applicable_refund_request(rlist, item_line_id=item_line_id)
+    if rr and rr.status == RefundRequest.Status.REJECTED:
+        return rr.reject_reason or None
+    return None
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_orders(request):
@@ -289,6 +299,9 @@ def my_orders(request):
                         "refund_status": _item_refund_status(
                             refunds_by_order[o.id], item_line_id=line.pk
                         ),
+                        "refund_reject_reason": _item_refund_reject_reason(
+                            refunds_by_order[o.id], item_line_id=line.pk
+                        ),
                     }
                 )
         elif o.ebook_id:
@@ -312,6 +325,9 @@ def my_orders(request):
                     "refundable_amount": str(rem_full),
                     "can_refund": can_legacy,
                     "refund_status": _item_refund_status(
+                        refunds_by_order[o.id], item_line_id=None
+                    ),
+                    "refund_reject_reason": _item_refund_reject_reason(
                         refunds_by_order[o.id], item_line_id=None
                     ),
                 }

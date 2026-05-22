@@ -86,7 +86,7 @@ FLOWS (high level)
    - Purchase (direct buy): POST /api/v1/payments/create-order/ (Bearer) — ebook_id or ebook_slug (optional; both → id wins), sponsor_code / sponsor_slot_code, is_retail, optional billing_* snapshot fields for the GST invoice
    - Zero-amount path when valid sponsor slot; else Razorpay order (amount_paise, razorpay_order_id, key_id).
    - POST /api/v1/payments/verify/ (Bearer) — order_id + Razorpay payment id/signature; on success order is PAID, enrollment + GST invoice PDF generated when applicable; success payload: status, order_number, amount, payment_verified_at, payment_method
-   - GET /api/v1/user/orders/ (Bearer) — PAID and REFUNDED orders; each `items[]` row includes **`refund_status`**: latest `RefundRequest.status` for that line (`PENDING`, `PROCESSING`, `APPROVED`, `REJECTED`) or `null` if none; includes order-wide requests (`order_line_id` null) when they apply to that line. When the latest applicable status is **REJECTED**, `items[].can_refund` is false and the member cannot submit again for that line/order-wide scope. Legacy top-level `ebook_title`/`thumbnail_url`; `order_refundable_amount`; `open_refund_requests`; top-level `refund_request` is summary-only
+   - GET /api/v1/user/orders/ (Bearer) — PAID and REFUNDED orders; each `items[]` row includes **`refund_status`**: latest `RefundRequest.status` for that line (`PENDING`, `PROCESSING`, `APPROVED`, `REJECTED`) or `null` if none; includes order-wide requests (`order_line_id` null) when they apply to that line. When the latest applicable status is **REJECTED**, `items[].can_refund` is false, **`items[].refund_reject_reason`** carries the finance reject note (null otherwise), and the member cannot submit again for that line/order-wide scope. Legacy top-level `ebook_title`/`thumbnail_url`; `order_refundable_amount`; `open_refund_requests`; top-level `refund_request` is summary-only
    - GET /api/v1/user/orders/<id>/invoice/ (Bearer OR signed token) — downloads invoice PDF (Content-Disposition: attachment)
    - GET /api/v1/user/courses/enrolled/ — grouped catalog like GET /courses/; each enrolled book includes pdf_url as signed …/courses/<slug-or-by-id-N>/download/?token=… (not raw storage; empty slug uses ``by-id-<id>``)
    - GET /api/v1/user/courses/enrolled/<slug>/ | /enrolled/<id>/ — detail when enrolled; pdf_url signed download URL
@@ -1549,6 +1549,8 @@ GET /api/v1/user/orders/
             "refund_status": "PENDING" | "PROCESSING" | "APPROVED" | "REJECTED" | null — status of the **most recent** (highest id)
               RefundRequest that applies to this line: rows with this `order_line_id`, plus order-wide rows (`order_line_id` null).
               `null` when no refund request exists for this item. REJECTED appears when the latest applicable request was rejected.
+            "refund_reject_reason": "<string>" | null — finance reject reason from the **same** request surfaced in `refund_status`,
+              populated only when that status is `REJECTED`; `null` otherwise (including PENDING/PROCESSING/APPROVED or no request).
           }, ...
         ],
         "invoice_url": "<absolute HTTPS/HTTP URL string|null>",
