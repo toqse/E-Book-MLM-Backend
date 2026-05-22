@@ -758,6 +758,36 @@ GET /api/v1/user/earnings/
     - Slots amount = count(REDEEMED sponsor codes issued to you) × ₹100 display unit.
     - `page` and `page_size` are clamped server-side: `page` >= 1, `page_size` in [1..100].
 
+GET /api/v1/user/earnings/export/
+  Auth: Bearer. Same sticky KYC gate as GET /api/v1/user/earnings/.
+  Purpose: download the authenticated member's earnings ledger (My Earnings → Export).
+    Filters mirror GET /api/v1/user/earnings/ so what the UI shows is what gets exported.
+  Query: export_format=csv (default) | pdf
+    Do not use query name "format" — Django REST framework reserves it for content negotiation and can yield 404.
+  Query: period — optional: today | 7d | 30d | fy | all (default all).
+  Query: type — optional: all | direct | passive | milestone | reversed | pending (default all).
+  Response: binary attachment (not JSON envelope).
+    CSV → Content-Type: text/csv; Content-Disposition: attachment;
+      filename="earnings_<member_id>_<period>_<type>.csv".
+    PDF → Content-Type: application/pdf; Content-Disposition: attachment;
+      filename="earnings_<member_id>_<period>_<type>.pdf" (ReportLab landscape A4, word-wrapped cells).
+  Columns (CSV header row & PDF table, same for both formats):
+    date, time, type, description, level,
+    gross, tds_deducted, net_credited, running_balance, status
+    Notes:
+    - description carries the joiner / source-member context (e.g. "Direct commission — Jinu George joined",
+      "Tree passive — Rosmi Shaji (JST000013)", "Milestone bonus — 10 direct referrals").
+    - level is L1 for DIRECT, L2/L3/L4 for UPLINE_*, empty for milestone rows.
+    - running_balance is walked newest-first from the current wallet cash balance, matching the UI table.
+    - status is the title-cased label (Credited | Reversed | Pending | Held).
+  Headers (both formats):
+    X-Export-Total-Count   — total matching rows for the filters
+    X-Export-Returned-Count — rows actually written (capped at 50,000 newest)
+    X-Export-Truncated     — "true" when total > returned, otherwise "false"
+  Errors:
+    400 invalid_export_format — export_format is not csv or pdf.
+    403 kyc_required | compliance_profile_required — same envelope as the earnings bundle endpoint.
+
 
 MODULE: User — Dashboard (member home)
 --------------------------------------------------------------------------------

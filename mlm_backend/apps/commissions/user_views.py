@@ -11,6 +11,7 @@ from apps.common.responses import envelope_response
 from apps.wallet.services.member_money import (
     build_commissions_summary,
     build_earnings_response,
+    build_ledger_export_rows,
     get_wallet_row,
 )
 
@@ -58,6 +59,118 @@ def user_earnings_bundle(request: Request):
         page_size=page_size,
     )
     return envelope_response(data)
+
+
+_USER_EARNINGS_EXPORT_HEADERS = [
+    "date",
+    "time",
+    "type",
+    "description",
+    "level",
+    "gross",
+    "tds_deducted",
+    "net_credited",
+    "running_balance",
+    "status",
+]
+
+# Relative widths for the PDF columns; description gets the most room since it
+# carries the joiner / member-id context. Sums are normalized to the page width
+# by the PDF builder.
+_USER_EARNINGS_PDF_COL_RATIOS = [
+    1.0,   # date
+    0.8,   # time
+    0.9,   # type
+    3.4,   # description
+    0.6,   # level
+    0.9,   # gross
+    1.1,   # tds_deducted
+    1.1,   # net_credited
+    1.2,   # running_balance
+    1.0,   # status
+]
+
+
+def _user_earnings_export_row(row: dict) -> list[str]:
+    return [
+        str(row.get("date") or ""),
+        str(row.get("time") or ""),
+        str(row.get("type") or ""),
+        str(row.get("description") or row.get("detail") or ""),
+        str(row.get("level") or ""),
+        str(row.get("gross") or "0.00"),
+        str(row.get("tds_deducted") or row.get("tds") or "0.00"),
+        str(row.get("net_credited") or row.get("net") or "0.00"),
+        str(row.get("running_balance") or row.get("balance") or "0.00"),
+        str(row.get("status_label") or row.get("status") or ""),
+    ]
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def user_earnings_export(request: Request):
+    """
+    Export the authenticated member's earnings ledger.
+
+    Query params:
+      - export_format: csv | pdf (default csv). Param name avoids DRF `format`.
+      - period: today | 7d | 30d | fy | all (default all)
+      - type:   all | direct | passive | milestone | pending | reversed (default all)
+
+    Filters mirror GET /api/v1/user/earnings/ so what the UI shows is what
+    gets exported. Capped at LEDGER_EXPORT_MAX_ROWS newest rows; the response
+    indicates truncation via a header for the UI to surface a warning.
+    """
+    blocked = require_kyc_verified_and_compliant(request)
+    if blocked is not None:
+        return blocked
+
+    fmt = (request.query_params.get("export_format") or "csv").strip().lower()
+    if fmt not in ("csv", "pdf"):
+        return envelope_response(
+            None,
+            message="Invalid export_format. Use export_format=csv or export_format=pdf.",
+            success=False,
+            errors={"detail": "invalid_export_format"},
+            status=400,
+        )
+
+    period = request.query_params.get("period", "all") or "all"
+    typ = request.query_params.get("type", "all") or "all"
+
+    bundle = build_ledger_export_rows(request.user, period=period, typ=typ)
+    rows = bundle["rows"]
+    member_id = getattr(request.user, "member_id", None) or str(request.user.pk)
+
+    if fmt == "csv":
+        resp = HttpResponse(content_type="text/csv")
+        resp["Content-Disposition"] = (
+            f'attachment; filename="earnings_{member_id}_{period}_{typ}.csv"'
+        )
+        resp["X-Export-Total-Count"] = str(bundle["total_count"])
+        resp["X-Export-Returned-Count"] = str(bundle["returned_count"])
+        resp["X-Export-Truncated"] = "true" if bundle["truncated"] else "false"
+        writer = csv.writer(resp)
+        writer.writerow(_USER_EARNINGS_EXPORT_HEADERS)
+        for row in rows:
+            writer.writerow(_user_earnings_export_row(row))
+        return resp
+
+    title = f"Earnings ledger — {member_id} ({period}, {typ})"
+    pdf_bytes = build_commissions_report_pdf_bytes(
+        title=title,
+        headers=_USER_EARNINGS_EXPORT_HEADERS,
+        rows=(_user_earnings_export_row(r) for r in rows),
+        col_ratios=_USER_EARNINGS_PDF_COL_RATIOS,
+    )
+    resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+    resp["Content-Disposition"] = (
+        f'attachment; filename="earnings_{member_id}_{period}_{typ}.pdf"'
+    )
+    resp["X-Export-Total-Count"] = str(bundle["total_count"])
+    resp["X-Export-Returned-Count"] = str(bundle["returned_count"])
+    resp["X-Export-Truncated"] = "true" if bundle["truncated"] else "false"
+    return resp
 
 
 @api_view(["GET"])

@@ -93,6 +93,7 @@ urlpatterns = [
     path("api/v1/admin/tree/user/<int:user_id>/", user_views.admin_tree_user),
     path("api/v1/admin/tree/platform/", user_views.admin_tree_platform),
     # Commissions & earnings bundles
+    path("api/v1/user/earnings/export/", comm_views.user_earnings_export),
     path("api/v1/user/earnings/", comm_views.user_earnings_bundle),
     path("api/v1/user/commissions/", comm_views.user_commissions),
     path("api/v1/user/commissions/summary/", comm_views.user_commissions_summary),

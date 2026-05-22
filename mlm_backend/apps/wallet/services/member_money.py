@@ -609,6 +609,116 @@ def wallet_cash_balance(user_id: int) -> Decimal:
     return w.cash_balance or ZERO
 
 
+# Hard upper bound to keep export queries bounded for very active members.
+LEDGER_EXPORT_MAX_ROWS = 50_000
+
+
+def build_ledger_export_rows(
+    user: User,
+    *,
+    period: str,
+    typ: str,
+    limit: int = LEDGER_EXPORT_MAX_ROWS,
+) -> dict[str, Any]:
+    """
+    Return all earnings-ledger rows for `user` matching the given filters,
+    in the same shape as `build_ledger().rows`, plus running balance walked
+    backwards from the current wallet cash balance.
+
+    Used by the member earnings export endpoint (CSV / PDF). Capped at
+    `LEDGER_EXPORT_MAX_ROWS` (newest first) so a runaway query cannot blow up
+    the worker; callers should expose `truncated` to the UI when this trips.
+    """
+    cap = max(1, min(int(limit), LEDGER_EXPORT_MAX_ROWS))
+    since = _period_start(period)
+    t = _parse_ledger_type(typ)
+
+    cl_table = CommissionLedger._meta.db_table
+    ms_table = MilestoneRecord._meta.db_table
+
+    params: list[Any] = []
+    c_where = f"recipient_id = {user.pk}"
+    if since:
+        c_where += " AND created_at >= %s"
+        params.append(since)
+    frag_c, extra_c = _ledger_type_sql_commission(t)
+    c_where += frag_c
+    params.extend(extra_c)
+
+    m_where = f"user_id = {user.pk}"
+    if since:
+        m_where += " AND created_at >= %s"
+        params.append(since)
+    frag_m, extra_m = _ledger_type_sql_milestone(t)
+    m_where += frag_m
+    params.extend(extra_m)
+
+    count_sql = f"""
+        SELECT COUNT(*) FROM (
+            SELECT id FROM {cl_table} WHERE {c_where}
+            UNION ALL
+            SELECT id FROM {ms_table} WHERE {m_where}
+        ) AS _cnt
+    """
+    union_sql = f"""
+        SELECT src, rid, created_at FROM (
+            SELECT 'c' AS src, id AS rid, created_at
+            FROM {cl_table} WHERE {c_where}
+            UNION ALL
+            SELECT 'm' AS src, id AS rid, created_at
+            FROM {ms_table} WHERE {m_where}
+        ) AS _u
+        ORDER BY created_at DESC, rid DESC
+        LIMIT %s
+    """
+
+    with connection.cursor() as cursor:
+        cursor.execute(count_sql, params)
+        total_count = cursor.fetchone()[0]
+        cursor.execute(union_sql, params + [cap])
+        keys = cursor.fetchall()
+
+    c_ids = [rid for src, rid, _ in keys if src == "c"]
+    m_ids = [rid for src, rid, _ in keys if src == "m"]
+
+    comm_by_id = {
+        x.id: x
+        for x in CommissionLedger.objects.filter(id__in=c_ids).select_related("source_user", "order")
+    }
+    ms_by_id = {x.id: x for x in MilestoneRecord.objects.filter(id__in=m_ids)}
+
+    results: list[dict[str, Any]] = []
+    for src, rid, _ca in keys:
+        if src == "c":
+            row = comm_by_id.get(rid)
+            if row:
+                results.append(_serialize_commission(row))
+        else:
+            row = ms_by_id.get(rid)
+            if row:
+                results.append(_serialize_milestone(row))
+
+    balance = wallet_cash_balance(user.pk)
+    for row in results:
+        bal_s = _fmt_money(balance)
+        row["balance"] = bal_s
+        row["running_balance"] = bal_s
+        row["tds_deducted"] = row["tds"]
+        row["net_credited"] = row["net"]
+        balance -= row.pop("_balance_delta", ZERO)
+
+    return {
+        "rows": results,
+        "total_count": total_count,
+        "returned_count": len(results),
+        "truncated": total_count > len(results),
+        "filters": {
+            "period": _parse_period(period),
+            "type": t,
+        },
+    }
+
+
 def _band_range_display(idx_zero: int) -> tuple[str, str | None]:
     low = BAND_EDGES[idx_zero]
     if idx_zero + 1 < len(BAND_EDGES):
