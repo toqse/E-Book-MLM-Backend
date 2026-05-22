@@ -23,7 +23,7 @@ from .models import GSTInvoice, Order
 
 logger = logging.getLogger(__name__)
 
-ACCENT = colors.HexColor("#2c73a9")
+ACCENT = colors.HexColor("#E5572B")
 GREY_ROW = colors.HexColor("#f0f0f0")
 CONTENT_WIDTH = 174 * mm
 LOGO_WIDTH = 22 * mm

@@ -4,8 +4,34 @@ from typing import Optional
 from django.utils import timezone
 
 from apps.common.aadhaar_utils import mask_aadhaar_display
-from apps.agreements.models import LegalDocument, MemberComplianceProfile, UserAgreementAcceptance
+from apps.agreements.models import (
+    AgreementCategory,
+    LegalDocument,
+    MemberComplianceProfile,
+    UserAgreementAcceptance,
+)
 from apps.users.models import User
+
+
+def get_compliance_required_legal_document() -> Optional[LegalDocument]:
+    """Active LEGAL DOCUMENT row that members must accept for compliance."""
+    return (
+        LegalDocument.objects.filter(
+            is_active=True,
+            requires_acceptance_for_compliance=True,
+            category__iexact=AgreementCategory.LEGAL_DOCUMENT,
+        )
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def clear_other_compliance_required_flags(*, exclude_pk: Optional[int] = None) -> int:
+    """Ensure at most one LegalDocument is flagged for compliance acceptance."""
+    qs = LegalDocument.objects.filter(requires_acceptance_for_compliance=True)
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    return qs.update(requires_acceptance_for_compliance=False)
 
 
 def accepted_version_for_document(user_id: int, document_id: int) -> Optional[str]:

@@ -98,6 +98,45 @@ class LegalDocumentAdminSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class ComplianceRequiredAgreementAdminSerializer(LegalDocumentAdminSerializer):
+    """
+    Admin serializer for the singleton compliance-required legal agreement.
+    Forces category LEGAL DOCUMENT and requires_acceptance_for_compliance=True.
+    """
+
+    class Meta(LegalDocumentAdminSerializer.Meta):
+        read_only_fields = LegalDocumentAdminSerializer.Meta.read_only_fields + (
+            "category",
+            "requires_acceptance_for_compliance",
+        )
+
+    def validate(self, attrs):
+        attrs = dict(attrs)
+        attrs.setdefault("category", AgreementCategory.LEGAL_DOCUMENT)
+        attrs.setdefault("requires_acceptance_for_compliance", True)
+        return super().validate(attrs)
+
+    def create(self, validated_data):
+        validated_data["category"] = AgreementCategory.LEGAL_DOCUMENT
+        validated_data["requires_acceptance_for_compliance"] = True
+        validated_data.setdefault("is_active", True)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        instance = super().update(instance, validated_data)
+        update_fields: list[str] = []
+        if instance.category != AgreementCategory.LEGAL_DOCUMENT:
+            instance.category = AgreementCategory.LEGAL_DOCUMENT
+            update_fields.append("category")
+        if not instance.requires_acceptance_for_compliance:
+            instance.requires_acceptance_for_compliance = True
+            update_fields.append("requires_acceptance_for_compliance")
+        if update_fields:
+            update_fields.append("updated_at")
+            instance.save(update_fields=update_fields)
+        return instance
+
+
 class AgreementOTPSendSerializer(serializers.Serializer):
     document_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1),

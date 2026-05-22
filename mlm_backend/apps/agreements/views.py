@@ -34,6 +34,7 @@ from .user_docs import build_agreements_user_array
 from .serializers import (
     AgreementOTPSendSerializer,
     AgreementOTPVerifySerializer,
+    ComplianceRequiredAgreementAdminSerializer,
     ComplianceSubmitSerializer,
     LegalDocumentAdminSerializer,
     LegalDocumentPublicSerializer,
@@ -44,6 +45,8 @@ from apps.users.kyc_eligibility import (
 )
 from .services import (
     apply_profile_bank_to_user,
+    clear_other_compliance_required_flags,
+    get_compliance_required_legal_document,
     record_agreement_acceptances,
     snapshot_profile_hashes,
     sync_identity_to_user,
@@ -513,3 +516,87 @@ def admin_legal_document_detail(request: Request, pk: int):
     ser.is_valid(raise_exception=True)
     ser.save()
     return envelope_response(ser.data, message="Updated")
+
+
+def _compliance_required_singleton_queryset():
+    return LegalDocument.objects.filter(
+        requires_acceptance_for_compliance=True,
+        category__iexact=AgreementCategory.LEGAL_DOCUMENT,
+    )
+
+
+@api_view(["GET", "POST", "PUT", "PATCH", "DELETE"])
+@permission_classes([IsSuperAdmin])
+def admin_compliance_required_agreement(request: Request):
+    """
+    Singleton CRUD for the one legal document members must accept for compliance.
+
+    POST/PUT upsert the same row (create on first call, update thereafter).
+    Clears requires_acceptance_for_compliance on any other LegalDocument rows.
+    """
+    ctx = {"request": request}
+
+    if request.method == "GET":
+        doc = get_compliance_required_legal_document()
+        if not doc:
+            return envelope_response(None)
+        return envelope_response(
+            ComplianceRequiredAgreementAdminSerializer(doc, context=ctx).data
+        )
+
+    if request.method == "DELETE":
+        with transaction.atomic():
+            doc = (
+                _compliance_required_singleton_queryset()
+                .select_for_update()
+                .order_by("-id")
+                .first()
+            )
+            if not doc:
+                return envelope_response(None, message="Not found", success=False, status=404)
+            doc.is_active = False
+            doc.requires_acceptance_for_compliance = False
+            doc.save(
+                update_fields=["is_active", "requires_acceptance_for_compliance", "updated_at"]
+            )
+        return envelope_response(None, message="Deactivated")
+
+    partial = request.method == "PATCH"
+    is_create_upsert = request.method in ("POST", "PUT")
+
+    with transaction.atomic():
+        existing = (
+            _compliance_required_singleton_queryset()
+            .select_for_update()
+            .order_by("-id")
+            .first()
+        )
+        if existing:
+            ser = ComplianceRequiredAgreementAdminSerializer(
+                existing,
+                data=request.data,
+                partial=partial,
+                context=ctx,
+            )
+        elif is_create_upsert:
+            ser = ComplianceRequiredAgreementAdminSerializer(
+                data=request.data,
+                context=ctx,
+            )
+        else:
+            return envelope_response(
+                None,
+                message="No compliance-required agreement exists. Use POST to create.",
+                success=False,
+                status=404,
+            )
+        ser.is_valid(raise_exception=True)
+        doc = ser.save()
+        if not doc.is_active:
+            doc.is_active = True
+            doc.save(update_fields=["is_active", "updated_at"])
+        clear_other_compliance_required_flags(exclude_pk=doc.pk)
+
+    message = "Updated" if existing else "Created"
+    status_code = 200 if existing else 201
+    return envelope_response(ser.data, message=message, status=status_code)

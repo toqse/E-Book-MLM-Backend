@@ -34,6 +34,16 @@ class LegalDocument(models.Model):
     class Meta:
         db_table = "agreements_legal_document"
         ordering = ["category", "name", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["requires_acceptance_for_compliance"],
+                condition=models.Q(
+                    requires_acceptance_for_compliance=True,
+                    is_active=True,
+                ),
+                name="uniq_active_compliance_required_legal_doc",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.name} v{self.version}"

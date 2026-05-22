@@ -1,10 +1,13 @@
 import io
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.utils import timezone
 from rest_framework.test import APIClient
 
+from apps.admin_panel.utils import get_system_config
 from apps.agreements.models import (
     AgreementCategory,
     LegalDocument,
@@ -36,6 +39,27 @@ def _member_user(phone: str = "+919887766554") -> User:
     return u
 
 
+def _paid_order_for_kyc(user: User, ebook: EBook) -> Order:
+    order = Order.objects.create(
+        user=user,
+        ebook=ebook,
+        order_number=f"ORD-KYC-AG-{user.id}",
+        base_price=Decimal("200"),
+        gst_amount=Decimal("36"),
+        gateway_charge=Decimal("5.72"),
+        total_amount=Decimal("241.72"),
+        discount_amount=Decimal("0"),
+        amount_paid=Decimal("241.72"),
+        status=Order.Status.CREATED,
+        razorpay_order_id="ord_kyc_ag",
+    )
+    finalize_order_as_paid(order, payment_id="pay_kyc_ag")
+    order.refresh_from_db()
+    order.refund_eligible_until = timezone.now() - timedelta(days=1)
+    order.save(update_fields=["refund_eligible_until"])
+    return order
+
+
 def _attach_min_kyc_docs(profile: MemberComplianceProfile):
     profile.pan_number = "ABCDE1234F"
     profile.aadhar_number = "123412341234"
@@ -61,7 +85,11 @@ def test_kyc_submit_and_bank_deprecated_410():
 
 
 @pytest.mark.django_db
-def test_compliance_flow_with_agreement_otp_and_admin_approve():
+def test_compliance_flow_with_agreement_otp_and_admin_approve(system_config, primary_ebook):
+    cfg = get_system_config()
+    cfg.trigger_instant_kyc_submission = False
+    cfg.save(update_fields=["trigger_instant_kyc_submission"])
+
     LegalDocument.objects.create(
         name="Terms",
         category="legal",
@@ -76,6 +104,7 @@ def test_compliance_flow_with_agreement_otp_and_admin_approve():
     doc = LegalDocument.objects.get()
 
     u = _member_user()
+    _paid_order_for_kyc(u, primary_ebook)
     staff = User.objects.create_user(
         login_identifier="support@test.dev",
         password="pw",
@@ -423,14 +452,14 @@ def test_agreements_compliance_legal_list_filters():
         is_active=True,
     )
     LegalDocument.objects.create(
-        name="KYC Req",
+        name="KYC Doc",
         category="KYC & IDENTITY",
         document_type="id",
         year=2026,
         description="d",
         content_html="<p>c</p>",
         version="1.0",
-        requires_acceptance_for_compliance=True,
+        requires_acceptance_for_compliance=False,
         is_active=True,
     )
     r = client.get("/api/v1/agreements/compliance-legal/")
@@ -445,7 +474,13 @@ def test_agreements_compliance_legal_list_filters():
 
 
 @pytest.mark.django_db
-def test_agreements_get_user_invoices_acceptance_proof_and_download(system_config):
+def test_agreements_get_user_invoices_acceptance_proof_and_download(
+    system_config, primary_ebook
+):
+    cfg = get_system_config()
+    cfg.trigger_instant_kyc_submission = False
+    cfg.save(update_fields=["trigger_instant_kyc_submission"])
+
     LegalDocument.objects.create(
         name="Terms Proof",
         category=AgreementCategory.KYC_IDENTITY,
@@ -461,6 +496,7 @@ def test_agreements_get_user_invoices_acceptance_proof_and_download(system_confi
     decl_text = "Declaration: I accept all these conditions for proof PDF testing."
 
     u = _member_user("+919887766502")
+    _paid_order_for_kyc(u, primary_ebook)
     client = APIClient()
     client.force_authenticate(user=u)
 
@@ -517,9 +553,9 @@ def test_agreements_get_user_invoices_acceptance_proof_and_download(system_confi
     assert len(payload["user"]) == 1
     row = payload["user"][0]
     assert row["id"] == u.id
-    assert len(row["order_invoices"]) == 1
-    inv_row = row["order_invoices"][0]
-    assert inv_row["order_id"] == order.id
+    assert len(row["order_invoices"]) == 2
+    inv_row = next(r for r in row["order_invoices"] if r["order_id"] == order.id)
+    assert inv_row is not None
     assert inv_row["invoice_number"]
     assert inv_row["invoice_pdf_url"]
 
@@ -558,6 +594,162 @@ def test_agreements_get_user_invoices_acceptance_proof_and_download(system_confi
     dl2 = anon.get(path_qs)
     assert dl2.status_code == 200
     assert b"".join(dl2.streaming_content)[:4] == b"%PDF"
+
+
+@pytest.mark.django_db
+def test_admin_compliance_required_singleton_upsert_and_member_lists():
+    su = User.objects.create_superuser(
+        "admin-singleton@test.dev",
+        "pw",
+        full_name="Admin Singleton",
+        email="admin-singleton@test.dev",
+    )
+    admin = APIClient()
+    admin.force_authenticate(user=su)
+
+    old = LegalDocument.objects.create(
+        name="Old Compliance",
+        category=AgreementCategory.LEGAL_DOCUMENT,
+        document_type="terms",
+        year=2025,
+        description="old",
+        content_html="<p>old</p>",
+        version="0.9",
+        requires_acceptance_for_compliance=True,
+        is_active=True,
+    )
+    other = LegalDocument.objects.create(
+        name="Other Legal",
+        category=AgreementCategory.LEGAL_DOCUMENT,
+        document_type="policy",
+        year=2026,
+        description="other",
+        content_html="<p>other</p>",
+        version="1.0",
+        requires_acceptance_for_compliance=False,
+        is_active=True,
+    )
+
+    g0 = admin.get("/api/v1/admin/agreements/compliance-required/")
+    assert g0.status_code == 200
+    assert g0.json()["data"]["id"] == old.id
+
+    r1 = admin.post(
+        "/api/v1/admin/agreements/compliance-required/",
+        {
+            "name": "Compliance Terms v2",
+            "document_type": "terms",
+            "year": 2026,
+            "description": "updated singleton",
+            "content_html": "<p>v2</p>",
+            "version": "2.0",
+            "is_active": True,
+        },
+        format="json",
+    )
+    assert r1.status_code == 200, r1.content
+    body1 = r1.json()["data"]
+    assert body1["id"] == old.id
+    assert body1["name"] == "Compliance Terms v2"
+    assert body1["version"] == "2.0"
+    assert body1["category"] == AgreementCategory.LEGAL_DOCUMENT
+    assert body1["requires_acceptance_for_compliance"] is True
+
+    old.refresh_from_db()
+    assert old.name == "Compliance Terms v2"
+    assert LegalDocument.objects.filter(requires_acceptance_for_compliance=True).count() == 1
+
+    r2 = admin.post(
+        "/api/v1/admin/agreements/compliance-required/",
+        {
+            "name": "Compliance Terms v3",
+            "document_type": "terms",
+            "year": 2026,
+            "description": "rewritten again",
+            "content_html": "<p>v3</p>",
+            "version": "3.0",
+            "is_active": True,
+        },
+        format="json",
+    )
+    assert r2.status_code == 200
+    assert r2.json()["data"]["id"] == old.id
+    assert r2.json()["data"]["version"] == "3.0"
+    assert LegalDocument.objects.count() == 2
+
+    member = _member_user("+919887766599")
+    mclient = APIClient()
+    mclient.force_authenticate(user=member)
+
+    compliance = mclient.get("/api/v1/agreements/compliance-legal/")
+    assert compliance.status_code == 200
+    rows = compliance.json()["data"]["results"]
+    assert len(rows) == 1
+    assert rows[0]["id"] == old.id
+    assert rows[0]["name"] == "Compliance Terms v3"
+
+    all_docs = mclient.get("/api/v1/agreements/")
+    assert all_docs.status_code == 200
+    result_ids = {r["id"] for r in all_docs.json()["data"]["results"]}
+    assert old.id in result_ids
+    assert other.id in result_ids
+
+    d = admin.delete("/api/v1/admin/agreements/compliance-required/")
+    assert d.status_code == 200
+    old.refresh_from_db()
+    assert old.is_active is False
+    assert old.requires_acceptance_for_compliance is False
+
+    empty = mclient.get("/api/v1/agreements/compliance-legal/")
+    assert empty.status_code == 200
+    assert empty.json()["data"]["results"] == []
+
+
+@pytest.mark.django_db
+def test_admin_compliance_required_singleton_create_clears_previous_flag():
+    su = User.objects.create_superuser(
+        "admin-singleton2@test.dev",
+        "pw",
+        full_name="Admin Singleton 2",
+        email="admin-singleton2@test.dev",
+    )
+    admin = APIClient()
+    admin.force_authenticate(user=su)
+
+    stale = LegalDocument.objects.create(
+        name="Stale",
+        category="LEGAL DOCUMENT",
+        document_type="terms",
+        year=2024,
+        description="d",
+        content_html="<p>s</p>",
+        version="1.0",
+        requires_acceptance_for_compliance=True,
+        is_active=True,
+    )
+    admin.delete("/api/v1/admin/agreements/compliance-required/")
+    stale.refresh_from_db()
+    assert stale.requires_acceptance_for_compliance is False
+
+    created = admin.post(
+        "/api/v1/admin/agreements/compliance-required/",
+        {
+            "name": "Fresh Compliance",
+            "document_type": "terms",
+            "year": 2026,
+            "description": "new",
+            "content_html": "<p>n</p>",
+            "version": "1.0",
+            "is_active": True,
+        },
+        format="json",
+    )
+    assert created.status_code == 201
+    new_id = created.json()["data"]["id"]
+    stale.refresh_from_db()
+    assert stale.requires_acceptance_for_compliance is False
+    assert LegalDocument.objects.filter(requires_acceptance_for_compliance=True).count() == 1
+    assert LegalDocument.objects.get(pk=new_id).requires_acceptance_for_compliance is True
 
 
 @pytest.mark.django_db

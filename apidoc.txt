@@ -374,6 +374,30 @@ GET/PATCH/DELETE /api/v1/admin/agreements/<id>/
   PATCH partial update. DELETE is soft (is_active=false).
   If PATCH includes category, it must be one of: LEGAL DOCUMENT, KYC & IDENTITY, PURCHASE & TAX (same rules as POST).
 
+GET /api/v1/admin/agreements/compliance-required/
+  Auth: IsSuperAdmin.
+  Returns the single active compliance-required LEGAL DOCUMENT agreement, or null data when none exists.
+  Same field shape as admin agreement detail (LegalDocument fields; category and requires_acceptance_for_compliance are fixed by the server).
+
+POST /api/v1/admin/agreements/compliance-required/
+  Auth: IsSuperAdmin.
+  Upsert singleton: creates on first call, updates the same row on subsequent POST/PUT.
+  Body (JSON or multipart): same fields as POST /api/v1/admin/agreements/ except category and requires_acceptance_for_compliance are not accepted (forced to LEGAL DOCUMENT and true).
+  Clears requires_acceptance_for_compliance on any other LegalDocument rows.
+  At least one of content_html or pdf_file required on create/update.
+
+PUT /api/v1/admin/agreements/compliance-required/
+  Auth: IsSuperAdmin.
+  Same upsert semantics as POST (full replace when row exists; create when missing).
+
+PATCH /api/v1/admin/agreements/compliance-required/
+  Auth: IsSuperAdmin.
+  Partial update of the singleton; 404 if none exists yet.
+
+DELETE /api/v1/admin/agreements/compliance-required/
+  Auth: IsSuperAdmin.
+  Soft-removes the singleton from compliance (is_active=false, requires_acceptance_for_compliance=false).
+
 GET /api/v1/admin/compliance-queue/
   Auth: IsSupportAdmin.
   Returns rich pending submissions: profile fields, nominee, bank echoes, signed media URLs when DEBUG/media served.

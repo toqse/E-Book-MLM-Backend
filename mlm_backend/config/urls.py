@@ -235,6 +235,10 @@ urlpatterns = [
     ),
     path("api/v1/admin/agreements/", agreement_views.admin_legal_documents),
     path(
+        "api/v1/admin/agreements/compliance-required/",
+        agreement_views.admin_compliance_required_agreement,
+    ),
+    path(
         "api/v1/admin/agreements/<int:pk>/",
         agreement_views.admin_legal_document_detail,
     ),
