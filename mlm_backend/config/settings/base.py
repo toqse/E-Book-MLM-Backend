@@ -205,6 +205,7 @@ RAZORPAY_PAYOUT_KEY_ID = os.environ.get("RAZORPAY_PAYOUT_KEY_ID", "")
 RAZORPAY_PAYOUT_KEY_SECRET = os.environ.get("RAZORPAY_PAYOUT_KEY_SECRET", "")
 
 FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000")
+PUBLIC_BACKEND_BASE_URL = os.environ.get("PUBLIC_BACKEND_BASE_URL", "").strip().rstrip("/")
 KYC_INVITE_WEB_PATH = os.environ.get("KYC_INVITE_WEB_PATH", "/compliance")
 KYC_INVITE_MOBILE_URL = os.environ.get("KYC_INVITE_MOBILE_URL", "").strip()
 KYC_INVITE_TOKEN_MAX_AGE_DAYS = int(os.environ.get("KYC_INVITE_TOKEN_MAX_AGE_DAYS", "30"))
