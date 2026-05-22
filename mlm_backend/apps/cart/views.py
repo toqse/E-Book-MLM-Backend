@@ -6,6 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 
 from apps.common.responses import envelope_response
+from apps.common.url_utils import public_media_url
 from apps.courses.models import EBook, Enrollment
 from apps.payments.services import (
     create_checkout_order_from_cart,
@@ -20,12 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _media_url(request: Request, file_field) -> str | None:
-    if not file_field:
-        return None
-    try:
-        return request.build_absolute_uri(file_field.url)
-    except Exception:
-        return file_field.url
+    return public_media_url(request, file_field)
 
 
 def _get_or_create_cart(user) -> Cart:

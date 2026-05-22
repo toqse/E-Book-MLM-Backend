@@ -13,6 +13,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from apps.audit.services import write_audit
 from apps.common.permissions import IsFinanceAdmin, IsSuperAdmin
 from apps.common.responses import envelope_response
+from apps.common.url_utils import public_absolute_uri
 from apps.finance.services.aggregates import build_gst_report, build_revenue_rollup, orders_finance_page
 from apps.finance.services.date_range import parse_finance_range
 from apps.courses.models import EBook
@@ -54,11 +55,8 @@ def _invoice_pdf_url(request, inv: GSTInvoice):
         logger.exception("invoice_pdf_file_url_failed invoice_id=%s", inv.pk)
         return legacy
 
-    if rel_url.startswith(("http://", "https://")):
-        return rel_url
-
     try:
-        return request.build_absolute_uri(rel_url)
+        absolute = public_absolute_uri(request, rel_url)
     except Exception:
         logger.exception(
             "invoice_build_absolute_uri_failed invoice_id=%s rel=%s",
@@ -66,6 +64,7 @@ def _invoice_pdf_url(request, inv: GSTInvoice):
             rel_url,
         )
         return rel_url if rel_url else legacy
+    return absolute or rel_url or legacy
 
 
 def _ebook_thumbnail_url(request, ebook: EBook | None):
@@ -79,10 +78,8 @@ def _ebook_thumbnail_url(request, ebook: EBook | None):
     except Exception:
         logger.exception("ebook_thumbnail_url_failed ebook_id=%s", ebook.pk)
         return None
-    if rel_url.startswith(("http://", "https://")):
-        return rel_url
     try:
-        return request.build_absolute_uri(rel_url)
+        absolute = public_absolute_uri(request, rel_url)
     except Exception:
         logger.exception(
             "ebook_thumbnail_build_absolute_uri_failed ebook_id=%s rel=%s",
@@ -90,6 +87,7 @@ def _ebook_thumbnail_url(request, ebook: EBook | None):
             rel_url,
         )
         return rel_url or None
+    return absolute or rel_url or None
 
 
 @api_view(["POST"])
@@ -379,8 +377,8 @@ def my_orders(request):
                 ensure_gst_invoice_pdf(o)
                 inv.refresh_from_db()
                 token = _invoice_link_signer.sign(f"{request.user.id}:{o.id}")
-                row["invoice_url"] = request.build_absolute_uri(
-                    f"/api/v1/user/orders/{o.id}/invoice/?token={token}"
+                row["invoice_url"] = public_absolute_uri(
+                    request, f"/api/v1/user/orders/{o.id}/invoice/?token={token}"
                 )
         except Exception:
             logger.exception("my_orders_paid_invoice_failed order_id=%s", o.pk)

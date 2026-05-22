@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 from apps.agreements.models import AgreementCategory, LegalDocument, MemberComplianceProfile
 from apps.common.phone_utils import normalize_phone_registration
+from apps.common.url_utils import public_media_url
 
 
 PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
@@ -34,10 +35,7 @@ class LegalDocumentPublicSerializer(serializers.ModelSerializer):
     def get_pdf_file_url(self, obj):
         req = self.context.get("request")
         if obj.pdf_file and req:
-            try:
-                return req.build_absolute_uri(obj.pdf_file.url)
-            except Exception:
-                return obj.pdf_file.url
+            return public_media_url(req, obj.pdf_file) or obj.pdf_file.url
         return None
 
     def get_is_agreement_accepted(self, obj) -> bool:
@@ -72,7 +70,7 @@ class LegalDocumentAdminSerializer(serializers.ModelSerializer):
         pdf = getattr(instance, "pdf_file", None)
         if pdf:
             try:
-                data["pdf_file"] = req.build_absolute_uri(pdf.url) if req else pdf.url
+                data["pdf_file"] = public_media_url(req, pdf) or pdf.url
             except Exception:
                 data["pdf_file"] = str(pdf)
         else:

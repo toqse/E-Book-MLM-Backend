@@ -1,9 +1,7 @@
 import logging
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urljoin, urlsplit, urlunsplit
 
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.http import FileResponse, HttpResponseRedirect
@@ -17,26 +15,13 @@ from rest_framework.response import Response
 
 from apps.common.permissions import IsAdminRole
 from apps.common.responses import envelope_response
+from apps.common.url_utils import public_absolute_uri, public_media_url
 
 from .models import EBook, Enrollment
 
 logger = logging.getLogger(__name__)
 _ebook_download_signer = TimestampSigner(salt="courses.ebook.download")
 _EBOOK_DOWNLOAD_MAX_AGE_SECONDS = 60 * 60 * 24  # 24h, same order of magnitude as invoice links
-
-
-def _public_absolute_uri(request, path: str) -> str:
-    public_base_url = getattr(settings, "PUBLIC_BACKEND_BASE_URL", "")
-    if public_base_url:
-        return urljoin(f"{public_base_url.rstrip('/')}/", str(path).lstrip("/"))
-
-    url = request.build_absolute_uri(path)
-    parts = urlsplit(url)
-    hostname = parts.hostname or ""
-    local_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
-    if parts.scheme == "http" and hostname.lower() not in local_hosts:
-        return urlunsplit(("https", parts.netloc, parts.path, parts.query, parts.fragment))
-    return url
 
 
 def _course_download_path_segment(b: EBook) -> str:
@@ -50,16 +35,11 @@ def _course_download_path_segment(b: EBook) -> str:
 def _ebook_download_signed_url(request, b: EBook, user_id: int) -> str:
     token = _ebook_download_signer.sign(f"{user_id}:{b.pk}")
     seg = _course_download_path_segment(b)
-    return _public_absolute_uri(request, f"/api/v1/user/courses/{seg}/download/?token={token}")
+    return public_absolute_uri(request, f"/api/v1/user/courses/{seg}/download/?token={token}")
 
 
 def _media_url(request, file_field):
-    if not file_field:
-        return None
-    try:
-        return _public_absolute_uri(request, file_field.url)
-    except Exception:
-        return file_field.url
+    return public_media_url(request, file_field)
 
 
 def _book_payload(request, b: EBook):

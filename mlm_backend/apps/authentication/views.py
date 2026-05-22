@@ -13,6 +13,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.audit.services import write_audit
 from apps.common.responses import envelope_response
+from apps.common.url_utils import public_media_url
 from apps.payments.models import Order, OrderLine
 from apps.agreements.models import AgreementCategory, LegalDocument, MemberComplianceProfile
 from apps.agreements.services import accepted_version_for_document, user_missing_acceptances
@@ -356,12 +357,7 @@ def _fmt_ddmmyyyy(date_obj):
 
 
 def _abs_media_url(request: Request, filefield) -> str | None:
-    if not filefield:
-        return None
-    try:
-        return request.build_absolute_uri(filefield.url)
-    except Exception:
-        return filefield.url
+    return public_media_url(request, filefield)
 
 
 def _compliance_submitted_payload(

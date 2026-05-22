@@ -4,17 +4,13 @@ from rest_framework.response import Response
 
 from apps.common.permissions import IsAdminRole
 from apps.common.responses import envelope_response
+from apps.common.url_utils import public_media_url
 
 from .models import Banner
 
 
 def _media_url(request, file_field):
-    if not file_field:
-        return None
-    try:
-        return request.build_absolute_uri(file_field.url)
-    except Exception:
-        return file_field.url
+    return public_media_url(request, file_field)
 
 
 def _coerce_bool(value) -> bool:

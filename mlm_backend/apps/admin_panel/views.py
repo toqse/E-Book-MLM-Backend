@@ -17,6 +17,7 @@ from apps.common.permissions import (
     IsSupportAdmin,
 )
 from apps.common.responses import envelope_response
+from apps.common.url_utils import public_absolute_uri, public_media_url
 from apps.finance.services.aggregates import build_gst_report, build_tds_report_rollup
 from apps.finance.services.date_range import parse_finance_range
 from apps.payments.models import GSTInvoice, Order
@@ -84,12 +85,11 @@ def _invoice_pdf_url(request, inv: GSTInvoice) -> str | None:
     except Exception:
         return legacy
 
-    if rel_url.startswith(("http://", "https://")):
-        return rel_url
     try:
-        return request.build_absolute_uri(rel_url)
+        absolute = public_absolute_uri(request, rel_url)
     except Exception:
         return rel_url or legacy
+    return absolute or rel_url or legacy
 
 
 def _approve_compliance_by_user_ids(user_ids: list[int]):
@@ -596,12 +596,7 @@ def admin_user_unsuspend(request, pk: int):
 
 
 def _abs_media_url(request, filefield) -> str | None:
-    if not filefield:
-        return None
-    try:
-        return request.build_absolute_uri(filefield.url)
-    except Exception:
-        return filefield.url
+    return public_media_url(request, filefield)
 
 
 def _fmt_ddmmyyyy(date_obj):
