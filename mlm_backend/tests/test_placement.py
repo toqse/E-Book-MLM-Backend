@@ -91,7 +91,9 @@ def test_find_slot_prefer_left_spillover(system_config):
 
 
 @pytest.mark.django_db
-def test_open_placement_queue_and_manual_place_commissions(system_config):
+def test_open_placement_queue_and_manual_place_commissions(
+    system_config, django_capture_on_commit_callbacks
+):
     sponsor = _member("+918020020020")
     sponsor.is_member = True
     sponsor.save(update_fields=["is_member"])
@@ -108,11 +110,12 @@ def test_open_placement_queue_and_manual_place_commissions(system_config):
 
     client = APIClient()
     client.force_authenticate(user=sponsor)
-    r = client.post(
-        "/api/v1/user/tree/place-direct/",
-        {"member_id": buyer.member_id, "leg": "LEFT"},
-        format="json",
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        r = client.post(
+            "/api/v1/user/tree/place-direct/",
+            {"member_id": buyer.member_id, "leg": "LEFT"},
+            format="json",
+        )
     assert r.status_code == 200, r.content
     buyer.refresh_from_db()
     assert hasattr(buyer, "binary_node")
@@ -124,7 +127,7 @@ def test_open_placement_queue_and_manual_place_commissions(system_config):
 
 
 @pytest.mark.django_db
-def test_auto_place_after_deadline(system_config):
+def test_auto_place_after_deadline(system_config, django_capture_on_commit_callbacks):
     SystemConfig.objects.filter(pk=1).update(auto_placement_strategy=SystemConfig.AutoPlacementStrategy.LEFT_FIRST)
     sponsor = _member("+918030030030")
     sponsor.is_member = True
@@ -135,7 +138,8 @@ def test_auto_place_after_deadline(system_config):
     order.placement_status = Order.PlacementStatus.PENDING
     order.placement_deadline_at = timezone.now() - timedelta(minutes=1)
     order.save(update_fields=["placement_status", "placement_deadline_at"])
-    auto_place_pending_placements()
+    with django_capture_on_commit_callbacks(execute=True):
+        auto_place_pending_placements()
     buyer.refresh_from_db()
     assert hasattr(buyer, "binary_node")
     order.refresh_from_db()
@@ -143,7 +147,9 @@ def test_auto_place_after_deadline(system_config):
 
 
 @pytest.mark.django_db
-def test_admin_reverse_leaf_and_block_non_leaf(system_config):
+def test_admin_reverse_leaf_and_block_non_leaf(
+    system_config, django_capture_on_commit_callbacks
+):
     admin = _admin()
     sponsor = _member("+918040040040")
     sponsor.is_member = True
@@ -151,14 +157,15 @@ def test_admin_reverse_leaf_and_block_non_leaf(system_config):
     BinaryTreeService.place_member(sponsor, None)
     buyer = _member("+918040040041", sponsor=sponsor)
     order = _paid_order(buyer, suffix="c")
-    placement_mod.complete_placement_for_order(
-        order,
-        manual_leg=BinaryNode.Position.LEFT,
-        auto_strategy=None,
-        final_status=Order.PlacementStatus.PLACED_MANUAL,
-        actor=sponsor,
-        audit_action="placement.manual",
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        placement_mod.complete_placement_for_order(
+            order,
+            manual_leg=BinaryNode.Position.LEFT,
+            auto_strategy=None,
+            final_status=Order.PlacementStatus.PLACED_MANUAL,
+            actor=sponsor,
+            audit_action="placement.manual",
+        )
     assert CommissionLedger.objects.filter(order=order).exists()
 
     client = APIClient()
@@ -170,14 +177,15 @@ def test_admin_reverse_leaf_and_block_non_leaf(system_config):
     order.refresh_from_db()
     assert order.placement_status == Order.PlacementStatus.PENDING
 
-    placement_mod.complete_placement_for_order(
-        order,
-        manual_leg=BinaryNode.Position.LEFT,
-        auto_strategy=None,
-        final_status=Order.PlacementStatus.PLACED_MANUAL,
-        actor=sponsor,
-        audit_action="placement.manual",
-    )
+    with django_capture_on_commit_callbacks(execute=True):
+        placement_mod.complete_placement_for_order(
+            order,
+            manual_leg=BinaryNode.Position.LEFT,
+            auto_strategy=None,
+            final_status=Order.PlacementStatus.PLACED_MANUAL,
+            actor=sponsor,
+            audit_action="placement.manual",
+        )
     u2 = _member("+918040040042", sponsor=buyer)
     u2.is_member = True
     u2.save(update_fields=["is_member"])

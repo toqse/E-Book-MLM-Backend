@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 
 from django.db import transaction
@@ -14,17 +15,35 @@ from apps.tds.services import calculate_and_apply_194h_tds
 from .milestone_tiers import get_milestones
 from .models import CommissionLedger, MilestoneRecord
 
+logger = logging.getLogger(__name__)
+
 
 class CommissionEngine:
     @staticmethod
     @transaction.atomic
     def process_order(order: Order) -> None:
+        logger.info(
+            "commission_process_start order_id=%s status=%s order_number=%s",
+            order.id,
+            order.status,
+            order.order_number,
+        )
         if order.status != Order.Status.PAID:
+            logger.warning(
+                "commission_skipped_not_paid order_id=%s status=%s",
+                order.id,
+                order.status,
+            )
             return
         active = CommissionLedger.objects.filter(order=order).exclude(
             status=CommissionLedger.Status.REVERSED
         )
         if active.exists():
+            logger.info(
+                "commission_skipped_duplicate order_id=%s existing_count=%s",
+                order.id,
+                active.count(),
+            )
             return
         # Purge stale REVERSED rows so they don't pollute the ledger or the
         # "reversed" summary figure after an admin reverse + re-placement cycle.
@@ -38,6 +57,7 @@ class CommissionEngine:
         cap = cfg.earning_cap
 
         if order.is_retail_purchase:
+            logger.info("commission_skipped_retail order_id=%s", order.id)
             write_audit(
                 "order.commission_skipped_retail",
                 actor=None,
@@ -54,6 +74,11 @@ class CommissionEngine:
                 is_retail_purchase=False,
             ).exclude(pk=order.pk)
             if prior.exists():
+                logger.info(
+                    "commission_skipped_repurchase order_id=%s buyer_id=%s",
+                    order.id,
+                    buyer.id,
+                )
                 write_audit(
                     "order.commission_skipped_repurchase",
                     actor=None,
@@ -65,6 +90,11 @@ class CommissionEngine:
 
         sponsor = buyer.sponsor
         if not sponsor:
+            logger.warning(
+                "commission_skipped_no_sponsor order_id=%s buyer_id=%s",
+                order.id,
+                buyer.id,
+            )
             write_audit(
                 "order.no_sponsor",
                 target_type="Order",
@@ -73,6 +103,11 @@ class CommissionEngine:
             return
 
         if not hasattr(buyer, "binary_node"):
+            logger.warning(
+                "commission_skipped_no_binary_node order_id=%s buyer_id=%s",
+                order.id,
+                buyer.id,
+            )
             return
 
         buyer_node = buyer.binary_node
@@ -112,6 +147,12 @@ class CommissionEngine:
             node = node.parent
             hops += 1
 
+        logger.info(
+            "commission_process_done order_id=%s order_number=%s sponsor_id=%s",
+            order.id,
+            order.order_number,
+            sponsor.id,
+        )
         write_audit(
             "order.commissions_processed",
             target_type="Order",
@@ -129,6 +170,12 @@ class CommissionEngine:
         cap: Decimal,
     ):
         if recipient.kyc_status != User.KYCStatus.VERIFIED:
+            logger.info(
+                "commission_held_kyc order_id=%s recipient_id=%s type=%s",
+                order.id,
+                recipient.id,
+                ctype,
+            )
             CommissionLedger.objects.create(
                 recipient=recipient,
                 source_user=source,
@@ -143,6 +190,12 @@ class CommissionEngine:
         wallet, _ = Wallet.objects.select_for_update().get_or_create(user=recipient)
         remaining = cap - wallet.total_earned
         if remaining <= 0:
+            logger.info(
+                "commission_held_cap order_id=%s recipient_id=%s type=%s",
+                order.id,
+                recipient.id,
+                ctype,
+            )
             recipient.account_status = User.AccountStatus.CAPPED
             recipient.save(update_fields=["account_status"])
             CommissionLedger.objects.create(
@@ -157,6 +210,15 @@ class CommissionEngine:
             )
             return
         gross_credit = min(gross, remaining)
+        if gross_credit < gross:
+            logger.info(
+                "commission_partial_cap order_id=%s recipient_id=%s type=%s gross=%s credited=%s",
+                order.id,
+                recipient.id,
+                ctype,
+                gross,
+                gross_credit,
+            )
         tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
         wallet.cash_balance += tds.net_amount
         wallet.total_earned += tds.net_amount
@@ -185,6 +247,14 @@ class CommissionEngine:
             tds_deducted=tds.tds_amount,
             net_amount=tds.net_amount,
             status=CommissionLedger.Status.CREDITED,
+        )
+        logger.info(
+            "commission_credited order_id=%s recipient_id=%s type=%s gross=%s net=%s",
+            order.id,
+            recipient.id,
+            ctype,
+            tds.gross_amount,
+            tds.net_amount,
         )
         if wallet.total_earned >= cap:
             recipient.account_status = User.AccountStatus.CAPPED

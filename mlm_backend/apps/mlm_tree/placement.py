@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from django.db import transaction
@@ -17,6 +18,8 @@ from apps.users.models import User
 
 from .models import BinaryNode
 from .services import BinaryTreeService
+
+logger = logging.getLogger(__name__)
 
 
 def get_pending_placement_order(user: User) -> Order | None:
@@ -41,7 +44,19 @@ def open_placement_queue_if_needed(order: Order, user: User) -> None:
     if order.is_retail_purchase:
         return
     if hasattr(user, "binary_node"):
-        process_commission_task.delay(order.id)
+        order_id = order.id
+
+        def _dispatch() -> None:
+            try:
+                process_commission_task.delay(order_id)
+            except Exception:
+                logger.exception("commission_dispatch_failed order_id=%s", order_id)
+                try:
+                    CommissionEngine.process_order(Order.objects.get(pk=order_id))
+                except Exception:
+                    logger.exception("commission_inline_fallback_failed order_id=%s", order_id)
+
+        transaction.on_commit(_dispatch)
         return
     if get_pending_placement_order(user):
         return
@@ -61,15 +76,28 @@ def open_placement_queue_if_needed(order: Order, user: User) -> None:
 
 
 def finalize_commissions_for_buyer(buyer: User) -> None:
-    for o in Order.objects.filter(
-        user=buyer,
-        status=Order.Status.PAID,
-        is_retail_purchase=False,
-    ).order_by("id"):
-        try:
-            process_commission_task.delay(o.id)
-        except Exception:
-            CommissionEngine.process_order(o)
+    order_ids = list(
+        Order.objects.filter(
+            user=buyer,
+            status=Order.Status.PAID,
+            is_retail_purchase=False,
+        )
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
+
+    def _dispatch() -> None:
+        for oid in order_ids:
+            try:
+                process_commission_task.delay(oid)
+            except Exception:
+                logger.exception("commission_dispatch_failed order_id=%s", oid)
+                try:
+                    CommissionEngine.process_order(Order.objects.get(pk=oid))
+                except Exception:
+                    logger.exception("commission_inline_fallback_failed order_id=%s", oid)
+
+    transaction.on_commit(_dispatch)
 
 
 @transaction.atomic
