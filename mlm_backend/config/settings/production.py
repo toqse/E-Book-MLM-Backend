@@ -33,8 +33,9 @@ CACHES = {
     }
 }
 
-SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+SECURE_SSL_REDIRECT = False
 # Admin login over http://localhost or :8000 (not only https://).
 CSRF_TRUSTED_ORIGINS = [
     o.strip()
