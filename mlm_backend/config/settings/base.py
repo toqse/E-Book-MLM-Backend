@@ -45,6 +45,12 @@ OTP_SEND_WINDOW_SECONDS = _env_positive_int("OTP_SEND_WINDOW_SECONDS", 600)
 
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
 
+# Trust the upstream proxy/tunnel (cloudflared, nginx, Azure Front Door) for scheme + host so
+# request.build_absolute_uri() emits https:// public URLs (signed PDF links, media, invoice URLs).
+# Safe in dev: only takes effect when the header is actually present.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
