@@ -648,7 +648,8 @@ GET /api/v1/admin/binary-tree/placements/pending/
         "order_id", "order_number",
         "buyer": { "user_id", "member_id", "full_name", "joined_at"|null },
         "sponsor"|null: { "user_id", "member_id", "full_name" },
-        "placement_status", "placement_deadline_at"|null, "hours_remaining"|null
+        "placement_status", "placement_deadline_at"|null,
+        "time_remaining_to_auto_place"|null  // e.g. "3.5 hours" if >=1h, "45 minutes" otherwise
       }, ...
     ],
     "count", "page", "page_size"

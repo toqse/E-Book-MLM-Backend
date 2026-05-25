@@ -142,12 +142,17 @@ def admin_binary_tree_pending_placements(request: Request):
     for o in paged:
         buyer = o.user
         sponsor = buyer.sponsor
-        hrs = None
+        time_remaining: str | None = None
         if o.placement_deadline_at:
-            hrs = round(
-                max(0.0, (o.placement_deadline_at - now).total_seconds() / 3600.0),
-                3,
+            seconds_remaining = max(
+                0.0, (o.placement_deadline_at - now).total_seconds()
             )
+            if seconds_remaining >= 3600:
+                hours = round(seconds_remaining / 3600.0, 3)
+                time_remaining = f"{hours:g} hour{'s' if hours != 1 else ''}"
+            else:
+                minutes = int(seconds_remaining // 60)
+                time_remaining = f"{minutes} minute{'s' if minutes != 1 else ''}"
         results.append(
             {
                 "order_id": o.id,
@@ -171,7 +176,7 @@ def admin_binary_tree_pending_placements(request: Request):
                 "placement_deadline_at": o.placement_deadline_at.isoformat()
                 if o.placement_deadline_at
                 else None,
-                "hours_remaining": hrs,
+                "time_remaining_to_auto_place": time_remaining,
             }
         )
     return envelope_response(
