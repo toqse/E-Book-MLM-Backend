@@ -730,7 +730,7 @@ GET /api/v1/user/earnings/
   Query: include — optional. Comma-separated: "overview" (default when omitted),
     "ledger", or "overview,ledger" or "all" (both). Use "ledger" only to skip overview.
   Query: period — optional: today | 7d | 30d | fy | all (default all). Filters ledger.
-  Query: type — optional: all | direct | passive | milestone | reversed | pending.
+  Query: type — optional: all | direct | passive | milestone | reversed | pending | withdrawal.
   Query: page (default 1), page_size (default 20, max 100) for the ledger table section.
     Pagination applies to `data.ledger.rows` only: `len(rows)` <= `page_size`, while
     `data.ledger.total_count` is the total count across the active `period` + `type` filters.
@@ -754,7 +754,7 @@ GET /api/v1/user/earnings/
     "filters": {
       "period", "type",
       "periods": [today, 7d, 30d, fy, all],
-      "types": [all, direct, passive, milestone, pending, reversed]
+      "types": [all, direct, passive, milestone, pending, reversed, withdrawal]
     },
     "ledger": {
       "rows": [ unified rows ],
@@ -762,10 +762,11 @@ GET /api/v1/user/earnings/
     }
   Per-stream lifetime amounts are the four strings under summary.income.*.amount
   (direct_l1, passive_l2_l4, milestone, slots); summary.breakdown is not returned.
-  Ledger row fields (commissions + milestones; aliases kept for existing clients):
-    id, kind (COMMISSION|MILESTONE), at (ISO datetime),
+  Ledger row fields (commissions + milestones + withdrawals; aliases kept for existing clients):
+    id, kind (COMMISSION|MILESTONE|WITHDRAWAL|WITHDRAWAL_REFUND), at (ISO datetime),
     date (e.g. "13 May 2026"), time (12h local, e.g. "01:45 PM"),
-    type (Direct|Passive|Reversed|Pending; Milestone|Held|Pending for milestones),
+    type (Direct|Passive|Reversed|Pending; Milestone|Held|Pending for milestones;
+      Withdrawal / Withdrawal Pending|Processing|Paid|Rejected|Failed; Withdrawal Refunded),
     detail, description (same string as detail, for table DESCRIPTION column),
     triggered_by { member_id, full_name }|null (joiner / source user; null for milestones),
     via_downline null (reserved for future tree context),
@@ -775,19 +776,24 @@ GET /api/v1/user/earnings/
     source { member_id, full_name }|omitted (duplicate of triggered_by when present),
     referrals (int, milestone rows only),
     order_id (commissions, if present),
-    balance, running_balance (same decimal string; lifetime earnings-to-date as of this line
-    when walking newest-first — see note below),
+    withdrawal_id, payout_method, utr_number (withdrawal rows, when present),
+    balance, running_balance (same decimal string; wallet cash balance immediately after this
+    event when walking newest-first — see note below),
   Notes:
     - summary.wallet values are decimal strings. locked = cash not yet withdrawable under the wallet cooling
       window (length = SystemConfig.cooling_off_days, echoed as cooling_days on GET /api/v1/user/payouts/ and
       GET /api/v1/user/wallet/); available_to_withdraw matches withdrawal checks. For TDS and richer wallet fields
       use GET /api/v1/user/payouts/.
     - balance / running_balance are emitted per returned row in descending time order. The walk
-      starts from Wallet.total_earned (lifetime earnings, net of reversals) and subtracts each
-      row's net contribution as it moves to older rows, so the value reads as "earned-to-date as
-      of this line". Withdrawals and other wallet movements are intentionally excluded so the
-      figure cannot go negative after a member withdraws their balance. REVERSED rows adjust
-      the walk so the totals remain consistent.
+      starts from Wallet.cash_balance and subtracts each row's net cash impact as it moves to older
+      rows, so the value is the member's cash balance immediately after that line. Withdrawals
+      appear as negative rows (kind WITHDRAWAL; gross and net equal -amount_requested, tds 0);
+      status reflects the linked withdrawal request (Pending / Processing / Paid / Rejected /
+      Failed). A rejected withdrawal also produces a WITHDRAWAL_REFUND row (positive gross/net)
+      that restores the wallet. Older earnings rows are not rewritten when a new withdrawal is
+      added — only newer rows reflect the reduced balance. REVERSED commission rows adjust the
+      walk so totals stay consistent.
+    - Withdrawal row TDS column is always 0; TDS on payouts is shown on GET /api/v1/user/payouts/.
     - Per-line tds may be 0 until engine writes tds_deducted.
     - Slots amount = count(REDEEMED sponsor codes issued to you) × ₹100 display unit.
     - `page` and `page_size` are clamped server-side: `page` >= 1, `page_size` in [1..100].
@@ -799,7 +805,7 @@ GET /api/v1/user/earnings/export/
   Query: export_format=csv (default) | pdf
     Do not use query name "format" — Django REST framework reserves it for content negotiation and can yield 404.
   Query: period — optional: today | 7d | 30d | fy | all (default all).
-  Query: type — optional: all | direct | passive | milestone | reversed | pending (default all).
+  Query: type — optional: all | direct | passive | milestone | reversed | pending | withdrawal (default all).
   Response: binary attachment (not JSON envelope).
     CSV → Content-Type: text/csv; Content-Disposition: attachment;
       filename="earnings_<member_id>_<period>_<type>.csv".

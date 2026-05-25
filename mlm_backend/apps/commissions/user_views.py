@@ -115,7 +115,7 @@ def user_earnings_export(request: Request):
     Query params:
       - export_format: csv | pdf (default csv). Param name avoids DRF `format`.
       - period: today | 7d | 30d | fy | all (default all)
-      - type:   all | direct | passive | milestone | pending | reversed (default all)
+      - type:   all | direct | passive | milestone | pending | reversed | withdrawal (default all)
 
     Filters mirror GET /api/v1/user/earnings/ so what the UI shows is what
     gets exported. Capped at LEDGER_EXPORT_MAX_ROWS newest rows; the response

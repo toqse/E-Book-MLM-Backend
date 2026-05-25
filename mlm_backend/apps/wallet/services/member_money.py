@@ -120,7 +120,15 @@ def _parse_include(raw: str | None) -> set[str]:
 
 def _parse_ledger_type(raw: str | None) -> str:
     t = (raw or "all").strip().lower()
-    allowed = {"all", "direct", "passive", "milestone", "reversed", "pending"}
+    allowed = {
+        "all",
+        "direct",
+        "passive",
+        "milestone",
+        "reversed",
+        "pending",
+        "withdrawal",
+    }
     return t if t in allowed else "all"
 
 
@@ -478,10 +486,147 @@ def _serialize_milestone(row: MilestoneRecord) -> dict[str, Any]:
     }
 
 
+def _withdrawal_id_from_transaction(wt: WalletTransaction) -> int | None:
+    meta = wt.meta or {}
+    wid = meta.get("withdrawal_id")
+    if wid is not None:
+        try:
+            return int(wid)
+        except (TypeError, ValueError):
+            pass
+    ref = (wt.reference or "").strip()
+    if ":" in ref:
+        try:
+            return int(ref.split(":", 1)[1])
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _withdrawal_debit_type_status(wr: WithdrawalRequest | None) -> tuple[str, str, str]:
+    """Display type, status_label, and status code for a withdrawal DEBIT row."""
+    if wr is None:
+        return "Withdrawal", "Withdrawal", "UNKNOWN"
+    st = wr.status
+    labels: dict[str, tuple[str, str]] = {
+        WithdrawalRequest.Status.PENDING: ("Withdrawal", "Withdrawal Pending"),
+        WithdrawalRequest.Status.APPROVED: ("Withdrawal", "Withdrawal Processing"),
+        WithdrawalRequest.Status.PROCESSING: ("Withdrawal", "Withdrawal Processing"),
+        WithdrawalRequest.Status.PAID: ("Withdrawal", "Withdrawal Paid"),
+        WithdrawalRequest.Status.REJECTED: ("Withdrawal", "Withdrawal Rejected"),
+        WithdrawalRequest.Status.FAILED: ("Withdrawal", "Withdrawal Failed"),
+    }
+    type_disp, status_label = labels.get(st, ("Withdrawal", "Withdrawal"))
+    return type_disp, status_label, st
+
+
+def _withdrawal_detail(
+    wr: WithdrawalRequest | None,
+    wt: WalletTransaction,
+    *,
+    is_refund: bool,
+) -> str:
+    if is_refund:
+        return "Withdrawal refunded — amount returned to wallet"
+    method = ""
+    if wr:
+        method = (wr.payout_method or "").strip()
+    elif wt.meta:
+        method = (str(wt.meta.get("payout_method") or "")).strip()
+    amt = _fmt_money(wt.amount)
+    method_part = f" — {method}" if method else ""
+    base = f"Withdrawal{method_part} — {amt}"
+    if wr:
+        if wr.status == WithdrawalRequest.Status.PAID and wr.utr_number:
+            return f"{base} — Paid (UTR {wr.utr_number})"
+        if wr.status == WithdrawalRequest.Status.REJECTED:
+            return f"{base} — Rejected"
+    return base
+
+
+def _serialize_withdrawal_debit(
+    wt: WalletTransaction,
+    wr: WithdrawalRequest | None,
+) -> dict[str, Any]:
+    amt = wt.amount or ZERO
+    wr_id = _withdrawal_id_from_transaction(wt)
+    type_disp, status_label, status = _withdrawal_debit_type_status(wr)
+    desc = _withdrawal_detail(wr, wt, is_refund=False)
+    date_s, time_s = _fmt_date_time(wt.created_at)
+    neg = _fmt_money(-amt)
+    out: dict[str, Any] = {
+        "id": wt.id,
+        "kind": "WITHDRAWAL",
+        "at": wt.created_at.isoformat(),
+        "date": date_s,
+        "time": time_s,
+        "type": type_disp,
+        "detail": desc,
+        "description": desc,
+        "triggered_by": None,
+        "via_downline": None,
+        "level": None,
+        "gross": neg,
+        "tds": "0",
+        "net": neg,
+        "status": status,
+        "status_label": status_label,
+        "_balance_delta": -amt,
+    }
+    if wr_id is not None:
+        out["withdrawal_id"] = wr_id
+    if wr:
+        out["payout_method"] = wr.payout_method
+        if wr.utr_number:
+            out["utr_number"] = wr.utr_number
+    elif wt.meta and wt.meta.get("payout_method"):
+        out["payout_method"] = wt.meta["payout_method"]
+    return out
+
+
+def _serialize_withdrawal_refund(
+    wt: WalletTransaction,
+    wr: WithdrawalRequest | None,
+) -> dict[str, Any]:
+    amt = wt.amount or ZERO
+    wr_id = _withdrawal_id_from_transaction(wt)
+    desc = _withdrawal_detail(wr, wt, is_refund=True)
+    date_s, time_s = _fmt_date_time(wt.created_at)
+    pos = _fmt_money(amt)
+    out: dict[str, Any] = {
+        "id": wt.id,
+        "kind": "WITHDRAWAL_REFUND",
+        "at": wt.created_at.isoformat(),
+        "date": date_s,
+        "time": time_s,
+        "type": "Withdrawal Refunded",
+        "detail": desc,
+        "description": desc,
+        "triggered_by": None,
+        "via_downline": None,
+        "level": None,
+        "gross": pos,
+        "tds": "0",
+        "net": pos,
+        "status": "REFUNDED",
+        "status_label": "Refunded",
+        "_balance_delta": amt,
+    }
+    if wr_id is not None:
+        out["withdrawal_id"] = wr_id
+    if wr:
+        out["payout_method"] = wr.payout_method
+    elif wt.meta and wt.meta.get("payout_method"):
+        out["payout_method"] = wt.meta["payout_method"]
+    return out
+
+
 def _ledger_type_sql_commission(typ: str) -> tuple[str, list[Any]]:
     """Returns SQL fragment for commissions_ledger WHERE (empty = no filter)."""
     st = CommissionLedger.Status
     ct = CommissionLedger.CommissionType
+    if typ == "withdrawal":
+        return " AND 1=0 ", []
     if typ == "milestone":
         return " AND 1=0 ", []
     if typ == "direct":
@@ -499,13 +644,152 @@ def _ledger_type_sql_commission(typ: str) -> tuple[str, list[Any]]:
 
 
 def _ledger_type_sql_milestone(typ: str) -> tuple[str, list[Any]]:
-    if typ in ("direct", "passive", "reversed"):
+    if typ in ("direct", "passive", "reversed", "withdrawal"):
         return " AND 1=0 ", []
     if typ == "pending":
         return " AND status = %s", ["PENDING"]
     if typ == "milestone":
         return "", []
     return "", []
+
+
+def _ledger_type_sql_withdrawal(typ: str) -> tuple[str, list[Any]]:
+    if typ in ("all", "withdrawal"):
+        return "", []
+    return " AND 1=0 ", []
+
+
+def _ledger_wallet_where(user_pk: int, since: datetime | None, typ: str) -> tuple[str, list[Any]]:
+    debit = WalletTransaction.TxType.DEBIT
+    adj = WalletTransaction.TxType.ADJUSTMENT
+    w_where = (
+        f"user_id = {user_pk} AND ("
+        "(tx_type = %s AND reference LIKE %s) OR "
+        "(tx_type = %s AND reference LIKE %s)"
+        f")"
+    )
+    params: list[Any] = [debit, "withdrawal:%", adj, "withdrawal_reject:%"]
+    if since:
+        w_where += " AND created_at >= %s"
+        params.append(since)
+    frag_w, extra_w = _ledger_type_sql_withdrawal(typ)
+    w_where += frag_w
+    params.extend(extra_w)
+    return w_where, params
+
+
+def _ledger_union_sql_and_params(
+    user: User,
+    *,
+    period: str,
+    typ: str,
+) -> tuple[str, str, list[Any]]:
+    """Returns (count_sql, union_sql_without_limit_offset, params for count/union)."""
+    since = _period_start(period)
+    t = _parse_ledger_type(typ)
+
+    cl_table = CommissionLedger._meta.db_table
+    ms_table = MilestoneRecord._meta.db_table
+    wt_table = WalletTransaction._meta.db_table
+
+    params: list[Any] = []
+    c_where = f"recipient_id = {user.pk}"
+    if since:
+        c_where += " AND created_at >= %s"
+        params.append(since)
+    frag_c, extra_c = _ledger_type_sql_commission(t)
+    c_where += frag_c
+    params.extend(extra_c)
+
+    m_where = f"user_id = {user.pk}"
+    m_params: list[Any] = []
+    if since:
+        m_where += " AND created_at >= %s"
+        m_params.append(since)
+    frag_m, extra_m = _ledger_type_sql_milestone(t)
+    m_where += frag_m
+    m_params.extend(extra_m)
+
+    w_where, w_params = _ledger_wallet_where(user.pk, since, t)
+
+    all_params = params + m_params + w_params
+
+    count_sql = f"""
+        SELECT COUNT(*) FROM (
+            SELECT id FROM {cl_table} WHERE {c_where}
+            UNION ALL
+            SELECT id FROM {ms_table} WHERE {m_where}
+            UNION ALL
+            SELECT id FROM {wt_table} WHERE {w_where}
+        ) AS _cnt
+    """
+    union_sql = f"""
+        SELECT src, rid, created_at FROM (
+            SELECT 'c' AS src, id AS rid, created_at
+            FROM {cl_table} WHERE {c_where}
+            UNION ALL
+            SELECT 'm' AS src, id AS rid, created_at
+            FROM {ms_table} WHERE {m_where}
+            UNION ALL
+            SELECT 'w' AS src, id AS rid, created_at
+            FROM {wt_table} WHERE {w_where}
+        ) AS _u
+        ORDER BY created_at DESC, rid DESC
+    """
+    return count_sql, union_sql, all_params
+
+
+def _hydrate_ledger_keys(user: User, keys: list[tuple]) -> list[dict[str, Any]]:
+    c_ids = [rid for src, rid, _ in keys if src == "c"]
+    m_ids = [rid for src, rid, _ in keys if src == "m"]
+    wt_ids = [rid for src, rid, _ in keys if src == "w"]
+
+    comm_by_id = {
+        x.id: x
+        for x in CommissionLedger.objects.filter(id__in=c_ids).select_related("source_user", "order")
+    }
+    ms_by_id = {x.id: x for x in MilestoneRecord.objects.filter(id__in=m_ids)}
+    wt_by_id = {x.id: x for x in WalletTransaction.objects.filter(id__in=wt_ids)}
+
+    wr_ids = [
+        wid
+        for wt in wt_by_id.values()
+        if (wid := _withdrawal_id_from_transaction(wt)) is not None
+    ]
+    wr_by_id = {x.id: x for x in WithdrawalRequest.objects.filter(id__in=wr_ids)}
+
+    results: list[dict[str, Any]] = []
+    for src, rid, _ca in keys:
+        if src == "c":
+            row = comm_by_id.get(rid)
+            if row:
+                results.append(_serialize_commission(row))
+        elif src == "m":
+            row = ms_by_id.get(rid)
+            if row:
+                results.append(_serialize_milestone(row))
+        else:
+            wt = wt_by_id.get(rid)
+            if not wt:
+                continue
+            wr_id = _withdrawal_id_from_transaction(wt)
+            wr = wr_by_id.get(wr_id) if wr_id else None
+            if wt.tx_type == WalletTransaction.TxType.DEBIT:
+                results.append(_serialize_withdrawal_debit(wt, wr))
+            elif wt.tx_type == WalletTransaction.TxType.ADJUSTMENT:
+                results.append(_serialize_withdrawal_refund(wt, wr))
+    return results
+
+
+def _apply_ledger_running_balance(user_id: int, results: list[dict[str, Any]]) -> None:
+    balance = wallet_cash_balance(user_id)
+    for row in results:
+        bal_s = _fmt_money(balance)
+        row["balance"] = bal_s
+        row["running_balance"] = bal_s
+        row["tds_deducted"] = row["tds"]
+        row["net_credited"] = row["net"]
+        balance -= row.pop("_balance_delta", ZERO)
 
 
 def build_ledger(
@@ -519,47 +803,9 @@ def build_ledger(
     page = max(1, page)
     page_size = max(1, min(page_size, 100))
     offset = (page - 1) * page_size
-    since = _period_start(period)
-    t = _parse_ledger_type(typ)
 
-    cl_table = CommissionLedger._meta.db_table
-    ms_table = MilestoneRecord._meta.db_table
-
-    params: list[Any] = []
-    c_where = f"recipient_id = {user.pk}"
-    if since:
-        c_where += " AND created_at >= %s"
-        params.append(since)
-    frag_c, extra_c = _ledger_type_sql_commission(t)
-    c_where += frag_c
-    params.extend(extra_c)
-
-    m_where = f"user_id = {user.pk}"
-    if since:
-        m_where += " AND created_at >= %s"
-        params.append(since)
-    frag_m, extra_m = _ledger_type_sql_milestone(t)
-    m_where += frag_m
-    params.extend(extra_m)
-
-    count_sql = f"""
-        SELECT COUNT(*) FROM (
-            SELECT id FROM {cl_table} WHERE {c_where}
-            UNION ALL
-            SELECT id FROM {ms_table} WHERE {m_where}
-        ) AS _cnt
-    """
-    union_sql = f"""
-        SELECT src, rid, created_at FROM (
-            SELECT 'c' AS src, id AS rid, created_at
-            FROM {cl_table} WHERE {c_where}
-            UNION ALL
-            SELECT 'm' AS src, id AS rid, created_at
-            FROM {ms_table} WHERE {m_where}
-        ) AS _u
-        ORDER BY created_at DESC, rid DESC
-        LIMIT %s OFFSET %s
-    """
+    count_sql, union_sql, params = _ledger_union_sql_and_params(user, period=period, typ=typ)
+    union_sql += " LIMIT %s OFFSET %s"
 
     with connection.cursor() as cursor:
         cursor.execute(count_sql, params)
@@ -567,37 +813,8 @@ def build_ledger(
         cursor.execute(union_sql, params + [page_size, offset])
         keys = cursor.fetchall()
 
-    c_ids = [rid for src, rid, _ in keys if src == "c"]
-    m_ids = [rid for src, rid, _ in keys if src == "m"]
-
-    comm_by_id = {
-        x.id: x
-        for x in CommissionLedger.objects.filter(id__in=c_ids).select_related("source_user", "order")
-    }
-    ms_by_id = {x.id: x for x in MilestoneRecord.objects.filter(id__in=m_ids)}
-
-    results: list[dict[str, Any]] = []
-    for src, rid, _ca in keys:
-        if src == "c":
-            row = comm_by_id.get(rid)
-            if row:
-                results.append(_serialize_commission(row))
-        else:
-            row = ms_by_id.get(rid)
-            if row:
-                results.append(_serialize_milestone(row))
-
-    # Running balance walks newest-first from lifetime earnings (not cash_balance)
-    # so the figure represents "earned-to-date as of this row" and is unaffected
-    # by withdrawals.
-    balance = wallet_total_earned(user.pk)
-    for row in results:
-        bal_s = _fmt_money(balance)
-        row["balance"] = bal_s
-        row["running_balance"] = bal_s
-        row["tds_deducted"] = row["tds"]
-        row["net_credited"] = row["net"]
-        balance -= row.pop("_balance_delta", ZERO)
+    results = _hydrate_ledger_keys(user, keys)
+    _apply_ledger_running_balance(user.pk, results)
 
     return {
         "rows": results,
@@ -643,47 +860,10 @@ def build_ledger_export_rows(
     the worker; callers should expose `truncated` to the UI when this trips.
     """
     cap = max(1, min(int(limit), LEDGER_EXPORT_MAX_ROWS))
-    since = _period_start(period)
     t = _parse_ledger_type(typ)
 
-    cl_table = CommissionLedger._meta.db_table
-    ms_table = MilestoneRecord._meta.db_table
-
-    params: list[Any] = []
-    c_where = f"recipient_id = {user.pk}"
-    if since:
-        c_where += " AND created_at >= %s"
-        params.append(since)
-    frag_c, extra_c = _ledger_type_sql_commission(t)
-    c_where += frag_c
-    params.extend(extra_c)
-
-    m_where = f"user_id = {user.pk}"
-    if since:
-        m_where += " AND created_at >= %s"
-        params.append(since)
-    frag_m, extra_m = _ledger_type_sql_milestone(t)
-    m_where += frag_m
-    params.extend(extra_m)
-
-    count_sql = f"""
-        SELECT COUNT(*) FROM (
-            SELECT id FROM {cl_table} WHERE {c_where}
-            UNION ALL
-            SELECT id FROM {ms_table} WHERE {m_where}
-        ) AS _cnt
-    """
-    union_sql = f"""
-        SELECT src, rid, created_at FROM (
-            SELECT 'c' AS src, id AS rid, created_at
-            FROM {cl_table} WHERE {c_where}
-            UNION ALL
-            SELECT 'm' AS src, id AS rid, created_at
-            FROM {ms_table} WHERE {m_where}
-        ) AS _u
-        ORDER BY created_at DESC, rid DESC
-        LIMIT %s
-    """
+    count_sql, union_sql, params = _ledger_union_sql_and_params(user, period=period, typ=typ)
+    union_sql += " LIMIT %s"
 
     with connection.cursor() as cursor:
         cursor.execute(count_sql, params)
@@ -691,36 +871,8 @@ def build_ledger_export_rows(
         cursor.execute(union_sql, params + [cap])
         keys = cursor.fetchall()
 
-    c_ids = [rid for src, rid, _ in keys if src == "c"]
-    m_ids = [rid for src, rid, _ in keys if src == "m"]
-
-    comm_by_id = {
-        x.id: x
-        for x in CommissionLedger.objects.filter(id__in=c_ids).select_related("source_user", "order")
-    }
-    ms_by_id = {x.id: x for x in MilestoneRecord.objects.filter(id__in=m_ids)}
-
-    results: list[dict[str, Any]] = []
-    for src, rid, _ca in keys:
-        if src == "c":
-            row = comm_by_id.get(rid)
-            if row:
-                results.append(_serialize_commission(row))
-        else:
-            row = ms_by_id.get(rid)
-            if row:
-                results.append(_serialize_milestone(row))
-
-    # Export uses the same earned-to-date semantics as the paginated ledger so
-    # the CSV/PDF figures agree with what the UI shows.
-    balance = wallet_total_earned(user.pk)
-    for row in results:
-        bal_s = _fmt_money(balance)
-        row["balance"] = bal_s
-        row["running_balance"] = bal_s
-        row["tds_deducted"] = row["tds"]
-        row["net_credited"] = row["net"]
-        balance -= row.pop("_balance_delta", ZERO)
+    results = _hydrate_ledger_keys(user, keys)
+    _apply_ledger_running_balance(user.pk, results)
 
     return {
         "rows": results,
@@ -937,7 +1089,15 @@ def build_earnings_response(
             "period": _parse_period(period),
             "type": _parse_ledger_type(ledger_type),
             "periods": ["today", "7d", "30d", "fy", "all"],
-            "types": ["all", "direct", "passive", "milestone", "pending", "reversed"],
+            "types": [
+                "all",
+                "direct",
+                "passive",
+                "milestone",
+                "pending",
+                "reversed",
+                "withdrawal",
+            ],
         }
         data["ledger"] = build_ledger(
             user,

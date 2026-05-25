@@ -15,7 +15,7 @@ from apps.mlm_tree.services import BinaryTreeService
 from apps.payments.models import Order
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
-from apps.wallet.models import Wallet
+from apps.wallet.models import Wallet, WithdrawalRequest
 from apps.wallet.services.member_money import build_commissions_summary, get_wallet_row
 
 
@@ -70,9 +70,55 @@ def _three_level_tree():
     buyer.is_member = True
     buyer.save()
     BinaryTreeService.place_member(buyer, sponsor)
+    approved_at = timezone.now()
     for u in (root, sponsor, buyer):
         MemberComplianceProfile.objects.get_or_create(user=u)
+        if not u.kyc_first_approved_at:
+            u.kyc_first_approved_at = approved_at
+            u.save(update_fields=["kyc_first_approved_at"])
     return root, sponsor, buyer
+
+
+def _finance_admin() -> User:
+    mid, ref, link = allocate_member_identity()
+    return User.objects.create_user(
+        login_identifier="earn-bundle-fin@test.dev",
+        password="pw",
+        email="earn-bundle-fin@test.dev",
+        full_name="Finance Earn",
+        member_id=mid,
+        referral_code=ref,
+        referral_link=link,
+        role=User.Role.FINANCE,
+        is_staff=True,
+    )
+
+
+def _prepare_sponsor_for_withdrawal(sponsor: User) -> None:
+    SystemConfig.objects.filter(pk=1).update(cooling_off_days=0)
+    Wallet.objects.filter(user=sponsor).update(
+        cash_balance=Decimal("500"),
+        current_band=1,
+    )
+    User.objects.filter(pk=sponsor.pk).update(upi_id="sponsor@okhdfcbank")
+    sponsor.refresh_from_db()
+
+
+def _paid_order_for_buyer(buyer: User, order_number: str) -> Order:
+    return Order.objects.create(
+        user=buyer,
+        order_number=order_number,
+        base_price=Decimal("200"),
+        gst_amount=Decimal("36"),
+        gateway_charge=Decimal("5.72"),
+        total_amount=Decimal("241.72"),
+        discount_amount=Decimal("0"),
+        amount_paid=Decimal("241.72"),
+        is_retail_purchase=False,
+        status=Order.Status.PAID,
+        paid_at=timezone.now(),
+        refund_eligible_until=timezone.now() - timezone.timedelta(days=1),
+    )
 
 
 @pytest.mark.django_db
@@ -171,7 +217,8 @@ def test_user_payouts_bundle_ladder_length(system_config):
     sponsor.save()
     BinaryTreeService.place_member(sponsor, None)
     sponsor.kyc_status = User.KYCStatus.VERIFIED
-    sponsor.save(update_fields=["kyc_status"])
+    sponsor.kyc_first_approved_at = timezone.now()
+    sponsor.save(update_fields=["kyc_status", "kyc_first_approved_at"])
     MemberComplianceProfile.objects.create(user=sponsor)
     Wallet.objects.filter(user=sponsor).update(total_earned=Decimal("5000"))
     User.objects.filter(pk=sponsor.pk).update(
@@ -226,7 +273,100 @@ def test_earnings_bundle_query_budget(system_config):
     client.force_authenticate(user=root)
     with CaptureQueriesContext(connection) as ctx:
         client.get("/api/v1/user/earnings/?include=overview,ledger")
-    assert len(ctx.captured_queries) <= 28
+    assert len(ctx.captured_queries) <= 32
+
+
+@pytest.mark.django_db
+def test_user_earnings_ledger_includes_pending_withdrawal_row(system_config):
+    _root, sponsor, buyer = _three_level_tree()
+    CommissionEngine.process_order(_paid_order_for_buyer(buyer, "ORD-WD-1"))
+    _prepare_sponsor_for_withdrawal(sponsor)
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+
+    before = client.get("/api/v1/user/earnings/?include=ledger&page_size=5")
+    assert before.status_code == 200
+    rows_before = before.json()["data"]["ledger"]["rows"]
+    commission_row = next(r for r in rows_before if r["kind"] == "COMMISSION")
+    balance_before_withdraw = commission_row["running_balance"]
+
+    wd = client.post(
+        "/api/v1/user/wallet/withdraw/",
+        {"band": 1, "amount": "200", "method": "UPI"},
+        format="json",
+    )
+    assert wd.status_code == 200
+
+    wallet = get_wallet_row(sponsor)
+    after = client.get("/api/v1/user/earnings/?include=ledger&page_size=5")
+    assert after.status_code == 200
+    rows = after.json()["data"]["ledger"]["rows"]
+    assert rows[0]["kind"] == "WITHDRAWAL"
+    assert Decimal(rows[0]["gross"]) == Decimal("-200.00")
+    assert Decimal(rows[0]["net"]) == Decimal("-200.00")
+    assert rows[0]["status"] == WithdrawalRequest.Status.PENDING
+    assert rows[0]["running_balance"] == str(wallet.cash_balance)
+
+    commission_after = next(r for r in rows if r["kind"] == "COMMISSION")
+    assert commission_after["running_balance"] == balance_before_withdraw
+
+
+@pytest.mark.django_db
+def test_user_earnings_ledger_includes_refund_row_when_rejected(system_config):
+    _root, sponsor, buyer = _three_level_tree()
+    CommissionEngine.process_order(_paid_order_for_buyer(buyer, "ORD-WD-2"))
+    _prepare_sponsor_for_withdrawal(sponsor)
+
+    member_client = APIClient()
+    member_client.force_authenticate(user=sponsor)
+    wd = member_client.post(
+        "/api/v1/user/wallet/withdraw/",
+        {"band": 1, "amount": "200", "method": "UPI"},
+        format="json",
+    )
+    assert wd.status_code == 200
+    wr_id = wd.json()["data"]["id"]
+
+    admin_client = APIClient()
+    admin_client.force_authenticate(user=_finance_admin())
+    reject = admin_client.post(
+        f"/api/v1/admin/withdrawals/{wr_id}/reject/",
+        {"reason": "test reject"},
+        format="json",
+    )
+    assert reject.status_code == 200
+
+    wallet = get_wallet_row(sponsor)
+    r = member_client.get("/api/v1/user/earnings/?include=ledger&page_size=10")
+    rows = r.json()["data"]["ledger"]["rows"]
+    assert rows[0]["kind"] == "WITHDRAWAL_REFUND"
+    assert Decimal(rows[0]["gross"]) == Decimal("200.00")
+    assert rows[1]["kind"] == "WITHDRAWAL"
+    assert rows[1]["status"] == WithdrawalRequest.Status.REJECTED
+    assert rows[0]["running_balance"] == str(wallet.cash_balance)
+
+
+@pytest.mark.django_db
+def test_user_earnings_ledger_type_filter_withdrawal(system_config):
+    _root, sponsor, buyer = _three_level_tree()
+    CommissionEngine.process_order(_paid_order_for_buyer(buyer, "ORD-WD-3"))
+    _prepare_sponsor_for_withdrawal(sponsor)
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+    client.post(
+        "/api/v1/user/wallet/withdraw/",
+        {"band": 1, "amount": "200", "method": "UPI"},
+        format="json",
+    )
+
+    r = client.get("/api/v1/user/earnings/?include=ledger&type=withdrawal")
+    assert r.status_code == 200
+    ledger = r.json()["data"]["ledger"]
+    assert ledger["total_count"] >= 1
+    assert all(row["kind"] in ("WITHDRAWAL", "WITHDRAWAL_REFUND") for row in ledger["rows"])
+    assert "withdrawal" in r.json()["data"]["filters"]["types"]
 
 
 @pytest.mark.django_db
@@ -245,7 +385,8 @@ def test_payouts_bundle_query_budget(system_config):
     sponsor.save()
     BinaryTreeService.place_member(sponsor, None)
     sponsor.kyc_status = User.KYCStatus.VERIFIED
-    sponsor.save(update_fields=["kyc_status"])
+    sponsor.kyc_first_approved_at = timezone.now()
+    sponsor.save(update_fields=["kyc_status", "kyc_first_approved_at"])
     MemberComplianceProfile.objects.create(user=sponsor)
 
     client = APIClient()
