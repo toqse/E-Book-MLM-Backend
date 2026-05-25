@@ -114,7 +114,14 @@ def referral_list(request: Request):
             is_retail_purchase=False,
         )
         qs = qs.filter(Exists(mlm_paid_order)).filter(binary_node__isnull=True)
-    rows = list(qs[:50])
+
+    page = _parse_int(request.query_params.get("page"), 1, min_v=1, max_v=10_000)
+    page_size = _parse_int(request.query_params.get("page_size"), 20, min_v=1, max_v=100)
+    count = qs.count()
+    total_pages = (count + page_size - 1) // page_size if count else 0
+    start = (page - 1) * page_size
+    rows = list(qs[start : start + page_size])
+
     data = []
     for x in rows:
         row = {
@@ -131,7 +138,13 @@ def referral_list(request: Request):
                 row["placement_status"] = po.placement_status
                 row["placement_order_id"] = po.id
         data.append(row)
-    payload: dict = {"results": data, "count": qs.count()}
+    payload: dict = {
+        "results": data,
+        "count": count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
     if pending:
         payload["pending_placement"] = True
         ctx = team_services.build_subtree_context(request.user)

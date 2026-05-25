@@ -144,7 +144,10 @@ def admin_binary_tree_pending_placements(request: Request):
         sponsor = buyer.sponsor
         hrs = None
         if o.placement_deadline_at:
-            hrs = max(0.0, (o.placement_deadline_at - now).total_seconds() / 3600.0)
+            hrs = round(
+                max(0.0, (o.placement_deadline_at - now).total_seconds() / 3600.0),
+                3,
+            )
         results.append(
             {
                 "order_id": o.id,

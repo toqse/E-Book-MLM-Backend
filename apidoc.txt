@@ -491,11 +491,14 @@ GET /api/v1/user/referral/stats/
 
 GET /api/v1/user/referral/list/
   Auth: Bearer.
-  Query: optional pending_placement=true|false (also 1, yes, on for true).
-    When true: only direct referrals who (a) have at least one PAID non-retail
-    (MLM) order and (b) have no binary_node yet — i.e. purchased a book but
-    binary placement did not succeed or has not completed.
-  KYC gate (when pending_placement=true):
+  Query:
+    - pending_placement=true|false (also 1, yes, on for true) — optional filter.
+        When true: only direct referrals who (a) have at least one PAID non-retail
+        (MLM) order and (b) have no binary_node yet — i.e. purchased a book but
+        binary placement did not succeed or has not completed.
+    - page=<int>          optional, default 1, min 1, max 10000.
+    - page_size=<int>     optional, default 20, min 1, max 100.
+  KYC gate (applies to both pending_placement=true and the unfiltered list):
     Caller must have kyc_status VERIFIED and a MemberComplianceProfile on file.
     Errors: 403 — { errors: { detail: "kyc_required" | "compliance_profile_required" } }.
   Success data: {
@@ -504,9 +507,14 @@ GET /api/v1/user/referral/list/
         optional when pending_placement: "placement_deadline_at" (ISO8601|null),
         "placement_status" (PENDING|FAILED|null if legacy row),
         "placement_order_id" (int|null) }
-    ]   (truncated at 50),
+    ],
     "count": <full queryset count>,
-    "pending_placement": true   (only present when that filter was requested)
+    "page": <int>,
+    "page_size": <int>,
+    "total_pages": <int>,                  // 0 when count=0
+    "pending_placement": true,             // only present when that filter was requested
+    "viewer_leg_counts": { "left", "right" },  // only when pending_placement=true
+    "suggested_leg": "LEFT" | "RIGHT"          // only when pending_placement=true
   }
 
 
