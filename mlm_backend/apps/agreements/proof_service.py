@@ -15,13 +15,24 @@ from django.db.models import Max
 from django.utils import timezone
 
 from apps.agreements.models import (
-    AgreementCategory,
     UserAgreementAcceptance,
     UserAgreementAcceptanceDeclaration,
     UserAgreementAcceptanceProof,
 )
 from apps.agreements.proof_pdf import build_acceptance_proof_pdf_bytes
 from apps.users.models import User
+
+
+def _read_document_pdf_bytes(document) -> bytes | None:
+    """Read the uploaded ``LegalDocument.pdf_file`` bytes (returns None on missing/error)."""
+    pdf_file = getattr(document, "pdf_file", None)
+    if not pdf_file or not getattr(pdf_file, "name", "").strip():
+        return None
+    try:
+        with pdf_file.open("rb") as fh:
+            return fh.read()
+    except Exception:
+        return None
 
 
 def _signing_secret() -> bytes:
@@ -209,12 +220,16 @@ def ensure_proof_for_batch(user: User, batch_id: UUID) -> Optional[UserAgreement
         else:
             loc_line = "India"
 
-        # Embedded policy text begins on PDF page 2: KYC & Identity agreements accepted in this batch.
-        kyc_identity = AgreementCategory.KYC_IDENTITY.value
-        agreement_appendix = [
-            (r.document.name, r.version_accepted, r.document.content_html or "")
+        # Leading pages embed each accepted document's uploaded PDF (preferred) or
+        # fall back to a plain-text rendering of its content_html.
+        agreement_documents = [
+            {
+                "name": r.document.name,
+                "version": r.version_accepted,
+                "pdf_bytes": _read_document_pdf_bytes(r.document),
+                "content_html": r.document.content_html or "",
+            }
             for r in rows
-            if (r.document.category or "").strip() == kyc_identity
         ]
         pdf_bytes = build_acceptance_proof_pdf_bytes(
             user_id=user.id,
@@ -228,7 +243,7 @@ def ensure_proof_for_batch(user: User, batch_id: UUID) -> Optional[UserAgreement
             declaration_text=declaration,
             signed_by_display=signed_by,
             location_display=loc_line,
-            agreement_appendix=agreement_appendix,
+            agreement_documents=agreement_documents,
         )
         safe_batch = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(batch_id))[:48]
         filename = f"acceptance_proof_{user.id}_{safe_batch}.pdf"
