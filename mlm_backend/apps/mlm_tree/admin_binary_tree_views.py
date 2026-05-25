@@ -233,7 +233,9 @@ def admin_binary_tree_tree_view(request: Request):
 def admin_binary_tree_members_list(request: Request):
     q = (request.query_params.get("q") or "").strip()
     level = request.query_params.get("level")
-    qs = BinaryNode.objects.select_related("user", "parent", "parent__user")
+    qs = BinaryNode.objects.select_related(
+        "user", "user__sponsor", "parent", "parent__user"
+    )
 
     if q:
         qs = qs.filter(Q(user__member_id__icontains=q) | Q(user__full_name__icontains=q))
@@ -246,11 +248,30 @@ def admin_binary_tree_members_list(request: Request):
 
     qs = qs.order_by("level", "id")
     paged, page, page_size = _paginate(qs, request, default_size=50, max_size=200)
+    paged_list = list(paged)
+
+    # Resolve representative placement_status per user: earliest paid non-retail order.
+    # That row is the one the placement engine queues / resolves first.
+    user_ids = [n.user_id for n in paged_list]
+    placement_by_user: dict[int, str | None] = {}
+    if user_ids:
+        for uid, ps in (
+            Order.objects.filter(
+                user_id__in=user_ids,
+                status=Order.Status.PAID,
+                is_retail_purchase=False,
+            )
+            .order_by("user_id", "id")
+            .values_list("user_id", "placement_status")
+        ):
+            if uid not in placement_by_user:
+                placement_by_user[uid] = ps
 
     results = []
-    for n in paged:
+    for n in paged_list:
         u = n.user
-        p = n.parent.user if n.parent_id else None
+        binary_parent_user = n.parent.user if n.parent_id else None
+        sponsor_user = u.sponsor if u.sponsor_id else None
         left_dl = int(n.left_subtree_size or 0)
         right_dl = int(n.right_subtree_size or 0)
         if left_dl < right_dl:
@@ -265,13 +286,33 @@ def admin_binary_tree_members_list(request: Request):
                 "member_id": u.member_id,
                 "full_name": u.full_name,
                 "level": n.level,
+                # referral_parent = the user who referred this member (their sponsor).
+                # Null only when the member truly has no sponsor (e.g. company root admin).
                 "referral_parent": (
-                    {"user_id": p.id, "member_id": p.member_id, "full_name": p.full_name} if p else None
+                    {
+                        "user_id": sponsor_user.id,
+                        "member_id": sponsor_user.member_id,
+                        "full_name": sponsor_user.full_name,
+                    }
+                    if sponsor_user
+                    else None
+                ),
+                # binary_parent = the immediate parent node in the binary tree (may differ
+                # from the sponsor due to spillover). Null only for binary-tree roots.
+                "binary_parent": (
+                    {
+                        "user_id": binary_parent_user.id,
+                        "member_id": binary_parent_user.member_id,
+                        "full_name": binary_parent_user.full_name,
+                    }
+                    if binary_parent_user
+                    else None
                 ),
                 "leg_position": n.position,
                 "left_dl": left_dl,
                 "right_dl": right_dl,
                 "weak_leg": weak,
+                "placement_status": placement_by_user.get(u.id),
                 "status": {
                     "account_status": u.account_status,
                     "kyc_status": u.kyc_status,
