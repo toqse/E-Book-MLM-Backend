@@ -149,3 +149,35 @@ def test_admin_place_under_parent_denied_after_cooloff(system_config):
     )
     assert r.status_code == 400
 
+
+@pytest.mark.django_db
+def test_admin_pending_binary_placements_excludes_super_admin(system_config):
+    admin = _admin()
+    client = APIClient()
+    client.force_authenticate(user=admin)
+
+    super_admin_order = _paid_order(
+        admin,
+        suffix="admin",
+        placement_status=Order.PlacementStatus.PENDING,
+        placement_deadline_at=timezone.now() + timedelta(hours=24),
+    )
+
+    sponsor = _member("+919000000021", name="Sponsor")
+    member = _member("+919000000022", sponsor=sponsor, name="Member")
+    member_order = _paid_order(
+        member,
+        suffix="member",
+        placement_status=Order.PlacementStatus.PENDING,
+        placement_deadline_at=timezone.now() + timedelta(hours=24),
+    )
+
+    r = client.get("/api/v1/admin/binary-tree/placements/pending/")
+
+    assert r.status_code == 200, r.content
+    body = r.json()["data"]
+    order_ids = {row["order_id"] for row in body["results"]}
+    assert member_order.id in order_ids
+    assert super_admin_order.id not in order_ids
+    assert body["count"] == 1
+

@@ -23,6 +23,14 @@ ADMIN_BINARY_TREE_DEPTH_DEFAULT = 2
 ADMIN_BINARY_TREE_DEPTH_MAX = 10
 
 
+def _pending_binary_placement_orders():
+    return Order.objects.filter(
+        placement_status__in=(Order.PlacementStatus.PENDING, Order.PlacementStatus.FAILED),
+        status=Order.Status.PAID,
+        is_retail_purchase=False,
+    ).exclude(Q(user__role=User.Role.SUPER_ADMIN) | Q(user__is_superuser=True))
+
+
 def _parse_int(raw: Any, *, default: int, lo: int, hi: int) -> int:
     try:
         v = int(raw)
@@ -46,11 +54,7 @@ def admin_binary_tree_dashboard(request: Request):
     cfg = get_system_config()
     now = timezone.now()
 
-    pending_orders = Order.objects.filter(
-        placement_status__in=(Order.PlacementStatus.PENDING, Order.PlacementStatus.FAILED),
-        status=Order.Status.PAID,
-        is_retail_purchase=False,
-    )
+    pending_orders = _pending_binary_placement_orders()
     pending_placements_count = pending_orders.count()
 
     # Empty slots = count of NULL left + NULL right pointers across all nodes.
@@ -119,11 +123,7 @@ def admin_binary_tree_dashboard(request: Request):
 @permission_classes([IsAdminRole])
 def admin_binary_tree_pending_placements(request: Request):
     q = (request.query_params.get("q") or "").strip()
-    qs = Order.objects.filter(
-        placement_status__in=(Order.PlacementStatus.PENDING, Order.PlacementStatus.FAILED),
-        status=Order.Status.PAID,
-        is_retail_purchase=False,
-    ).select_related("user", "user__sponsor")
+    qs = _pending_binary_placement_orders().select_related("user", "user__sponsor")
 
     if q:
         qs = qs.filter(
@@ -354,11 +354,7 @@ def admin_binary_tree_weak_leg_report(request: Request):
     members_with_weak_leg = base.filter(diff__gt=0).count()
     imbalanced_ratio_gt_3_1 = base.filter(weak__gt=0, strong__gte=F("weak") * 3).count()
 
-    pending_placements = Order.objects.filter(
-        placement_status__in=(Order.PlacementStatus.PENDING, Order.PlacementStatus.FAILED),
-        status=Order.Status.PAID,
-        is_retail_purchase=False,
-    ).count()
+    pending_placements = _pending_binary_placement_orders().count()
 
     slots = BinaryNode.objects.aggregate(
         empty_left=Sum(
