@@ -587,7 +587,10 @@ def build_ledger(
             if row:
                 results.append(_serialize_milestone(row))
 
-    balance = wallet_cash_balance(user.pk)
+    # Running balance walks newest-first from lifetime earnings (not cash_balance)
+    # so the figure represents "earned-to-date as of this row" and is unaffected
+    # by withdrawals.
+    balance = wallet_total_earned(user.pk)
     for row in results:
         bal_s = _fmt_money(balance)
         row["balance"] = bal_s
@@ -607,6 +610,16 @@ def build_ledger(
 def wallet_cash_balance(user_id: int) -> Decimal:
     w, _ = Wallet.objects.get_or_create(user_id=user_id)
     return w.cash_balance or ZERO
+
+
+def wallet_total_earned(user_id: int) -> Decimal:
+    """Lifetime earnings (sum of credited commissions + milestones, net of reversals).
+
+    Used as the base for the earnings-ledger running balance so that withdrawals
+    do not push the displayed running total negative.
+    """
+    w, _ = Wallet.objects.get_or_create(user_id=user_id)
+    return w.total_earned or ZERO
 
 
 # Hard upper bound to keep export queries bounded for very active members.
@@ -698,7 +711,9 @@ def build_ledger_export_rows(
             if row:
                 results.append(_serialize_milestone(row))
 
-    balance = wallet_cash_balance(user.pk)
+    # Export uses the same earned-to-date semantics as the paginated ledger so
+    # the CSV/PDF figures agree with what the UI shows.
+    balance = wallet_total_earned(user.pk)
     for row in results:
         bal_s = _fmt_money(balance)
         row["balance"] = bal_s

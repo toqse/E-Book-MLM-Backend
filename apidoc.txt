@@ -775,17 +775,19 @@ GET /api/v1/user/earnings/
     source { member_id, full_name }|omitted (duplicate of triggered_by when present),
     referrals (int, milestone rows only),
     order_id (commissions, if present),
-    balance, running_balance (same decimal string; approximate running cash after this line when
-    walking newest-first — see note below),
+    balance, running_balance (same decimal string; lifetime earnings-to-date as of this line
+    when walking newest-first — see note below),
   Notes:
     - summary.wallet values are decimal strings. locked = cash not yet withdrawable under the wallet cooling
       window (length = SystemConfig.cooling_off_days, echoed as cooling_days on GET /api/v1/user/payouts/ and
       GET /api/v1/user/wallet/); available_to_withdraw matches withdrawal checks. For TDS and richer wallet fields
       use GET /api/v1/user/payouts/.
-    - balance / running_balance are emitted per returned row in descending time order; they only
-      reflect commission+milestone lines on this feed (withdrawals and other wallet movements are
-      not included). REVERSED rows adjust the walk so running totals are less wrong than treating
-      them as credits.
+    - balance / running_balance are emitted per returned row in descending time order. The walk
+      starts from Wallet.total_earned (lifetime earnings, net of reversals) and subtracts each
+      row's net contribution as it moves to older rows, so the value reads as "earned-to-date as
+      of this line". Withdrawals and other wallet movements are intentionally excluded so the
+      figure cannot go negative after a member withdraws their balance. REVERSED rows adjust
+      the walk so the totals remain consistent.
     - Per-line tds may be 0 until engine writes tds_deducted.
     - Slots amount = count(REDEEMED sponsor codes issued to you) × ₹100 display unit.
     - `page` and `page_size` are clamped server-side: `page` >= 1, `page_size` in [1..100].
