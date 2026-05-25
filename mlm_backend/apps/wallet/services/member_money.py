@@ -20,12 +20,9 @@ from apps.admin_panel.utils import get_system_config
 from apps.commissions.models import CommissionLedger, MilestoneRecord
 from apps.sponsor_slots.models import SponsorSlotCode
 from apps.users.models import User
-from apps.wallet.bands import BAND_EDGES
+from apps.wallet.bands import BAND_EDGES, SLOT_BAND_NUMBERS
 from apps.wallet.models import Wallet, WalletTransaction, WithdrawalRequest
 
-SLOT_BAND_NUMBERS = frozenset({2, 4, 6, 8})
-# Display value per redeemed sponsor code (issuer); aligns with common UI copy.
-SLOT_LEDGER_UNIT_VALUE = Decimal("100")
 ZERO = Decimal("0")
 
 
@@ -205,12 +202,23 @@ def milestone_net_total(user_id: int) -> Decimal:
     return s or ZERO
 
 
-def slot_issuer_display_total(user_id: int) -> tuple[Decimal, int]:
+def slot_issuer_display_total(
+    user_id: int, unit_value: Decimal | None = None
+) -> tuple[Decimal, int]:
+    """Aggregate the issuer-side display total for redeemed sponsor codes.
+
+    `unit_value` is the per-code display amount, normally the live ebook base
+    price (`SystemConfig.product_base_price`). Falls back to that config when
+    not supplied so older callers keep working.
+    """
     n = SponsorSlotCode.objects.filter(
         issued_to_id=user_id,
         status=SponsorSlotCode.Status.REDEEMED,
     ).count()
-    return (Decimal(n) * SLOT_LEDGER_UNIT_VALUE, n)
+    if unit_value is None:
+        cfg = get_system_config()
+        unit_value = cfg.product_base_price or ZERO
+    return (Decimal(n) * (unit_value or ZERO), n)
 
 
 def build_commissions_summary(user: User, cfg: SystemConfig, wallet: Wallet) -> dict[str, str]:
@@ -229,7 +237,8 @@ def build_commissions_summary(user: User, cfg: SystemConfig, wallet: Wallet) -> 
 def build_overview(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str, Any]:
     agg = commission_aggregates_for_user(user.pk)
     ms_total = milestone_net_total(user.pk)
-    slot_amt, slot_n = slot_issuer_display_total(user.pk)
+    slot_unit = cfg.product_base_price or ZERO
+    slot_amt, slot_n = slot_issuer_display_total(user.pk, slot_unit)
     hold = refund_window_hold_net(user.pk)
     direct = agg["direct_net"] or ZERO
     passive = agg["passive_net"] or ZERO
@@ -256,7 +265,7 @@ def build_overview(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str, A
             "slots": {
                 "amount": str(slot_amt),
                 "codes_redeemed": slot_n,
-                "unit_amount": str(SLOT_LEDGER_UNIT_VALUE),
+                "unit_amount": str(slot_unit),
             },
         },
         "wallet": {
@@ -296,7 +305,8 @@ def _band_text(current_band: int) -> tuple[str, str]:
 def build_ui_summary(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str, Any]:
     agg = commission_aggregates_for_user(user.pk)
     ms_total = milestone_net_total(user.pk)
-    slot_amt, slot_n = slot_issuer_display_total(user.pk)
+    slot_unit = cfg.product_base_price or ZERO
+    slot_amt, slot_n = slot_issuer_display_total(user.pk, slot_unit)
     direct = agg["direct_net"] or ZERO
     passive = agg["passive_net"] or ZERO
     cap = cfg.earning_cap or ZERO
@@ -348,7 +358,7 @@ def build_ui_summary(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str,
             "slots": {
                 "amount": _fmt_money(slot_amt),
                 "redeemed": slot_n,
-                "unit": _fmt_money(SLOT_LEDGER_UNIT_VALUE),
+                "unit": _fmt_money(slot_unit),
             },
         },
         "band": {
@@ -413,16 +423,26 @@ def _serialize_commission(row: CommissionLedger) -> dict[str, Any]:
         triggered = {"member_id": src.member_id, "full_name": src.full_name}
     net = row.net_amount or ZERO
     st = row.status
-    if st == CommissionLedger.Status.CREDITED:
+    held = bool(row.slot_band_held)
+    if held:
+        # Slot-band-held credits never touched cash_balance and their reversal
+        # never decremented cash either, so the running-balance walk must stay
+        # flat across them in both states.
+        balance_delta = ZERO
+    elif st == CommissionLedger.Status.CREDITED:
         balance_delta = net
     elif st == CommissionLedger.Status.REVERSED:
-        # Backward running-balance walk: reversal removed cash; undo by adding net.
         balance_delta = -net
     else:
         balance_delta = ZERO
     level = _commission_level_label(row.commission_type)
     desc = _commission_description(row)
+    if held:
+        desc = f"{desc} (Slot fund)"
     date_s, time_s = _fmt_date_time(row.created_at)
+    status_label = _ledger_status_label(row.status)
+    if held and st == CommissionLedger.Status.CREDITED:
+        status_label = f"{status_label} (Slot fund)"
     out: dict[str, Any] = {
         "id": row.id,
         "kind": "COMMISSION",
@@ -438,7 +458,9 @@ def _serialize_commission(row: CommissionLedger) -> dict[str, Any]:
         "tds": _fmt_money(row.tds_deducted),
         "net": _fmt_money(net),
         "status": row.status,
-        "status_label": _ledger_status_label(row.status),
+        "status_label": status_label,
+        "slot_band_held": held,
+        "cash_credited": (st == CommissionLedger.Status.CREDITED) and not held,
         "_balance_delta": balance_delta,
     }
     if level is not None:
@@ -462,8 +484,18 @@ def _milestone_display_type(status: str) -> str:
 
 def _serialize_milestone(row: MilestoneRecord) -> dict[str, Any]:
     net = row.net_bonus or ZERO
+    held = bool(row.slot_band_held)
     desc = f"Milestone bonus — {row.milestone_referrals} direct referrals"
+    if held:
+        desc = f"{desc} (Slot fund)"
     date_s, time_s = _fmt_date_time(row.created_at)
+    status_label = _ledger_status_label(row.status)
+    if held and row.status == "CREDITED":
+        status_label = f"{status_label} (Slot fund)"
+    if held:
+        balance_delta = ZERO
+    else:
+        balance_delta = net if row.status == "CREDITED" else ZERO
     return {
         "id": row.id,
         "kind": "MILESTONE",
@@ -480,9 +512,11 @@ def _serialize_milestone(row: MilestoneRecord) -> dict[str, Any]:
         "tds": _fmt_money(row.tds_deducted),
         "net": _fmt_money(net),
         "status": row.status,
-        "status_label": _ledger_status_label(row.status),
+        "status_label": status_label,
         "referrals": int(row.milestone_referrals),
-        "_balance_delta": net if row.status == "CREDITED" else ZERO,
+        "slot_band_held": held,
+        "cash_credited": (row.status == "CREDITED") and not held,
+        "_balance_delta": balance_delta,
     }
 
 

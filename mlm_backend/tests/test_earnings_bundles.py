@@ -10,12 +10,13 @@ from rest_framework.test import APIClient
 from apps.admin_panel.models import SystemConfig
 from apps.agreements.models import MemberComplianceProfile
 from apps.commissions.engine import CommissionEngine
-from apps.commissions.models import CommissionLedger
+from apps.commissions.models import CommissionLedger, MilestoneRecord
 from apps.mlm_tree.services import BinaryTreeService
 from apps.payments.models import Order
+from apps.sponsor_slots.models import SponsorSlotBatch, SponsorSlotCode
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
-from apps.wallet.models import Wallet, WithdrawalRequest
+from apps.wallet.models import Wallet, WalletTransaction, WithdrawalRequest
 from apps.wallet.services.member_money import build_commissions_summary, get_wallet_row
 
 
@@ -426,3 +427,243 @@ def test_payouts_bundle_query_budget(system_config):
     with CaptureQueriesContext(connection) as ctx:
         client.get("/api/v1/user/payouts/?movements=true")
     assert len(ctx.captured_queries) <= 22
+
+
+# ---------------------------------------------------------------------------
+# Slot-band commission routing
+# ---------------------------------------------------------------------------
+
+def _seed_redeemed_slot(sponsor: User, *, count: int = 1) -> None:
+    batch = SponsorSlotBatch.objects.create(
+        issued_to=sponsor,
+        band_number=2,
+        total_codes=count,
+        expires_at=timezone.now() + timezone.timedelta(days=30),
+    )
+    for i in range(count):
+        SponsorSlotCode.objects.create(
+            batch=batch,
+            issued_to=sponsor,
+            code=f"SP-RDM-{sponsor.pk}-{i}",
+            status=SponsorSlotCode.Status.REDEEMED,
+            expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+
+
+@pytest.mark.django_db
+def test_slots_unit_follows_product_base_price(system_config):
+    _root, sponsor, _buyer = _three_level_tree()
+    _seed_redeemed_slot(sponsor, count=2)
+    SystemConfig.objects.filter(pk=1).update(product_base_price=Decimal("241.72"))
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+    r = client.get("/api/v1/user/earnings/?include=overview")
+    assert r.status_code == 200
+    slots = r.json()["data"]["summary"]["income"]["slots"]
+    assert slots["redeemed"] == 2
+    assert Decimal(slots["unit"]) == Decimal("241.72")
+    assert Decimal(slots["amount"]) == Decimal("483.44")
+
+
+@pytest.mark.django_db
+def test_commission_in_slot_band_does_not_credit_cash(system_config):
+    _root, sponsor, buyer = _three_level_tree()
+    # Position sponsor inside band 2 (slot band).
+    Wallet.objects.update_or_create(
+        user=sponsor,
+        defaults={
+            "cash_balance": Decimal("0"),
+            "total_earned": Decimal("4000"),
+            "current_band": 2,
+        },
+    )
+
+    CommissionEngine.process_order(_paid_order_for_buyer(buyer, "ORD-SLOT-BAND-1"))
+
+    sponsor_wallet = get_wallet_row(sponsor)
+    assert sponsor_wallet.cash_balance == Decimal("0"), (
+        "slot-band credits must not bump cash_balance"
+    )
+    assert sponsor_wallet.total_earned == Decimal("4030"), (
+        "slot-band credits must still bump total_earned"
+    )
+    direct_row = CommissionLedger.objects.get(
+        recipient=sponsor,
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+        order__order_number="ORD-SLOT-BAND-1",
+    )
+    assert direct_row.slot_band_held is True
+    assert direct_row.status == CommissionLedger.Status.CREDITED
+    # No WalletTransaction CREDIT row should have been emitted for the held credit.
+    assert not WalletTransaction.objects.filter(
+        user=sponsor,
+        tx_type=WalletTransaction.TxType.CREDIT,
+        reference="COMM-ORD-SLOT-BAND-1",
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_milestone_in_slot_band_does_not_credit_cash(system_config):
+    _root, sponsor, buyer = _three_level_tree()
+    Wallet.objects.update_or_create(
+        user=sponsor,
+        defaults={
+            "cash_balance": Decimal("0"),
+            "total_earned": Decimal("4000"),
+            "current_band": 2,
+        },
+    )
+    # Position sponsor at the milestone-1 trigger threshold (10 direct refs).
+    # After the next order processes, direct_referral_count is bumped to 10
+    # and `_maybe_milestone` fires.
+    User.objects.filter(pk=sponsor.pk).update(direct_referral_count=9)
+    sponsor.refresh_from_db()
+
+    CommissionEngine.process_order(_paid_order_for_buyer(buyer, "ORD-SLOT-BAND-2"))
+
+    sponsor_wallet = get_wallet_row(sponsor)
+    assert sponsor_wallet.cash_balance == Decimal("0")
+    ms = MilestoneRecord.objects.filter(user=sponsor).order_by("-id").first()
+    assert ms is not None
+    assert ms.status == "CREDITED"
+    assert ms.slot_band_held is True
+    assert not WalletTransaction.objects.filter(
+        user=sponsor,
+        tx_type=WalletTransaction.TxType.CREDIT,
+        reference=f"MILESTONE-{ms.milestone_referrals}",
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_slot_band_held_rows_do_not_shift_running_balance(system_config):
+    _root, sponsor, buyer = _three_level_tree()
+    # Pre-existing CREDITED row in a cash band — bumps cash to 30.
+    Wallet.objects.update_or_create(
+        user=sponsor,
+        defaults={
+            "cash_balance": Decimal("30"),
+            "total_earned": Decimal("30"),
+            "current_band": 1,
+        },
+    )
+    cash_row = CommissionLedger.objects.create(
+        recipient=sponsor,
+        source_user=buyer,
+        order=_paid_order_for_buyer(buyer, "ORD-CASH-30"),
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+        amount=Decimal("30"),
+        net_amount=Decimal("30"),
+        status=CommissionLedger.Status.CREDITED,
+        slot_band_held=False,
+    )
+    # Later slot-band-held row.
+    held_row = CommissionLedger.objects.create(
+        recipient=sponsor,
+        source_user=buyer,
+        order=_paid_order_for_buyer(buyer, "ORD-HELD-30"),
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+        amount=Decimal("30"),
+        net_amount=Decimal("30"),
+        status=CommissionLedger.Status.CREDITED,
+        slot_band_held=True,
+    )
+    # Bump total_earned to reflect that the held credit funded a slot pool.
+    Wallet.objects.filter(user=sponsor).update(total_earned=Decimal("4030"))
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+    r = client.get("/api/v1/user/earnings/?include=ledger&page_size=10")
+    assert r.status_code == 200
+    rows = r.json()["data"]["ledger"]["rows"]
+    held_serialized = next(row for row in rows if row["id"] == held_row.id)
+    cash_serialized = next(row for row in rows if row["id"] == cash_row.id)
+    # Held row reports the original net but no cash impact.
+    assert held_serialized["slot_band_held"] is True
+    assert held_serialized["cash_credited"] is False
+    assert Decimal(held_serialized["net"]) == Decimal("30")
+    # Both rows report the SAME running balance (current cash 30) because the
+    # held row left cash flat between them.
+    assert held_serialized["running_balance"] == cash_serialized["running_balance"]
+
+
+@pytest.mark.django_db
+def test_cash_crediting_resumes_after_band_exit(system_config):
+    _root, sponsor, buyer = _three_level_tree()
+    # Allow a second order from the same buyer to also generate commissions
+    # so we can observe the band transition on the sponsor's wallet.
+    SystemConfig.objects.filter(pk=1).update(is_repurchase_commission_allowed=True)
+    # Position sponsor just below the band-2 ceiling (5000). One direct credit
+    # of 30 lands at 4030 (held), then we manually bump and run another order
+    # that crosses to band 3.
+    Wallet.objects.update_or_create(
+        user=sponsor,
+        defaults={
+            "cash_balance": Decimal("0"),
+            "total_earned": Decimal("4970"),
+            "current_band": 2,
+        },
+    )
+    CommissionEngine.process_order(_paid_order_for_buyer(buyer, "ORD-EXIT-1"))
+    held_row = CommissionLedger.objects.get(
+        recipient=sponsor,
+        order__order_number="ORD-EXIT-1",
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+    )
+    assert held_row.slot_band_held is True
+
+    # Next order: total_earned is now 5000 → band 3 (cash band).
+    sponsor_wallet = get_wallet_row(sponsor)
+    assert sponsor_wallet.total_earned == Decimal("5000")
+    CommissionEngine.process_order(_paid_order_for_buyer(buyer, "ORD-EXIT-2"))
+    cash_row = CommissionLedger.objects.get(
+        recipient=sponsor,
+        order__order_number="ORD-EXIT-2",
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+    )
+    assert cash_row.slot_band_held is False, (
+        "credits after the band ceiling must resume cash crediting"
+    )
+    sponsor_wallet.refresh_from_db()
+    assert sponsor_wallet.cash_balance == Decimal("30")
+    assert WalletTransaction.objects.filter(
+        user=sponsor,
+        tx_type=WalletTransaction.TxType.CREDIT,
+        reference="COMM-ORD-EXIT-2",
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_reverse_slot_band_held_commission_only_reduces_total_earned(system_config):
+    _root, sponsor, buyer = _three_level_tree()
+    Wallet.objects.update_or_create(
+        user=sponsor,
+        defaults={
+            "cash_balance": Decimal("100"),
+            "total_earned": Decimal("4100"),
+            "current_band": 2,
+        },
+    )
+    held_order = _paid_order_for_buyer(buyer, "ORD-REV-HELD")
+    CommissionLedger.objects.create(
+        recipient=sponsor,
+        source_user=buyer,
+        order=held_order,
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+        amount=Decimal("30"),
+        net_amount=Decimal("30"),
+        status=CommissionLedger.Status.CREDITED,
+        slot_band_held=True,
+    )
+    CommissionEngine.reverse_commissions(held_order)
+    sponsor_wallet = get_wallet_row(sponsor)
+    assert sponsor_wallet.cash_balance == Decimal("100"), (
+        "reversing a slot-band-held credit must not decrement cash_balance"
+    )
+    assert sponsor_wallet.total_earned == Decimal("4070")
+    # No DEBIT row should have been emitted for the held reversal.
+    assert not WalletTransaction.objects.filter(
+        user=sponsor,
+        tx_type=WalletTransaction.TxType.DEBIT,
+        reference=f"REV-{held_order.order_number}",
+    ).exists()

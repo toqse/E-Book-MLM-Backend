@@ -8,7 +8,12 @@ from apps.admin_panel.utils import get_system_config
 from apps.audit.services import write_audit
 from apps.payments.models import Order
 from apps.users.models import User
-from apps.wallet.bands import on_total_earned_updated
+from apps.wallet.bands import (
+    SLOT_BAND_NUMBERS,
+    _band_index_for_earnings,
+    is_slot_band,
+    on_total_earned_updated,
+)
 from apps.wallet.models import Wallet, WalletTransaction
 from apps.tds.services import calculate_and_apply_194h_tds
 
@@ -220,24 +225,32 @@ class CommissionEngine:
                 gross_credit,
             )
         tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
-        wallet.cash_balance += tds.net_amount
+        # Slot-band routing: the band gate is read from total_earned BEFORE the
+        # bump, matching how `on_total_earned_updated` issues slot batches at
+        # the boundary. A credit that lands fully inside a slot band funds the
+        # sponsor-slot mechanism instead of cash.
+        band_before_credit = _band_index_for_earnings(wallet.total_earned)
+        slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
+        if not slot_band_held:
+            wallet.cash_balance += tds.net_amount
         wallet.total_earned += tds.net_amount
         wallet.total_tds_deducted += tds.tds_amount
         wallet.save()
-        WalletTransaction.objects.create(
-            user=recipient,
-            tx_type=WalletTransaction.TxType.CREDIT,
-            amount=tds.net_amount,
-            balance_after=wallet.cash_balance,
-            reference=f"COMM-{order.order_number}",
-            meta={
-                "type": ctype,
-                "gross": str(tds.gross_amount),
-                "tds": str(tds.tds_amount),
-                "tds_rate_percent": str(tds.tds_rate_percent),
-                "financial_year": tds.financial_year,
-            },
-        )
+        if not slot_band_held:
+            WalletTransaction.objects.create(
+                user=recipient,
+                tx_type=WalletTransaction.TxType.CREDIT,
+                amount=tds.net_amount,
+                balance_after=wallet.cash_balance,
+                reference=f"COMM-{order.order_number}",
+                meta={
+                    "type": ctype,
+                    "gross": str(tds.gross_amount),
+                    "tds": str(tds.tds_amount),
+                    "tds_rate_percent": str(tds.tds_rate_percent),
+                    "financial_year": tds.financial_year,
+                },
+            )
         CommissionLedger.objects.create(
             recipient=recipient,
             source_user=source,
@@ -247,14 +260,16 @@ class CommissionEngine:
             tds_deducted=tds.tds_amount,
             net_amount=tds.net_amount,
             status=CommissionLedger.Status.CREDITED,
+            slot_band_held=slot_band_held,
         )
         logger.info(
-            "commission_credited order_id=%s recipient_id=%s type=%s gross=%s net=%s",
+            "commission_credited order_id=%s recipient_id=%s type=%s gross=%s net=%s slot_band_held=%s",
             order.id,
             recipient.id,
             ctype,
             tds.gross_amount,
             tds.net_amount,
+            slot_band_held,
         )
         if wallet.total_earned >= cap:
             recipient.account_status = User.AccountStatus.CAPPED
@@ -297,7 +312,10 @@ class CommissionEngine:
                 return
             gross_pay = min(bonus, remaining)
             tds = calculate_and_apply_194h_tds(user=sponsor, gross_amount=gross_pay)
-            wallet.cash_balance += tds.net_amount
+            band_before_credit = _band_index_for_earnings(wallet.total_earned)
+            slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
+            if not slot_band_held:
+                wallet.cash_balance += tds.net_amount
             wallet.total_earned += tds.net_amount
             wallet.total_tds_deducted += tds.tds_amount
             wallet.save()
@@ -308,21 +326,23 @@ class CommissionEngine:
                 tds_deducted=tds.tds_amount,
                 net_bonus=tds.net_amount,
                 status="CREDITED",
+                slot_band_held=slot_band_held,
             )
-            WalletTransaction.objects.create(
-                user=sponsor,
-                tx_type=WalletTransaction.TxType.CREDIT,
-                amount=tds.net_amount,
-                balance_after=wallet.cash_balance,
-                reference=f"MILESTONE-{threshold}",
-                meta={
-                    "type": "MILESTONE",
-                    "gross": str(tds.gross_amount),
-                    "tds": str(tds.tds_amount),
-                    "tds_rate_percent": str(tds.tds_rate_percent),
-                    "financial_year": tds.financial_year,
-                },
-            )
+            if not slot_band_held:
+                WalletTransaction.objects.create(
+                    user=sponsor,
+                    tx_type=WalletTransaction.TxType.CREDIT,
+                    amount=tds.net_amount,
+                    balance_after=wallet.cash_balance,
+                    reference=f"MILESTONE-{threshold}",
+                    meta={
+                        "type": "MILESTONE",
+                        "gross": str(tds.gross_amount),
+                        "tds": str(tds.tds_amount),
+                        "tds_rate_percent": str(tds.tds_rate_percent),
+                        "financial_year": tds.financial_year,
+                    },
+                )
             on_total_earned_updated(wallet)
 
     @staticmethod
@@ -333,16 +353,21 @@ class CommissionEngine:
         ).select_related("recipient")
         for e in entries:
             wallet = Wallet.objects.select_for_update().get(user=e.recipient)
-            wallet.cash_balance -= e.net_amount
+            # Slot-band-held credits never increased cash_balance, so reversing
+            # them must not decrease it either. They still unwind total_earned
+            # (which un-funds the slot pool on the lifetime ledger).
+            if not e.slot_band_held:
+                wallet.cash_balance -= e.net_amount
             wallet.total_earned -= e.net_amount
             wallet.save()
-            WalletTransaction.objects.create(
-                user=e.recipient,
-                tx_type=WalletTransaction.TxType.DEBIT,
-                amount=e.net_amount,
-                balance_after=wallet.cash_balance,
-                reference=f"REV-{order.order_number}",
-            )
+            if not e.slot_band_held:
+                WalletTransaction.objects.create(
+                    user=e.recipient,
+                    tx_type=WalletTransaction.TxType.DEBIT,
+                    amount=e.net_amount,
+                    balance_after=wallet.cash_balance,
+                    reference=f"REV-{order.order_number}",
+                )
             e.status = CommissionLedger.Status.REVERSED
             e.save(update_fields=["status"])
         write_audit(

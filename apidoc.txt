@@ -745,7 +745,7 @@ GET /api/v1/user/earnings/
         "direct_l1" { amount, units, unit },
         "passive_l2_l4" { amount, units, unit },
         "milestone" { amount },
-        "slots" { amount, redeemed, unit }
+        "slots" { amount, redeemed, unit }     # `unit` is live SystemConfig.product_base_price
       },
       "band": { label, number, next, policy },
       "rule": { title, text },
@@ -772,10 +772,15 @@ GET /api/v1/user/earnings/
     via_downline null (reserved for future tree context),
     level (L1–L4 for commissions; null for milestones),
     gross, tds, tds_deducted (same as tds), net, net_credited (same as net),
-    status (CREDITED|REVERSED|PENDING|HELD), status_label ("Credited"|… title case for UI chips),
+    status (CREDITED|REVERSED|PENDING|HELD), status_label ("Credited"|… title case for UI chips;
+      slot-band-held credits get a " (Slot fund)" suffix on both label and description),
     source { member_id, full_name }|omitted (duplicate of triggered_by when present),
     referrals (int, milestone rows only),
     order_id (commissions, if present),
+    slot_band_held (bool; true for COMMISSION and MILESTONE rows that landed while the
+      recipient was inside a slot band 2/4/6/8 — see "Slot-band routing" note below),
+    cash_credited (bool; true only when the row actually increased cash_balance — false for
+      slot-band-held, REVERSED, PENDING, HELD rows and for withdrawal rows),
     withdrawal_id, payout_method, utr_number (withdrawal rows, when present),
     balance, running_balance (same decimal string; wallet cash balance immediately after this
     event when walking newest-first — see note below),
@@ -795,7 +800,18 @@ GET /api/v1/user/earnings/
       walk so totals stay consistent.
     - Withdrawal row TDS column is always 0; TDS on payouts is shown on GET /api/v1/user/payouts/.
     - Per-line tds may be 0 until engine writes tds_deducted.
-    - Slots amount = count(REDEEMED sponsor codes issued to you) × ₹100 display unit.
+    - Slots amount = count(REDEEMED sponsor codes issued to you) × SystemConfig.product_base_price.
+      The per-code `unit` follows the live ebook base price — when admin changes the price the
+      amount re-renders accordingly.
+    - Slot-band routing: when wallet.current_band is 2, 4, 6 or 8 the band is a sponsor-slot
+      band — direct, upline and milestone credits earned in that window count toward
+      lifetime_earnings (total_earned, cap meter, band progression) but NOT toward cash_balance
+      or available_to_withdraw. They are funded into the sponsor-slot pool instead. The ledger
+      shows these rows with cash_credited=false, slot_band_held=true, and a status_label suffix
+      "(Slot fund)"; their running_balance is unchanged from the next-newer row. Once
+      total_earned crosses the band ceiling (e.g. ₹5000 from band 2), subsequent credits resume
+      crediting cash automatically. Slot codes inside the band unlock progressively at equal
+      steps (band 2: ₹4200, ₹4400, ₹4600, ₹4800, ₹5000 — analogous spacing for bands 4/6/8).
     - `page` and `page_size` are clamped server-side: `page` >= 1, `page_size` in [1..100].
 
 GET /api/v1/user/earnings/export/

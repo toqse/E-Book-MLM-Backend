@@ -36,6 +36,14 @@ class CommissionLedger(models.Model):
     tds_deducted = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     net_amount = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    slot_band_held = models.BooleanField(
+        default=False,
+        help_text=(
+            "True when this credit landed while the recipient was inside a slot "
+            "band (2/4/6/8). The amount still counts toward total_earned and the "
+            "cap, but is NOT added to cash_balance / available_to_withdraw."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -53,6 +61,14 @@ class MilestoneRecord(models.Model):
     tds_deducted = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     net_bonus = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, default="PENDING")
+    slot_band_held = models.BooleanField(
+        default=False,
+        help_text=(
+            "True when this milestone credit landed while the recipient was "
+            "inside a slot band (2/4/6/8); counts toward total_earned but not "
+            "cash_balance."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -17,6 +17,15 @@ BAND_EDGES = [
     Decimal("22200"),
 ]
 
+# Bands where commissions and milestone bonuses fund sponsor-slot issuance
+# instead of cash. Credits earned in these bands bump total_earned but NOT
+# cash_balance; the recipient cannot withdraw them.
+SLOT_BAND_NUMBERS = frozenset({2, 4, 6, 8})
+
+
+def is_slot_band(band_number: int | None) -> bool:
+    return int(band_number or 0) in SLOT_BAND_NUMBERS
+
 
 def _band_index_for_earnings(total: Decimal) -> int:
     if total < BAND_EDGES[0]:
@@ -46,8 +55,7 @@ def on_total_earned_updated(wallet):
         return
     wallet.current_band = idx
     wallet.save(update_fields=["current_band"])
-    slot_bands = {2, 4, 6, 8}
-    if idx in slot_bands:
+    if idx in SLOT_BAND_NUMBERS:
         from apps.sponsor_slots.models import SponsorSlotBatch
         from apps.sponsor_slots.services import SponsorSlotService
 

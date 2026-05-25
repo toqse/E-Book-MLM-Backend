@@ -18,7 +18,11 @@ from apps.commissions.milestone_tiers import MILESTONES
 from apps.commissions.models import MilestoneRecord
 from apps.tds.services import calculate_and_apply_194h_tds
 from apps.users.models import User
-from apps.wallet.bands import on_total_earned_updated
+from apps.wallet.bands import (
+    SLOT_BAND_NUMBERS,
+    _band_index_for_earnings,
+    on_total_earned_updated,
+)
 from apps.wallet.models import Wallet, WalletTransaction
 
 ZERO = Decimal("0")
@@ -90,7 +94,13 @@ def _process_milestone_record_locked(*, record: MilestoneRecord, actor: User) ->
 
     tds = calculate_and_apply_194h_tds(user=user, gross_amount=gross_pay)
 
-    wallet.cash_balance = (wallet.cash_balance or ZERO) + tds.net_amount
+    # Re-evaluate slot-band gating at the moment of admin approval — a record
+    # created weeks ago may have been HELD/PENDING through several band changes.
+    band_before_credit = _band_index_for_earnings(wallet.total_earned or ZERO)
+    slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
+
+    if not slot_band_held:
+        wallet.cash_balance = (wallet.cash_balance or ZERO) + tds.net_amount
     wallet.total_earned = (wallet.total_earned or ZERO) + tds.net_amount
     wallet.total_tds_deducted = (wallet.total_tds_deducted or ZERO) + tds.tds_amount
     wallet.save()
@@ -99,23 +109,33 @@ def _process_milestone_record_locked(*, record: MilestoneRecord, actor: User) ->
     record.tds_deducted = tds.tds_amount
     record.net_bonus = tds.net_amount
     record.status = "CREDITED"
-    record.save(update_fields=["bonus_amount", "tds_deducted", "net_bonus", "status"])
-
-    WalletTransaction.objects.create(
-        user=user,
-        tx_type=WalletTransaction.TxType.CREDIT,
-        amount=tds.net_amount,
-        balance_after=wallet.cash_balance,
-        reference=f"MILESTONE-{record.milestone_referrals}",
-        meta={
-            "type": "MILESTONE",
-            "gross": str(tds.gross_amount),
-            "tds": str(tds.tds_amount),
-            "tds_rate_percent": str(tds.tds_rate_percent),
-            "financial_year": tds.financial_year,
-            "processed_by_admin_id": actor.id,
-        },
+    record.slot_band_held = slot_band_held
+    record.save(
+        update_fields=[
+            "bonus_amount",
+            "tds_deducted",
+            "net_bonus",
+            "status",
+            "slot_band_held",
+        ]
     )
+
+    if not slot_band_held:
+        WalletTransaction.objects.create(
+            user=user,
+            tx_type=WalletTransaction.TxType.CREDIT,
+            amount=tds.net_amount,
+            balance_after=wallet.cash_balance,
+            reference=f"MILESTONE-{record.milestone_referrals}",
+            meta={
+                "type": "MILESTONE",
+                "gross": str(tds.gross_amount),
+                "tds": str(tds.tds_amount),
+                "tds_rate_percent": str(tds.tds_rate_percent),
+                "financial_year": tds.financial_year,
+                "processed_by_admin_id": actor.id,
+            },
+        )
     on_total_earned_updated(wallet)
     return _ProcessResult(True, None)
 
