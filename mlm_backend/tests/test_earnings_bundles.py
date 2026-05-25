@@ -277,6 +277,38 @@ def test_earnings_bundle_query_budget(system_config):
 
 
 @pytest.mark.django_db
+def test_user_earnings_ledger_page_two_continues_running_balance(system_config):
+    _root, sponsor, buyer = _three_level_tree()
+    order = _paid_order_for_buyer(buyer, "ORD-PAGED-LEDGER")
+    for _ in range(25):
+        CommissionLedger.objects.create(
+            recipient=sponsor,
+            source_user=buyer,
+            order=order,
+            commission_type=CommissionLedger.CommissionType.DIRECT,
+            amount=Decimal("30.00"),
+            net_amount=Decimal("30.00"),
+            status=CommissionLedger.Status.CREDITED,
+        )
+    Wallet.objects.filter(user=sponsor).update(
+        cash_balance=Decimal("750.00"),
+        total_earned=Decimal("750.00"),
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+    page1 = client.get("/api/v1/user/earnings/?include=ledger&page=1&page_size=10")
+    page2 = client.get("/api/v1/user/earnings/?include=ledger&page=2&page_size=10")
+
+    assert page1.status_code == 200
+    assert page2.status_code == 200
+    page1_rows = page1.json()["data"]["ledger"]["rows"]
+    page2_rows = page2.json()["data"]["ledger"]["rows"]
+    expected_page2_start = Decimal(page1_rows[-1]["running_balance"]) - Decimal(page1_rows[-1]["net"])
+    assert Decimal(page2_rows[0]["running_balance"]) == expected_page2_start
+
+
+@pytest.mark.django_db
 def test_user_earnings_ledger_includes_pending_withdrawal_row(system_config):
     _root, sponsor, buyer = _three_level_tree()
     CommissionEngine.process_order(_paid_order_for_buyer(buyer, "ORD-WD-1"))

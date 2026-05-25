@@ -805,16 +805,22 @@ def build_ledger(
     offset = (page - 1) * page_size
 
     count_sql, union_sql, params = _ledger_union_sql_and_params(user, period=period, typ=typ)
-    union_sql += " LIMIT %s OFFSET %s"
+    # Running balance is computed by walking backward from the current wallet
+    # balance. For paginated pages, include the skipped newer rows in that walk
+    # and slice them away after balances are assigned; otherwise page 2+ would
+    # incorrectly restart from the current balance.
+    prefix_limit = offset + page_size
+    union_sql += " LIMIT %s"
 
     with connection.cursor() as cursor:
         cursor.execute(count_sql, params)
         total_count = cursor.fetchone()[0]
-        cursor.execute(union_sql, params + [page_size, offset])
+        cursor.execute(union_sql, params + [prefix_limit])
         keys = cursor.fetchall()
 
-    results = _hydrate_ledger_keys(user, keys)
-    _apply_ledger_running_balance(user.pk, results)
+    walked_results = _hydrate_ledger_keys(user, keys)
+    _apply_ledger_running_balance(user.pk, walked_results)
+    results = walked_results[offset : offset + page_size]
 
     return {
         "rows": results,
