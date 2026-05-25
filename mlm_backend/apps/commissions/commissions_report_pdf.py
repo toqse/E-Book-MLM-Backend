@@ -12,6 +12,11 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+# JUST200 brand palette — kept in sync with the invoice PDF so all
+# customer-facing exports share the same orange identity.
+ACCENT = colors.HexColor("#E5572B")
+GREY_ROW = colors.HexColor("#f0f0f0")
+
 
 def build_commissions_report_pdf_bytes(
     *,
@@ -72,13 +77,13 @@ def build_commissions_report_pdf_bytes(
     tbl.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c73a9")),
+                ("BACKGROUND", (0, 0), (-1, 0), ACCENT),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                 ("FONTSIZE", (0, 0), (-1, 0), 8),
                 ("FONTSIZE", (0, 1), (-1, -1), 7),
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, GREY_ROW]),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 3),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 3),
@@ -87,8 +92,13 @@ def build_commissions_report_pdf_bytes(
             ]
         )
     )
+    title_style = ParagraphStyle(
+        "LedgerTitle",
+        parent=styles["Heading2"],
+        textColor=ACCENT,
+    )
     story = [
-        Paragraph(title, styles["Heading2"]),
+        Paragraph(title, title_style),
         Spacer(1, 6 * mm),
         tbl,
     ]
