@@ -1,4 +1,5 @@
 import secrets
+from dataclasses import dataclass
 from decimal import Decimal
 from datetime import timedelta
 
@@ -11,6 +12,32 @@ from apps.wallet.bands import BAND_EDGES
 
 from .audit_log import log_sponsor_audit
 from .models import SponsorSlotAuditEvent, SponsorSlotBatch, SponsorSlotCode
+
+
+@dataclass(frozen=True)
+class SponsorCodeValidation:
+    """Outcome of a sponsor-slot code validation.
+
+    `reason` is one of:
+      - None        : code is valid
+      - "invalid"   : code unknown, not active (locked/redeemed/shared), or self-redemption
+      - "expired"   : code's expires_at is in the past (or status was already EXPIRED)
+    """
+
+    code: SponsorSlotCode | None
+    reason: str | None
+
+    @property
+    def valid(self) -> bool:
+        return self.code is not None and self.reason is None
+
+    @property
+    def is_expired(self) -> bool:
+        return self.reason == "expired"
+
+    @property
+    def is_invalid(self) -> bool:
+        return self.reason == "invalid"
 
 
 class SponsorSlotService:
@@ -97,23 +124,42 @@ class SponsorSlotService:
         return batch
 
     @staticmethod
-    def validate_code(code: str, redeemer=None) -> SponsorSlotCode | None:
+    def validate_code_detailed(code: str, redeemer=None) -> SponsorCodeValidation:
+        """Validate a sponsor-slot code and return the outcome with a reason.
+
+        Distinguishes between:
+          - invalid : unknown code, non-active status (locked/redeemed/shared), or self-redemption
+          - expired : code's expires_at has passed (status is/becomes EXPIRED)
+        """
         if not code:
-            return None
+            return SponsorCodeValidation(code=None, reason="invalid")
         c = (
             SponsorSlotCode.objects.select_related("issued_to", "batch")
             .filter(code__iexact=code.strip())
             .first()
         )
-        if not c or c.status != SponsorSlotCode.Status.ACTIVE:
-            return None
+        if not c:
+            return SponsorCodeValidation(code=None, reason="invalid")
+        if c.status == SponsorSlotCode.Status.EXPIRED:
+            return SponsorCodeValidation(code=None, reason="expired")
         if timezone.now() > c.expires_at:
             c.status = SponsorSlotCode.Status.EXPIRED
             c.save(update_fields=["status"])
-            return None
+            return SponsorCodeValidation(code=None, reason="expired")
+        if c.status != SponsorSlotCode.Status.ACTIVE:
+            return SponsorCodeValidation(code=None, reason="invalid")
         if redeemer and c.issued_to_id == redeemer.id:
-            return None
-        return c
+            return SponsorCodeValidation(code=None, reason="invalid")
+        return SponsorCodeValidation(code=c, reason=None)
+
+    @staticmethod
+    def validate_code(code: str, redeemer=None) -> SponsorSlotCode | None:
+        """Backwards-compatible wrapper that returns the code if valid, else None.
+
+        Callers needing to distinguish between invalid and expired should use
+        `validate_code_detailed` instead.
+        """
+        return SponsorSlotService.validate_code_detailed(code, redeemer=redeemer).code
 
     @staticmethod
     @transaction.atomic

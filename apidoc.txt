@@ -1217,7 +1217,10 @@ POST /api/v1/sponsor-slots/validate/
     }
   }
   Errors:
-    - 400 invalid/expired (still returns totals when context is resolvable)
+    - 400 Invalid — message "Invalid", errors.detail "invalid", data { "valid": false, "issuer": null, "totals": <still returned when context is resolvable>, "reason": "invalid" }.
+        Returned when the code is unknown, not active (locked/redeemed/shared), or the redeemer is its own issuer.
+    - 400 Expired — message "Expired", errors.detail "expired", data { "valid": false, "issuer": null, "totals": <still returned when context is resolvable>, "reason": "expired" }.
+        Returned when the code's expires_at has passed (status is/becomes EXPIRED).
     - 400 cart_empty (when no ebook_id/slug and cart has no items)
     - 404 book not found/unpublished (when ebook_id/slug provided and not found)
   Notes:

@@ -246,8 +246,9 @@ def validate_public(request):
             errors={"detail": "missing_code"},
         )
 
-    slot = SponsorSlotService.validate_code(raw, redeemer=request.user)
-    valid = bool(slot)
+    result = SponsorSlotService.validate_code_detailed(raw, redeemer=request.user)
+    slot = result.code
+    valid = result.valid
     issuer = slot.issued_to.full_name if slot else None
 
     ebook_id = request.data.get("ebook_id")
@@ -359,11 +360,20 @@ def validate_public(request):
         }
 
     if not valid:
+        if result.is_expired:
+            return envelope_response(
+                {"valid": False, "issuer": None, "totals": totals_payload, "reason": "expired"},
+                message="Expired",
+                success=False,
+                status=400,
+                errors={"detail": "expired"},
+            )
         return envelope_response(
-            {"valid": False, "issuer": None, "totals": totals_payload},
-            message="Invalid or expired",
+            {"valid": False, "issuer": None, "totals": totals_payload, "reason": "invalid"},
+            message="Invalid",
             success=False,
             status=400,
+            errors={"detail": "invalid"},
         )
 
     return envelope_response({"valid": True, "issuer": issuer, "totals": totals_payload})
