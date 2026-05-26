@@ -135,6 +135,22 @@ def _payout_destination_hint(user: User, payout_method: str) -> str:
         return acct or ifsc
     return _mask_upi(getattr(user, "upi_id", "") or "")
 
+
+def _admin_full_payout_destination_hint(user: User, payout_method: str) -> str:
+    """Unmasked payout destination for admin/finance views.
+
+    Bank: returns "<full account number> (<IFSC>)" so finance can initiate
+    payouts directly from the listing. UPI returns the full UPI id.
+    """
+    method = (payout_method or "UPI").upper()
+    if method == WithdrawalRequest.PayoutMethod.BANK:
+        acct = (getattr(user, "bank_account_number", "") or "").strip()
+        ifsc = (getattr(user, "bank_ifsc", "") or "").strip().upper()
+        if acct and ifsc:
+            return f"{acct} ({ifsc})"
+        return acct or ifsc
+    return (getattr(user, "upi_id", "") or "").strip()
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_payouts_bundle(request: Request):
@@ -616,8 +632,36 @@ def admin_withdrawals(request):
 @api_view(["GET"])
 @permission_classes([IsFinanceAdmin])
 def admin_withdrawals_pending(request):
-    qs = WithdrawalRequest.objects.filter(status=WithdrawalRequest.Status.PENDING)
-    return envelope_response({"results": [x.id for x in qs]})
+    qs = (
+        WithdrawalRequest.objects.filter(status=WithdrawalRequest.Status.PENDING)
+        .select_related("user")
+        .order_by("-id")
+    )
+    results = [
+        {
+            "id": x.id,
+            "member": {
+                "member_id": x.user.member_id,
+                "full_name": x.user.full_name,
+                "phone": x.user.phone,
+                "kyc_status": x.user.kyc_status,
+            },
+            "band": x.band,
+            "amount_requested": str(x.amount_requested),
+            "tds_amount": str(x.tds_amount),
+            "tds_section": x.tds_section or None,
+            "net_payable": str(x.net_payable),
+            "status": x.status,
+            "payout_method": x.payout_method,
+            "payout_destination_hint": (
+                _admin_full_payout_destination_hint(x.user, x.payout_method) or None
+            ),
+            "created_at": x.created_at.isoformat(),
+            "updated_at": x.updated_at.isoformat(),
+        }
+        for x in qs
+    ]
+    return envelope_response({"count": len(results), "results": results})
 
 
 @api_view(["POST"])

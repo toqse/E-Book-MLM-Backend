@@ -490,7 +490,7 @@ GET /api/v1/user/referral/stats/
   }...
 
 GET /api/v1/user/referral/list/
-  Auth: Bearer.
+  Auth: Bearer...
   Query:
     - pending_placement=true|false (also 1, yes, on for true) — optional filter.
         When true: only direct referrals who (a) have at least one PAID non-retail
@@ -1132,7 +1132,17 @@ GET /api/v1/admin/withdrawals/
   }
 
 GET /api/v1/admin/withdrawals/pending/
-  Success data: { "results": [ withdrawal ids ] }
+  Success data: {
+    "count",
+    "results": [
+      { "id", "member": { "member_id", "full_name", "phone", "kyc_status" },
+        "band", "amount_requested", "tds_amount", "tds_section", "net_payable",
+        "status", "payout_method",
+        "payout_destination_hint",  # BANK: "<full_account_number> (<IFSC>)"; UPI: full UPI id
+        "created_at", "updated_at"
+      }, ...
+    ]
+  }
 
 POST /api/v1/admin/withdrawals/<id>/approve/
   Success data: { "id", "status", "approved_at" } (status APPROVED)
