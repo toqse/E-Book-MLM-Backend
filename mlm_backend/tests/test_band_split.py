@@ -12,6 +12,7 @@ from apps.mlm_tree.services import BinaryTreeService
 from apps.payments.models import Order
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
+from apps.wallet.services.member_money import commission_aggregates_for_user
 from apps.wallet.bands import iter_band_split_pieces, slot_gross_if_split_at
 from apps.wallet.models import Wallet
 
@@ -137,6 +138,9 @@ def test_commission_splits_at_band6_boundary(system_config):
     w = Wallet.objects.get(user=sponsor)
     assert w.total_earned == Decimal("15300")
     assert w.cash_balance == Decimal("300")
+    agg = commission_aggregates_for_user(sponsor.pk)
+    assert agg["direct_net"] == Decimal("500")
+    assert agg["direct_units"] == 1
 
 
 @pytest.mark.django_db

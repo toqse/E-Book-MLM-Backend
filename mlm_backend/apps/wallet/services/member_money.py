@@ -12,7 +12,7 @@ from typing import Any
 from django.conf import settings
 from django.db import connection
 from django.db.models import Case, Count, F, Q, Sum, When
-from django.db.models.fields import DecimalField, IntegerField
+from django.db.models.fields import DecimalField
 from django.utils import timezone
 
 from apps.admin_panel.models import SystemConfig
@@ -142,7 +142,6 @@ def commission_aggregates_for_user(user_id: int) -> dict[str, Any]:
     passive_types = (ct.UPLINE_L2, ct.UPLINE_L3, ct.UPLINE_L4)
     qs = CommissionLedger.objects.filter(recipient_id=user_id)
     dec = DecimalField(max_digits=12, decimal_places=2)
-    int_out = IntegerField()
     return qs.aggregate(
         direct_net=Sum(
             Case(
@@ -172,16 +171,14 @@ def commission_aggregates_for_user(user_id: int) -> dict[str, Any]:
             )
         ),
         direct_units=Count(
-            Case(
-                When(Q(commission_type=ct.DIRECT) & Q(status=st.CREDITED), then=1),
-                output_field=int_out,
-            )
+            "order_id",
+            filter=Q(commission_type=ct.DIRECT) & Q(status=st.CREDITED),
+            distinct=True,
         ),
         passive_units=Count(
-            Case(
-                When(Q(commission_type__in=passive_types) & Q(status=st.CREDITED), then=1),
-                output_field=int_out,
-            )
+            "order_id",
+            filter=Q(commission_type__in=passive_types) & Q(status=st.CREDITED),
+            distinct=True,
         ),
     )
 
