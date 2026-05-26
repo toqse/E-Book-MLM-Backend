@@ -31,6 +31,7 @@ from apps.users.services import (
     allocate_member_identity,
     effective_company_referral_code,
     environment_company_referral_code,
+    is_account_capped,
     resolve_sponsor_by_code,
 )
 from apps.wallet.services.member_money import build_band_ladder, get_wallet_row
@@ -188,6 +189,13 @@ def send_register_otp(request: Request):
         return envelope_response(
             None,
             message="Invalid referral code",
+            success=False,
+            status=400,
+        )
+    if is_account_capped(sponsor):
+        return envelope_response(
+            None,
+            message="This referral link is no longer active",
             success=False,
             status=400,
         )
@@ -573,6 +581,13 @@ def _me_payload(user: User):
         from apps.users.tasks import send_kyc_invitation_for_user
 
         send_kyc_invitation_for_user.delay(user.pk)
+    if user.account_status == User.AccountStatus.CAPPED:
+        data["referral_code"] = None
+        data["account_status"]["referral_link"] = None
+        data["account_status"]["referral_link_active"] = False
+        data["profile_message"] = (
+            "Your account has reached the earning cap and is now inactive."
+        )
     return data
 
 
@@ -759,6 +774,13 @@ def validate_referral(request: Request):
     s = resolve_sponsor_by_code(code or "")
     if not s:
         return envelope_response(None, message="Invalid code", success=False, status=404)
+    if is_account_capped(s):
+        return envelope_response(
+            None,
+            message="This referral link is no longer active",
+            success=False,
+            status=404,
+        )
     return envelope_response({"sponsor_name": s.full_name})
 
 

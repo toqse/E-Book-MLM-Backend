@@ -15,6 +15,7 @@ from apps.commissions.models import CommissionLedger
 from apps.commissions.tasks import process_commission_task
 from apps.payments.models import Order
 from apps.users.models import User
+from apps.users.services import company_fallback_sponsor, is_account_capped
 
 from .models import BinaryNode
 from .services import BinaryTreeService
@@ -112,6 +113,20 @@ def complete_placement_for_order(
 ) -> None:
     buyer = order.user
     sponsor = buyer.sponsor
+    if is_account_capped(sponsor):
+        fallback = company_fallback_sponsor()
+        if fallback and fallback.id != sponsor.id:
+            old_sponsor_id = sponsor.id
+            buyer.sponsor = fallback
+            buyer.save(update_fields=["sponsor"])
+            write_audit(
+                "placement.sponsor_reassigned_capped",
+                actor=actor,
+                target_type="Order",
+                target_id=str(order.id),
+                payload={"old_sponsor_id": old_sponsor_id, "new_sponsor_id": fallback.id},
+            )
+            sponsor = fallback
     if manual_leg:
         BinaryTreeService.place_member_manual_leg(buyer, sponsor, manual_leg)
     else:
@@ -178,6 +193,11 @@ def try_auto_place_order(order: Order) -> bool:
 
 
 def sponsor_may_manual_place(sponsor: User, buyer: User, order: Order) -> tuple[bool, str]:
+    if is_account_capped(sponsor):
+        return (
+            False,
+            "Your account has reached the earning cap. New placements are not permitted.",
+        )
     if sponsor.kyc_status != User.KYCStatus.VERIFIED:
         return False, "Complete compliance verification (admin-approved) to access placements."
     try:

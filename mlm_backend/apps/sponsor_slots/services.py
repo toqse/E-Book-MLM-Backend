@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from apps.admin_panel.models import SystemConfig
 from apps.payments.models import Order
+from apps.users.services import is_account_capped
 from apps.wallet.bands import BAND_EDGES
 
 from .audit_log import log_sponsor_audit
@@ -22,6 +23,7 @@ class SponsorCodeValidation:
       - None        : code is valid
       - "invalid"   : code unknown, not active (locked/redeemed/shared), or self-redemption
       - "expired"   : code's expires_at is in the past (or status was already EXPIRED)
+      - "sponsor_inactive" : issuer has reached the earning cap (CAPPED)
     """
 
     code: SponsorSlotCode | None
@@ -150,6 +152,8 @@ class SponsorSlotService:
             return SponsorCodeValidation(code=None, reason="invalid")
         if redeemer and c.issued_to_id == redeemer.id:
             return SponsorCodeValidation(code=None, reason="invalid")
+        if is_account_capped(c.issued_to):
+            return SponsorCodeValidation(code=None, reason="sponsor_inactive")
         return SponsorCodeValidation(code=c, reason=None)
 
     @staticmethod

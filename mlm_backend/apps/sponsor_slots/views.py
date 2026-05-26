@@ -251,6 +251,23 @@ def validate_public(request):
     valid = result.valid
     issuer = slot.issued_to.full_name if slot else None
 
+    if not valid and result.reason == "sponsor_inactive":
+        return envelope_response(
+            {"valid": False, "issuer": None, "totals": None, "reason": "sponsor_inactive"},
+            message="Sponsor account is inactive",
+            success=False,
+            status=400,
+            errors={"detail": "sponsor_inactive"},
+        )
+    if not valid and result.is_expired:
+        return envelope_response(
+            {"valid": False, "issuer": None, "totals": None, "reason": "expired"},
+            message="Expired",
+            success=False,
+            status=400,
+            errors={"detail": "expired"},
+        )
+
     ebook_id = request.data.get("ebook_id")
     ebook_slug = request.data.get("ebook_slug")
 
@@ -367,6 +384,19 @@ def validate_public(request):
                 success=False,
                 status=400,
                 errors={"detail": "expired"},
+            )
+        if result.reason == "sponsor_inactive":
+            return envelope_response(
+                {
+                    "valid": False,
+                    "issuer": None,
+                    "totals": totals_payload,
+                    "reason": "sponsor_inactive",
+                },
+                message="Sponsor account is inactive",
+                success=False,
+                status=400,
+                errors={"detail": "sponsor_inactive"},
             )
         return envelope_response(
             {"valid": False, "issuer": None, "totals": totals_payload, "reason": "invalid"},

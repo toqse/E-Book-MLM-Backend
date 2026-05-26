@@ -73,6 +73,16 @@ def allocate_member_identity() -> tuple[str, str, str]:
     return member_id, referral_code, referral_link
 
 
+def is_account_capped(user) -> bool:
+    """True when the member has reached the earning cap and is marked CAPPED."""
+    return bool(user) and user.account_status == User.AccountStatus.CAPPED
+
+
+def company_fallback_sponsor() -> User | None:
+    """Primary admin account used for company-referral fallback and capped-sponsor reassignment."""
+    return _company_fallback_sponsor()
+
+
 def _company_fallback_sponsor() -> User | None:
     """Account used when referral matches DEFAULT_COMPANY_REFERRAL_CODE but no matching member row."""
     u = (

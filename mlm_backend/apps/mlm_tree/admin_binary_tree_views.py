@@ -14,6 +14,7 @@ from apps.common.responses import envelope_response
 from apps.payments.models import Order
 from apps.users.models import User
 from apps.users import team_services
+from apps.users.services import is_account_capped
 
 from .models import BinaryNode
 from .placement import admin_may_change_placement_in_cooloff, admin_place_under_parent
@@ -449,6 +450,13 @@ def admin_binary_tree_place_under_parent(request: Request, order_id: int):
     parent = User.objects.filter(member_id__iexact=parent_member_id).first()
     if not parent:
         return envelope_response(None, message="Parent not found", success=False, status=404)
+    if is_account_capped(parent):
+        return envelope_response(
+            None,
+            message="Parent account has reached the earning cap and cannot host new placements",
+            success=False,
+            status=400,
+        )
 
     try:
         from django.db import transaction
