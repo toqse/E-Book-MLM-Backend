@@ -487,7 +487,7 @@ GET /api/v1/user/referral/stats/
   Success data: {
     "direct_referrals": <int>,
     "direct_commission_total": "<decimal string, sum DIRECT net_amount>"
-  }
+  }...
 
 GET /api/v1/user/referral/list/
   Auth: Bearer.
