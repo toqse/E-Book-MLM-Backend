@@ -1029,7 +1029,11 @@ def report_tds(request):
 @permission_classes([IsFinanceAdmin])
 def report_gst(request):
     fr = parse_finance_range(request.query_params)
-    return envelope_response(build_gst_report(fr))
+    page = _parse_positive_int(request.query_params.get("page"), 1, min_v=1, max_v=1_000_000)
+    page_size = _parse_positive_int(
+        request.query_params.get("page_size"), 20, min_v=1, max_v=100
+    )
+    return envelope_response(build_gst_report(fr, page=page, page_size=page_size))
 
 
 @api_view(["GET"])

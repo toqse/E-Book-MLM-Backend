@@ -533,14 +533,24 @@ def build_expenditure(fr: FinanceDateRange) -> dict[str, Any]:
     }
 
 
-def build_gst_report(fr: FinanceDateRange) -> dict[str, Any]:
+def build_gst_report(
+    fr: FinanceDateRange,
+    *,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict[str, Any]:
     d0, d1 = fr.date_from, fr.date_to
-    rows = []
-    for inv in (
+    qs = (
         GSTInvoice.objects.filter(created_at__date__gte=d0, created_at__date__lte=d1)
         .select_related("order")
-        .order_by("-created_at")[:500]
-    ):
+        .order_by("-created_at", "-id")
+    )
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    total = qs.count()
+    start = (page - 1) * page_size
+    rows = []
+    for inv in qs[start : start + page_size]:
         rows.append(
             {
                 "invoice_number": inv.invoice_number,
@@ -554,7 +564,13 @@ def build_gst_report(fr: FinanceDateRange) -> dict[str, Any]:
     collected = _gst_invoices_in_range(d0, d1)
     if collected <= ZERO:
         collected = _sum_gst_on_orders(paid_orders_qs(d0, d1))
-    return {"collected": str(q2(collected)), "gstr1": rows}
+    return {
+        "collected": str(q2(collected)),
+        "count": total,
+        "page": page,
+        "page_size": page_size,
+        "gstr1": rows,
+    }
 
 
 def build_revenue_rollup(fr: FinanceDateRange | None = None) -> dict[str, Any]:

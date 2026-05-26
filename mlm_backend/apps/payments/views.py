@@ -643,8 +643,22 @@ def admin_revenue(request):
     return envelope_response(build_revenue_rollup(fr))
 
 
+def _parse_gst_page_params(request) -> tuple[int, int]:
+    try:
+        page = max(1, int(request.query_params.get("page", 1) or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(request.query_params.get("page_size", 20) or 20)
+    except (TypeError, ValueError):
+        page_size = 20
+    page_size = max(1, min(page_size, 100))
+    return page, page_size
+
+
 @api_view(["GET"])
 @permission_classes([IsFinanceAdmin])
 def admin_gst_report(request):
     fr = parse_finance_range(request.query_params)
-    return envelope_response(build_gst_report(fr))
+    page, page_size = _parse_gst_page_params(request)
+    return envelope_response(build_gst_report(fr, page=page, page_size=page_size))

@@ -1785,10 +1785,14 @@ GET /api/v1/admin/revenue/
 GET /api/v1/admin/gst-report/
   Auth: IsFinanceAdmin.
   Same date query params as finance (default 30d).
+  Query: page (default 1), page_size (default 20, max 100).
   Success: {
     "collected": "<sum GSTInvoice.total_gst in window; if none, sum Order.gst_amount for PAID in window>",
+    "count": <total GST invoices in window>,
+    "page": <current page>,
+    "page_size": <page size>,
     "gstr1": [ { "invoice_number", "order_number", "base_amount", "total_gst", "grand_total", "created_at" }, ... ]
-    (max 500 rows, newest first)
+    (newest first; one page of rows)
   }
 
 
@@ -2089,7 +2093,8 @@ GET /api/v1/admin/reports/tds/
 
 GET /api/v1/admin/reports/gst/
   Auth: IsFinanceAdmin.
-  Same response shape as GET /api/v1/admin/gst-report/ (delegates to same implementation).
+  Same query params and response shape as GET /api/v1/admin/gst-report/ (delegates to same implementation).
+  Query: same date params as finance; page (default 1), page_size (default 20, max 100).
 
 GET /api/v1/admin/reports/retail-ratio/
   Success: { "retail_ratio", "total_orders", "retail_orders" }.
