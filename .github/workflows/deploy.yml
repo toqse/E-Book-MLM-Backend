@@ -25,4 +25,23 @@ jobs:
 
             docker compose -f docker/docker-compose.yml up --build -d
 
+            # Wait briefly for the web container to finish migrate + start.
+            echo "Waiting for web service to start..."
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              if docker compose -f docker/docker-compose.yml exec -T web \
+                python manage.py showmigrations wallet 2>/dev/null | grep -q "\[X\] 0003_wallettransaction_tds_tx_type"; then
+                echo "Migrations ready."
+                break
+              fi
+              echo "  waiting ($i/10)..."
+              sleep 6
+            done
+
+            # One-time TDS ledger recompute for FY 2026-27.
+            # Idempotent: if a user was already corrected, the command will
+            # detect the existing TDS-CORRECTION-2026-27 wallet entry and
+            # skip the re-credit. Safe to leave in place across deploys.
+            docker compose -f docker/docker-compose.yml exec -T web \
+              python manage.py recompute_tds_and_recredit --fy 2026-27 --apply
+
             docker image prune -f
