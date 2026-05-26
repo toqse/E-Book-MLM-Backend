@@ -667,3 +667,90 @@ def test_reverse_slot_band_held_commission_only_reduces_total_earned(system_conf
         tx_type=WalletTransaction.TxType.DEBIT,
         reference=f"REV-{held_order.order_number}",
     ).exists()
+
+
+@pytest.mark.django_db
+def test_user_earnings_ledger_hides_pre_kyc_held_rows(system_config):
+    """Pre-KYC HELD/PENDING placeholder rows must not pollute the member's
+    earnings ledger — they never funded the wallet and were just bookkeeping
+    while admin approval was pending. Once an admin releases such a row
+    (status flips to CREDITED) it must reappear so the line backing the
+    wallet credit is visible."""
+    _root, sponsor, buyer = _three_level_tree()
+
+    # Pin sponsor's first-approval moment so we can place rows on either side
+    # of it deterministically (the fixture set it to "now" already).
+    approved_at = timezone.now()
+    User.objects.filter(pk=sponsor.pk).update(kyc_first_approved_at=approved_at)
+    sponsor.refresh_from_db()
+
+    # Passive commission earned BEFORE KYC was approved: stays HELD with
+    # net_amount=0 and never touches cash_balance. (auto_now_add already
+    # fired, so we back-date the row via .update() to land before
+    # `kyc_first_approved_at`.)
+    pre_order = _paid_order_for_buyer(buyer, "ORD-PRE-KYC-PASSIVE")
+    pre_held = CommissionLedger.objects.create(
+        recipient=sponsor,
+        source_user=buyer,
+        order=pre_order,
+        commission_type=CommissionLedger.CommissionType.UPLINE_L2,
+        amount=Decimal("10"),
+        net_amount=Decimal("0"),
+        status=CommissionLedger.Status.HELD,
+    )
+    CommissionLedger.objects.filter(pk=pre_held.pk).update(
+        created_at=approved_at - timezone.timedelta(days=1)
+    )
+
+    # Real credit earned AFTER KYC approval — this is what the member
+    # should see in the ledger.
+    post_order = _paid_order_for_buyer(buyer, "ORD-POST-KYC-DIRECT")
+    post_credit = CommissionLedger.objects.create(
+        recipient=sponsor,
+        source_user=buyer,
+        order=post_order,
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+        amount=Decimal("30"),
+        net_amount=Decimal("30"),
+        status=CommissionLedger.Status.CREDITED,
+    )
+    Wallet.objects.filter(user=sponsor).update(
+        cash_balance=Decimal("30"),
+        total_earned=Decimal("30"),
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+
+    r = client.get("/api/v1/user/earnings/?include=overview,ledger&page=1&page_size=20")
+    assert r.status_code == 200
+    rows = r.json()["data"]["ledger"]["rows"]
+    ids = [row["id"] for row in rows]
+    assert post_credit.id in ids
+    assert pre_held.id not in ids, (
+        "pre-KYC HELD passive credits must not show up in the member ledger"
+    )
+
+    # Also confirm the dedicated passive filter excludes the pre-KYC HELD
+    # row (it had status=HELD anyway, but the date guard reinforces this).
+    rp = client.get("/api/v1/user/earnings/?include=ledger&type=passive")
+    assert rp.status_code == 200
+    assert pre_held.id not in [row["id"] for row in rp.json()["data"]["ledger"]["rows"]]
+
+    # Admin releases the pre-KYC HELD row: status flips to CREDITED and
+    # net_amount becomes non-zero. created_at stays pre-KYC (the release
+    # service does not touch it) — the status escape clause in the SQL
+    # must let the row resurface so the user can see the line that
+    # corresponds to the new wallet credit.
+    CommissionLedger.objects.filter(pk=pre_held.pk).update(
+        status=CommissionLedger.Status.CREDITED,
+        amount=Decimal("10"),
+        net_amount=Decimal("10"),
+    )
+
+    r2 = client.get("/api/v1/user/earnings/?include=ledger&page=1&page_size=20")
+    assert r2.status_code == 200
+    ids2 = [row["id"] for row in r2.json()["data"]["ledger"]["rows"]]
+    assert pre_held.id in ids2, (
+        "an admin-released pre-KYC commission must reappear once it's credited"
+    )

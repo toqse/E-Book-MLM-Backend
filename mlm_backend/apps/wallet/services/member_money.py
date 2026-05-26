@@ -712,6 +712,12 @@ def _ledger_wallet_where(user_pk: int, since: datetime | None, typ: str) -> tupl
     return w_where, params
 
 
+# Status tokens used to recognise "not-yet-credited" commission/milestone rows.
+# Kept as plain strings so the SQL fragment can be reused across both tables
+# (CommissionLedger and MilestoneRecord share the same status spelling).
+_LEDGER_PRE_KYC_HIDDEN_STATUSES = ("HELD", "PENDING")
+
+
 def _ledger_union_sql_and_params(
     user: User,
     *,
@@ -726,11 +732,32 @@ def _ledger_union_sql_and_params(
     ms_table = MilestoneRecord._meta.db_table
     wt_table = WalletTransaction._meta.db_table
 
+    # Member-facing earnings ledger is scoped to activity from the moment the
+    # user was first admin-approved (sticky `kyc_first_approved_at`). This
+    # keeps pre-KYC HELD/PENDING placeholder rows — which never funded the
+    # wallet — out of the response so members don't see "passive income"
+    # lines that aren't actually theirs to spend.
+    #
+    # A pre-KYC row that an admin later releases via
+    # `release_held_commissions_for_user` flips status to CREDITED while
+    # keeping its original `created_at`; we deliberately let those resurface
+    # (status escape clause) so the line that backs the wallet credit is
+    # still visible.
+    kyc_since = getattr(user, "kyc_first_approved_at", None)
+    hidden_status_placeholders = ",".join(["%s"] * len(_LEDGER_PRE_KYC_HIDDEN_STATUSES))
+    pre_kyc_status_clause = (
+        f" AND (created_at >= %s OR status NOT IN ({hidden_status_placeholders}))"
+    )
+
     params: list[Any] = []
     c_where = f"recipient_id = {user.pk}"
     if since:
         c_where += " AND created_at >= %s"
         params.append(since)
+    if kyc_since:
+        c_where += pre_kyc_status_clause
+        params.append(kyc_since)
+        params.extend(_LEDGER_PRE_KYC_HIDDEN_STATUSES)
     frag_c, extra_c = _ledger_type_sql_commission(t)
     c_where += frag_c
     params.extend(extra_c)
@@ -740,11 +767,21 @@ def _ledger_union_sql_and_params(
     if since:
         m_where += " AND created_at >= %s"
         m_params.append(since)
+    if kyc_since:
+        m_where += pre_kyc_status_clause
+        m_params.append(kyc_since)
+        m_params.extend(_LEDGER_PRE_KYC_HIDDEN_STATUSES)
     frag_m, extra_m = _ledger_type_sql_milestone(t)
     m_where += frag_m
     m_params.extend(extra_m)
 
     w_where, w_params = _ledger_wallet_where(user.pk, since, t)
+    # Withdrawals can only happen after KYC verification, but apply the
+    # same lower bound for consistency and as defence-in-depth against
+    # any backfilled/imported rows that pre-date KYC approval.
+    if kyc_since:
+        w_where += " AND created_at >= %s"
+        w_params.append(kyc_since)
 
     all_params = params + m_params + w_params
 
