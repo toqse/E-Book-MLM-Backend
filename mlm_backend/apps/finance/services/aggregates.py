@@ -312,6 +312,41 @@ def _milestone_unlocked_count(d0: date, d1: date) -> int:
     ).count()
 
 
+def _net_platform(
+    gross: Decimal,
+    comm: Decimal,
+    ms: Decimal,
+    wd: Decimal,
+    refunds: Decimal,
+    gateway: Decimal,
+) -> Decimal:
+    return q2(gross - comm - ms - wd - refunds - gateway)
+
+
+def _paid_order_split_counts(qs: QuerySet[Order]) -> dict[str, int]:
+    """Single aggregate: total / actual (non-slot) / sponsor-slot paid orders."""
+    row = qs.aggregate(
+        total_paid=Count("id"),
+        actual_paid=Count("id", filter=Q(is_sponsor_slot_redemption=False)),
+        sponsor_slot=Count("id", filter=Q(is_sponsor_slot_redemption=True)),
+    )
+    return {
+        "total_paid": row["total_paid"] or 0,
+        "actual_paid": row["actual_paid"] or 0,
+        "sponsor_slot": row["sponsor_slot"] or 0,
+    }
+
+
+def _multi_book_order_count(d0: date, d1: date) -> int:
+    """Paid orders with two or more OrderLine rows (one grouped COUNT query)."""
+    return (
+        paid_orders_qs(d0, d1)
+        .annotate(line_count=Count("lines"))
+        .filter(line_count__gt=1)
+        .count()
+    )
+
+
 def _net_platform_in_window(d0: date, d1: date) -> Decimal:
     orders_cur = paid_orders_qs(d0, d1)
     gross = _sum_amount_paid(orders_cur)
@@ -320,7 +355,7 @@ def _net_platform_in_window(d0: date, d1: date) -> Decimal:
     wd = _withdrawals_net_paid(d0, d1)
     ref = _refunds_approved_amount(d0, d1)
     gw = _sum_gateway(orders_cur)
-    return q2(gross - comm - ms - wd - ref - gw)
+    return _net_platform(gross, comm, ms, wd, ref, gw)
 
 
 def _sponsor_active_stats() -> tuple[int, str]:
@@ -353,7 +388,13 @@ def build_overview(fr: FinanceDateRange) -> dict[str, Any]:
     wd_net_cur = _withdrawals_net_paid(d0, d1)
     wd_net_prev = _withdrawals_net_paid(p0, p1)
     refunds_cur = _refunds_approved_amount(d0, d1)
+    refunds_prev = _refunds_approved_amount(p0, p1)
     gateway_cur = _sum_gateway(orders_cur)
+    gateway_prev = _sum_gateway(orders_prev)
+
+    order_split = _paid_order_split_counts(orders_cur)
+    multi_book = _multi_book_order_count(d0, d1)
+    single_book = order_split["total_paid"] - multi_book
 
     tds_comm = _commission_tds(d0, d1)
     tds_wd = _withdrawals_tds(d0, d1)
@@ -361,8 +402,12 @@ def build_overview(fr: FinanceDateRange) -> dict[str, Any]:
     tds_total = q2(tds_comm + tds_wd + tds_ms)
 
     # Documented net platform approximation (single source of truth for UI + exports).
-    net_platform = _net_platform_in_window(d0, d1)
-    net_prev = _net_platform_in_window(p0, p1)
+    net_platform = _net_platform(
+        gross_cur, comm_net_cur, ms_net_cur, wd_net_cur, refunds_cur, gateway_cur
+    )
+    net_prev = _net_platform(
+        gross_prev, comm_net_prev, ms_net_prev, wd_net_prev, refunds_prev, gateway_prev
+    )
     margin_pct = str(((net_platform / gross_cur) * Decimal("100")).quantize(Q2)) if gross_cur > ZERO else "0.00"
 
     gst_collected = _gst_invoices_in_range(d0, d1)
@@ -450,6 +495,19 @@ def build_overview(fr: FinanceDateRange) -> dict[str, Any]:
             "gst_collected": {
                 "amount": str(q2(gst_collected)),
                 "source": "gst_invoice_sum_fallback_order_gst",
+            },
+            "orders_count": {
+                "total_paid": order_split["total_paid"],
+                "actual_paid": order_split["actual_paid"],
+                "sponsor_slot": order_split["sponsor_slot"],
+                "single_book": single_book,
+                "multi_book": multi_book,
+            },
+            "refunds_approved": {
+                "amount": str(q2(refunds_cur)),
+            },
+            "gateway_charges": {
+                "amount": str(q2(gateway_cur)),
             },
         },
         "charts": {

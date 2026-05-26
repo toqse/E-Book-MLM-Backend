@@ -8,8 +8,9 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.commissions.models import CommissionLedger
+from apps.courses.models import EBook
 from apps.finance.services.date_range import parse_finance_range
-from apps.payments.models import Order
+from apps.payments.models import Order, OrderLine
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
 
@@ -102,6 +103,13 @@ def test_finance_overview_and_income_streams_and_commission_dates(system_config)
     data = r.json()["data"]
     assert "kpis" in data
     assert data["kpis"]["gross_revenue"]["amount_paid"] == "241.72"
+    assert data["kpis"]["orders_count"]["total_paid"] == 1
+    assert data["kpis"]["orders_count"]["actual_paid"] == 1
+    assert data["kpis"]["orders_count"]["sponsor_slot"] == 0
+    assert data["kpis"]["orders_count"]["single_book"] == 1
+    assert data["kpis"]["orders_count"]["multi_book"] == 0
+    assert data["kpis"]["gateway_charges"]["amount"] == "5.72"
+    assert data["kpis"]["refunds_approved"]["amount"] == "0.00"
 
     inc = client.get("/api/v1/admin/finance/income-streams/", params).json()["data"]
     assert inc["total_income"] == "241.72"
@@ -115,6 +123,82 @@ def test_finance_overview_and_income_streams_and_commission_dates(system_config)
         {"from": (d - timedelta(days=30)).isoformat(), "to": (d - timedelta(days=1)).isoformat()},
     )
     assert r3.json()["data"]["count"] == 0
+
+
+@pytest.mark.django_db
+def test_finance_overview_orders_count_split(system_config):
+    admin = _finance_admin()
+    buyer = _member("+918080099010")
+    now = timezone.now()
+    d = timezone.localdate()
+    params = {"from": d.isoformat(), "to": d.isoformat()}
+
+    _paid_order(buyer, "ORD-FIN-SINGLE")
+
+    eb1 = EBook.objects.create(
+        title="Fin A",
+        slug="fin-book-a",
+        category="X",
+        description="d",
+        pages_count=1,
+        language="English",
+        price=200,
+        status=EBook.Status.PUBLISHED,
+        file_url="https://example.com/a.pdf",
+        is_primary=False,
+        is_active=True,
+    )
+    eb2 = EBook.objects.create(
+        title="Fin B",
+        slug="fin-book-b",
+        category="X",
+        description="d",
+        pages_count=1,
+        language="English",
+        price=200,
+        status=EBook.Status.PUBLISHED,
+        file_url="https://example.com/b.pdf",
+        is_primary=False,
+        is_active=True,
+    )
+    multi = Order.objects.create(
+        user=buyer,
+        ebook=eb1,
+        order_number="ORD-FIN-MULTI",
+        base_price=Decimal("400"),
+        gst_amount=Decimal("72"),
+        gateway_charge=Decimal("5.72"),
+        total_amount=Decimal("477.72"),
+        discount_amount=Decimal("0"),
+        amount_paid=Decimal("477.72"),
+        is_retail_purchase=False,
+        status=Order.Status.PAID,
+        paid_at=now,
+    )
+    OrderLine.objects.create(order=multi, ebook=eb1, unit_base_price=Decimal("200"))
+    OrderLine.objects.create(order=multi, ebook=eb2, unit_base_price=Decimal("200"))
+
+    _paid_order(
+        buyer,
+        "ORD-FIN-SLOT",
+        is_sponsor_slot_redemption=True,
+        amount_paid=Decimal("0"),
+        gateway_charge=Decimal("0"),
+        base_price=Decimal("0"),
+        gst_amount=Decimal("0"),
+        total_amount=Decimal("0"),
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    data = client.get("/api/v1/admin/finance/overview/", params).json()["data"]
+    oc = data["kpis"]["orders_count"]
+    assert oc["total_paid"] == 3
+    assert oc["actual_paid"] == 2
+    assert oc["sponsor_slot"] == 1
+    assert oc["single_book"] == 2
+    assert oc["multi_book"] == 1
+    assert data["kpis"]["gateway_charges"]["amount"] == "11.44"
 
 
 @pytest.mark.django_db
