@@ -18,7 +18,6 @@ from apps.admin_panel.utils import get_system_config
 from apps.common.permissions import IsFinanceAdmin, require_kyc_verified_and_compliant, require_kyc_verified_and_compliant
 from apps.common.responses import envelope_response
 from apps.users.models import User
-from apps.tds.services import calculate_and_apply_194h_tds
 from apps.wallet.services.member_money import (
     build_band_ladder,
     build_payouts_bundle,
@@ -309,29 +308,27 @@ def wallet_withdraw(request):
                 status=400,
             )
 
-        tds = calculate_and_apply_194h_tds(user=user, gross_amount=amount)
-        tds_amount = _q2(tds.tds_amount)
-        net_payable = _q2(tds.net_amount)
+        # TDS is withheld at commission/milestone credit time (Sec 194H), not on withdrawal.
+        tds_amount = ZERO
+        net_payable = _q2(amount)
         wr = WithdrawalRequest.objects.create(
             user=user,
             band=band,
             amount_requested=amount,
             tds_amount=tds_amount,
             net_payable=net_payable,
-            tds_section="194H" if tds_amount > ZERO else "",
+            tds_section="",
             payout_method=payout_method,
             payout_destination_hint=_payout_destination_hint(user, payout_method),
         )
 
         wallet.cash_balance = _q2(wallet.cash_balance - amount)
         wallet.total_withdrawn = _q2(wallet.total_withdrawn + net_payable)
-        wallet.total_tds_deducted = _q2(wallet.total_tds_deducted + tds_amount)
         wallet.band_cash_withdrawn_fy = _q2(wallet.band_cash_withdrawn_fy + amount)
         wallet.save(
             update_fields=[
                 "cash_balance",
                 "total_withdrawn",
-                "total_tds_deducted",
                 "band_cash_withdrawn_fy",
                 "updated_at",
             ]

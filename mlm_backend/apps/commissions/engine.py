@@ -15,8 +15,9 @@ from apps.wallet.bands import (
     on_total_earned_updated,
 )
 from apps.wallet.models import Wallet, WalletTransaction
-from apps.tds.services import calculate_and_apply_194h_tds
+from apps.tds.services import calculate_and_apply_194h_tds, reverse_194h_tds
 
+from .credit_helpers import tds_wallet_meta, write_commission_wallet_entries
 from .milestone_tiers import get_milestones
 from .models import CommissionLedger, MilestoneRecord
 
@@ -224,53 +225,71 @@ class CommissionEngine:
                 gross,
                 gross_credit,
             )
-        tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
-        # Slot-band routing: the band gate is read from total_earned BEFORE the
-        # bump, matching how `on_total_earned_updated` issues slot batches at
-        # the boundary. A credit that lands fully inside a slot band funds the
-        # sponsor-slot mechanism instead of cash.
+        # Slot-band routing: read band BEFORE bump; slot bands skip TDS and cash.
         band_before_credit = _band_index_for_earnings(wallet.total_earned)
         slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
-        if not slot_band_held:
-            wallet.cash_balance += tds.net_amount
-        wallet.total_earned += tds.net_amount
-        wallet.total_tds_deducted += tds.tds_amount
-        wallet.save()
-        if not slot_band_held:
-            WalletTransaction.objects.create(
-                user=recipient,
-                tx_type=WalletTransaction.TxType.CREDIT,
-                amount=tds.net_amount,
-                balance_after=wallet.cash_balance,
-                reference=f"COMM-{order.order_number}",
-                meta={
+        if slot_band_held:
+            wallet.total_earned += gross_credit
+            wallet.save()
+            CommissionLedger.objects.create(
+                recipient=recipient,
+                source_user=source,
+                order=order,
+                commission_type=ctype,
+                amount=gross_credit,
+                tds_deducted=Decimal("0"),
+                net_amount=gross_credit,
+                status=CommissionLedger.Status.CREDITED,
+                slot_band_held=True,
+            )
+            logger.info(
+                "commission_credited_slot_band order_id=%s recipient_id=%s type=%s gross=%s",
+                order.id,
+                recipient.id,
+                ctype,
+                gross_credit,
+            )
+        else:
+            tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
+            wallet.total_earned += tds.gross_amount
+            wallet.total_tds_deducted += tds.tds_amount
+            write_commission_wallet_entries(
+                wallet=wallet,
+                recipient=recipient,
+                gross=tds.gross_amount,
+                tds=tds.tds_amount,
+                ref_credit=f"COMM-{order.order_number}",
+                ref_tds=f"TDS-COMM-{order.order_number}",
+                credit_meta={
                     "type": ctype,
                     "gross": str(tds.gross_amount),
-                    "tds": str(tds.tds_amount),
-                    "tds_rate_percent": str(tds.tds_rate_percent),
                     "financial_year": tds.financial_year,
                 },
+                tds_meta=tds_wallet_meta(
+                    tds,
+                    extra={"type": ctype, "linked_reference": f"COMM-{order.order_number}"},
+                ),
             )
-        CommissionLedger.objects.create(
-            recipient=recipient,
-            source_user=source,
-            order=order,
-            commission_type=ctype,
-            amount=tds.gross_amount,
-            tds_deducted=tds.tds_amount,
-            net_amount=tds.net_amount,
-            status=CommissionLedger.Status.CREDITED,
-            slot_band_held=slot_band_held,
-        )
-        logger.info(
-            "commission_credited order_id=%s recipient_id=%s type=%s gross=%s net=%s slot_band_held=%s",
-            order.id,
-            recipient.id,
-            ctype,
-            tds.gross_amount,
-            tds.net_amount,
-            slot_band_held,
-        )
+            wallet.save()
+            CommissionLedger.objects.create(
+                recipient=recipient,
+                source_user=source,
+                order=order,
+                commission_type=ctype,
+                amount=tds.gross_amount,
+                tds_deducted=tds.tds_amount,
+                net_amount=tds.net_amount,
+                status=CommissionLedger.Status.CREDITED,
+                slot_band_held=False,
+            )
+            logger.info(
+                "commission_credited order_id=%s recipient_id=%s type=%s gross=%s net=%s",
+                order.id,
+                recipient.id,
+                ctype,
+                tds.gross_amount,
+                tds.net_amount,
+            )
         if wallet.total_earned >= cap:
             recipient.account_status = User.AccountStatus.CAPPED
             recipient.save(update_fields=["account_status"])
@@ -311,37 +330,53 @@ class CommissionEngine:
             if remaining <= 0:
                 return
             gross_pay = min(bonus, remaining)
-            tds = calculate_and_apply_194h_tds(user=sponsor, gross_amount=gross_pay)
             band_before_credit = _band_index_for_earnings(wallet.total_earned)
             slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
-            if not slot_band_held:
-                wallet.cash_balance += tds.net_amount
-            wallet.total_earned += tds.net_amount
-            wallet.total_tds_deducted += tds.tds_amount
-            wallet.save()
-            MilestoneRecord.objects.create(
-                user=sponsor,
-                milestone_referrals=threshold,
-                bonus_amount=tds.gross_amount,
-                tds_deducted=tds.tds_amount,
-                net_bonus=tds.net_amount,
-                status="CREDITED",
-                slot_band_held=slot_band_held,
-            )
-            if not slot_band_held:
-                WalletTransaction.objects.create(
+            if slot_band_held:
+                wallet.total_earned += gross_pay
+                wallet.save()
+                MilestoneRecord.objects.create(
                     user=sponsor,
-                    tx_type=WalletTransaction.TxType.CREDIT,
-                    amount=tds.net_amount,
-                    balance_after=wallet.cash_balance,
-                    reference=f"MILESTONE-{threshold}",
-                    meta={
+                    milestone_referrals=threshold,
+                    bonus_amount=gross_pay,
+                    tds_deducted=Decimal("0"),
+                    net_bonus=gross_pay,
+                    status="CREDITED",
+                    slot_band_held=True,
+                )
+            else:
+                tds = calculate_and_apply_194h_tds(user=sponsor, gross_amount=gross_pay)
+                wallet.total_earned += tds.gross_amount
+                wallet.total_tds_deducted += tds.tds_amount
+                write_commission_wallet_entries(
+                    wallet=wallet,
+                    recipient=sponsor,
+                    gross=tds.gross_amount,
+                    tds=tds.tds_amount,
+                    ref_credit=f"MILESTONE-{threshold}",
+                    ref_tds=f"TDS-MILESTONE-{threshold}",
+                    credit_meta={
                         "type": "MILESTONE",
                         "gross": str(tds.gross_amount),
-                        "tds": str(tds.tds_amount),
-                        "tds_rate_percent": str(tds.tds_rate_percent),
                         "financial_year": tds.financial_year,
                     },
+                    tds_meta=tds_wallet_meta(
+                        tds,
+                        extra={
+                            "type": "MILESTONE",
+                            "linked_reference": f"MILESTONE-{threshold}",
+                        },
+                    ),
+                )
+                wallet.save()
+                MilestoneRecord.objects.create(
+                    user=sponsor,
+                    milestone_referrals=threshold,
+                    bonus_amount=tds.gross_amount,
+                    tds_deducted=tds.tds_amount,
+                    net_bonus=tds.net_amount,
+                    status="CREDITED",
+                    slot_band_held=False,
                 )
             on_total_earned_updated(wallet)
 
@@ -353,12 +388,19 @@ class CommissionEngine:
         ).select_related("recipient")
         for e in entries:
             wallet = Wallet.objects.select_for_update().get(user=e.recipient)
-            # Slot-band-held credits never increased cash_balance, so reversing
-            # them must not decrease it either. They still unwind total_earned
-            # (which un-funds the slot pool on the lifetime ledger).
+            # Slot-band-held credits never increased cash_balance; cash reversals
+            # use net_amount (actual cash delta under Model A).
             if not e.slot_band_held:
                 wallet.cash_balance -= e.net_amount
-            wallet.total_earned -= e.net_amount
+                reverse_194h_tds(
+                    user=e.recipient,
+                    gross_amount=e.amount,
+                    tds_amount=e.tds_deducted,
+                )
+            wallet.total_earned -= e.amount
+            wallet.total_tds_deducted = max(
+                Decimal("0"), wallet.total_tds_deducted - e.tds_deducted
+            )
             wallet.save()
             if not e.slot_band_held:
                 WalletTransaction.objects.create(

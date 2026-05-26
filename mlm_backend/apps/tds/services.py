@@ -115,3 +115,46 @@ def calculate_and_apply_194h_tds(*, user: User, gross_amount: Decimal) -> TdsRes
         financial_year=fy,
     )
 
+
+@transaction.atomic
+def reverse_194h_tds(*, user: User, gross_amount: Decimal, tds_amount: Decimal) -> None:
+    """Undo a prior commission/milestone TDS application on the FY income ledger."""
+    gross_amount = _q2(gross_amount)
+    tds_amount = _q2(tds_amount)
+    if gross_amount <= ZERO and tds_amount <= ZERO:
+        return
+    fy = get_current_financial_year()
+    ledger = (
+        TdsLedger.objects.select_for_update()
+        .filter(user=user, financial_year=fy)
+        .first()
+    )
+    if ledger is None:
+        return
+    ledger.total_earned = max(ZERO, _q2(ledger.total_earned - gross_amount))
+    ledger.total_tds = max(ZERO, _q2(ledger.total_tds - tds_amount))
+    if ledger.total_earned <= TDS_THRESHOLD and ledger.total_tds == ZERO:
+        ledger.tds_triggered = False
+        ledger.tds_triggered_at = None
+    ledger.save(
+        update_fields=[
+            "total_earned",
+            "total_tds",
+            "tds_triggered",
+            "tds_triggered_at",
+            "updated_at",
+        ]
+    )
+
+
+def compute_correct_tds_for_cumulative_gross(*, user: User, cumulative_gross: Decimal) -> Decimal:
+    """
+    FY TDS liability if cumulative cash commission/milestone gross were `cumulative_gross`.
+    Mirrors catch-up: once above threshold, required TDS = cumulative_gross * rate.
+    """
+    cumulative_gross = _q2(cumulative_gross)
+    if cumulative_gross <= TDS_THRESHOLD:
+        return ZERO
+    rate = get_194h_rate_for_user(user)
+    return _q2(cumulative_gross * rate)
+

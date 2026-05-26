@@ -26,6 +26,7 @@ class WalletTransaction(models.Model):
         CREDIT = "CREDIT", "Credit"
         DEBIT = "DEBIT", "Debit"
         ADJUSTMENT = "ADJUSTMENT", "Adjustment"
+        TDS = "TDS", "TDS Withheld"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

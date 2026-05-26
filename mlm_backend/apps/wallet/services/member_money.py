@@ -125,6 +125,7 @@ def _parse_ledger_type(raw: str | None) -> str:
         "reversed",
         "pending",
         "withdrawal",
+        "tds",
     }
     return t if t in allowed else "all"
 
@@ -416,6 +417,108 @@ def _commission_description(row: CommissionLedger) -> str:
     return f"Commission — {row.get_commission_type_display()}"
 
 
+def _tds_withheld_description(*, base_desc: str, tds_amount: Decimal, rate_note: str) -> str:
+    return f"TDS withheld (Sec {rate_note}) — {base_desc} — ₹{_fmt_money(tds_amount)}"
+
+
+def _serialize_commission_entries(row: CommissionLedger) -> list[dict[str, Any]]:
+    """One or two ledger rows: gross credit plus optional TDS withholding line."""
+    if (
+        row.slot_band_held
+        or (row.tds_deducted or ZERO) <= ZERO
+        or row.status != CommissionLedger.Status.CREDITED
+    ):
+        return [_serialize_commission(row)]
+
+    gross = row.amount or ZERO
+    tds_amt = row.tds_deducted or ZERO
+    base = _serialize_commission(row)
+    credit = {
+        **base,
+        "gross": _fmt_money(gross),
+        "tds": "0",
+        "net": _fmt_money(gross),
+        "net_credited": _fmt_money(gross),
+        "tds_deducted": "0",
+        "_balance_delta": gross,
+        "cash_credited": True,
+    }
+    rate_note = "194H"
+    tds_row = {
+        **base,
+        "id": -abs(row.id),
+        "kind": "COMMISSION_TDS",
+        "type": "TDS Withheld",
+        "detail": _tds_withheld_description(
+            base_desc=base["detail"],
+            tds_amount=tds_amt,
+            rate_note=rate_note,
+        ),
+        "description": _tds_withheld_description(
+            base_desc=base["description"],
+            tds_amount=tds_amt,
+            rate_note=rate_note,
+        ),
+        "gross": _fmt_money(-tds_amt),
+        "tds": _fmt_money(tds_amt),
+        "net": _fmt_money(-tds_amt),
+        "net_credited": _fmt_money(-tds_amt),
+        "tds_deducted": _fmt_money(tds_amt),
+        "status_label": "TDS Withheld",
+        "_balance_delta": -tds_amt,
+        "cash_credited": False,
+    }
+    return [credit, tds_row]
+
+
+def _serialize_milestone_entries(row: MilestoneRecord) -> list[dict[str, Any]]:
+    if (
+        row.slot_band_held
+        or (row.tds_deducted or ZERO) <= ZERO
+        or row.status != "CREDITED"
+    ):
+        return [_serialize_milestone(row)]
+
+    gross = row.bonus_amount or ZERO
+    tds_amt = row.tds_deducted or ZERO
+    base = _serialize_milestone(row)
+    credit = {
+        **base,
+        "gross": _fmt_money(gross),
+        "tds": "0",
+        "net": _fmt_money(gross),
+        "net_credited": _fmt_money(gross),
+        "tds_deducted": "0",
+        "_balance_delta": gross,
+        "cash_credited": True,
+    }
+    tds_row = {
+        **base,
+        "id": -abs(row.id),
+        "kind": "MILESTONE_TDS",
+        "type": "TDS Withheld",
+        "detail": _tds_withheld_description(
+            base_desc=base["detail"],
+            tds_amount=tds_amt,
+            rate_note="194H",
+        ),
+        "description": _tds_withheld_description(
+            base_desc=base["description"],
+            tds_amount=tds_amt,
+            rate_note="194H",
+        ),
+        "gross": _fmt_money(-tds_amt),
+        "tds": _fmt_money(tds_amt),
+        "net": _fmt_money(-tds_amt),
+        "net_credited": _fmt_money(-tds_amt),
+        "tds_deducted": _fmt_money(tds_amt),
+        "status_label": "TDS Withheld",
+        "_balance_delta": -tds_amt,
+        "cash_credited": False,
+    }
+    return [credit, tds_row]
+
+
 def _serialize_commission(row: CommissionLedger) -> dict[str, Any]:
     src = row.source_user
     triggered = None
@@ -659,6 +762,8 @@ def _ledger_type_sql_commission(typ: str) -> tuple[str, list[Any]]:
     """Returns SQL fragment for commissions_ledger WHERE (empty = no filter)."""
     st = CommissionLedger.Status
     ct = CommissionLedger.CommissionType
+    if typ == "tds":
+        return " AND 1=0 ", []
     if typ == "withdrawal":
         return " AND 1=0 ", []
     if typ == "milestone":
@@ -678,7 +783,7 @@ def _ledger_type_sql_commission(typ: str) -> tuple[str, list[Any]]:
 
 
 def _ledger_type_sql_milestone(typ: str) -> tuple[str, list[Any]]:
-    if typ in ("direct", "passive", "reversed", "withdrawal"):
+    if typ in ("direct", "passive", "reversed", "withdrawal", "tds"):
         return " AND 1=0 ", []
     if typ == "pending":
         return " AND status = %s", ["PENDING"]
@@ -690,6 +795,8 @@ def _ledger_type_sql_milestone(typ: str) -> tuple[str, list[Any]]:
 def _ledger_type_sql_withdrawal(typ: str) -> tuple[str, list[Any]]:
     if typ in ("all", "withdrawal"):
         return "", []
+    if typ == "tds":
+        return " AND 1=0 ", []
     return " AND 1=0 ", []
 
 
@@ -810,7 +917,9 @@ def _ledger_union_sql_and_params(
     return count_sql, union_sql, all_params
 
 
-def _hydrate_ledger_keys(user: User, keys: list[tuple]) -> list[dict[str, Any]]:
+def _hydrate_ledger_keys(
+    user: User, keys: list[tuple], *, typ: str = "all"
+) -> list[dict[str, Any]]:
     c_ids = [rid for src, rid, _ in keys if src == "c"]
     m_ids = [rid for src, rid, _ in keys if src == "m"]
     wt_ids = [rid for src, rid, _ in keys if src == "w"]
@@ -834,11 +943,19 @@ def _hydrate_ledger_keys(user: User, keys: list[tuple]) -> list[dict[str, Any]]:
         if src == "c":
             row = comm_by_id.get(rid)
             if row:
-                results.append(_serialize_commission(row))
+                if typ == "tds":
+                    if (row.tds_deducted or ZERO) > ZERO and not row.slot_band_held:
+                        results.extend(_serialize_commission_entries(row)[1:])
+                    continue
+                results.extend(_serialize_commission_entries(row))
         elif src == "m":
             row = ms_by_id.get(rid)
             if row:
-                results.append(_serialize_milestone(row))
+                if typ == "tds":
+                    if (row.tds_deducted or ZERO) > ZERO and not row.slot_band_held:
+                        results.extend(_serialize_milestone_entries(row)[1:])
+                    continue
+                results.extend(_serialize_milestone_entries(row))
         else:
             wt = wt_by_id.get(rid)
             if not wt:
@@ -889,7 +1006,7 @@ def build_ledger(
         cursor.execute(union_sql, params + [prefix_limit])
         keys = cursor.fetchall()
 
-    walked_results = _hydrate_ledger_keys(user, keys)
+    walked_results = _hydrate_ledger_keys(user, keys, typ=typ)
     _apply_ledger_running_balance(user.pk, walked_results)
     results = walked_results[offset : offset + page_size]
 
@@ -948,7 +1065,7 @@ def build_ledger_export_rows(
         cursor.execute(union_sql, params + [cap])
         keys = cursor.fetchall()
 
-    results = _hydrate_ledger_keys(user, keys)
+    results = _hydrate_ledger_keys(user, keys, typ=t)
     _apply_ledger_running_balance(user.pk, results)
 
     return {
@@ -1174,6 +1291,7 @@ def build_earnings_response(
                 "pending",
                 "reversed",
                 "withdrawal",
+                "tds",
             ],
         }
         data["ledger"] = build_ledger(

@@ -11,7 +11,7 @@ from apps.commissions.models import CommissionLedger
 from apps.payments.models import Order
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
-from apps.wallet.models import Wallet
+from apps.wallet.models import Wallet, WalletTransaction
 
 
 def _finance_admin() -> User:
@@ -140,7 +140,10 @@ def test_force_credit_credits_after_kyc_verified(system_config):
     assert row.status == CommissionLedger.Status.CREDITED
     assert row.net_amount > 0
     w = Wallet.objects.get(user=earner)
-    assert w.total_earned == row.net_amount
+    assert w.total_earned == row.amount
+    assert WalletTransaction.objects.filter(
+        user=earner, tx_type=WalletTransaction.TxType.CREDIT
+    ).exists()
 
 
 @pytest.mark.django_db

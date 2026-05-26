@@ -135,10 +135,12 @@ def display_status_for_ledger(row: CommissionLedger) -> str:
 
 
 def _tds_rate_percent(amount: Decimal, tds: Decimal) -> str | None:
+    """Statutory Sec 194H rate from config (not misleading per-row effective %)."""
     if amount <= 0 or tds <= 0:
         return None
+    cfg = get_system_config()
     try:
-        pct = (tds / amount) * Decimal("100")
+        pct = (cfg.tds_194h_rate or Decimal("0")) * Decimal("100")
         return str(pct.quantize(Decimal("0.01")))
     except Exception:
         return None

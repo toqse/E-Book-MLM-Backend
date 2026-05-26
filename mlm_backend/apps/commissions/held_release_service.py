@@ -9,10 +9,15 @@ from django.db import transaction
 
 from apps.admin_panel.utils import get_system_config
 from apps.audit.services import write_audit
+from apps.commissions.credit_helpers import tds_wallet_meta, write_commission_wallet_entries
 from apps.payments.models import Order
 from apps.users.models import User
-from apps.wallet.bands import on_total_earned_updated
-from apps.wallet.models import Wallet, WalletTransaction
+from apps.wallet.bands import (
+    SLOT_BAND_NUMBERS,
+    _band_index_for_earnings,
+    on_total_earned_updated,
+)
+from apps.wallet.models import Wallet
 from apps.tds.services import calculate_and_apply_194h_tds
 
 from .models import CommissionLedger
@@ -91,33 +96,58 @@ def release_held_commissions_for_user(
             skipped.append(_skip(entry.id, "zero_gross_credit"))
             continue
 
-        tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
-        wallet.cash_balance += tds.net_amount
-        wallet.total_earned += tds.net_amount
-        wallet.total_tds_deducted += tds.tds_amount
-        wallet.save()
+        band_before_credit = _band_index_for_earnings(wallet.total_earned)
+        slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
 
-        WalletTransaction.objects.create(
-            user=recipient,
-            tx_type=WalletTransaction.TxType.CREDIT,
-            amount=tds.net_amount,
-            balance_after=wallet.cash_balance,
-            reference=f"COMM-{order.order_number}",
-            meta={
-                "type": entry.commission_type,
-                "gross": str(tds.gross_amount),
-                "tds": str(tds.tds_amount),
-                "tds_rate_percent": str(tds.tds_rate_percent),
-                "financial_year": tds.financial_year,
-                "admin_held_release": True,
-            },
-        )
+        if slot_band_held:
+            wallet.total_earned += gross_credit
+            wallet.save()
+            entry.amount = gross_credit
+            entry.tds_deducted = Decimal("0")
+            entry.net_amount = gross_credit
+            entry.slot_band_held = True
+        else:
+            tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
+            wallet.total_earned += tds.gross_amount
+            wallet.total_tds_deducted += tds.tds_amount
+            write_commission_wallet_entries(
+                wallet=wallet,
+                recipient=recipient,
+                gross=tds.gross_amount,
+                tds=tds.tds_amount,
+                ref_credit=f"COMM-{order.order_number}",
+                ref_tds=f"TDS-COMM-{order.order_number}",
+                credit_meta={
+                    "type": entry.commission_type,
+                    "gross": str(tds.gross_amount),
+                    "financial_year": tds.financial_year,
+                    "admin_held_release": True,
+                },
+                tds_meta=tds_wallet_meta(
+                    tds,
+                    extra={
+                        "type": entry.commission_type,
+                        "admin_held_release": True,
+                        "linked_reference": f"COMM-{order.order_number}",
+                    },
+                ),
+            )
+            wallet.save()
+            entry.amount = tds.gross_amount
+            entry.tds_deducted = tds.tds_amount
+            entry.net_amount = tds.net_amount
+            entry.slot_band_held = False
 
-        entry.amount = tds.gross_amount
-        entry.tds_deducted = tds.tds_amount
-        entry.net_amount = tds.net_amount
         entry.status = CommissionLedger.Status.CREDITED
-        entry.save(update_fields=["amount", "tds_deducted", "net_amount", "status"])
+        entry.save(
+            update_fields=[
+                "amount",
+                "tds_deducted",
+                "net_amount",
+                "status",
+                "slot_band_held",
+            ]
+        )
 
         remainder = orig_gross - gross_credit
         if remainder > 0:
