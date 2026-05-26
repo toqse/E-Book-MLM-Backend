@@ -18,7 +18,11 @@ from apps.wallet.bands import (
     on_total_earned_updated,
 )
 from apps.wallet.models import Wallet
-from apps.tds.services import calculate_and_apply_194h_tds
+from apps.wallet.tds_settlement import settle_tds_payable
+from apps.tds.services import (
+    calculate_and_apply_194h_tds,
+    calculate_and_apply_194r_tds,
+)
 
 from .models import CommissionLedger
 
@@ -100,11 +104,13 @@ def release_held_commissions_for_user(
         slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
 
         if slot_band_held:
-            wallet.total_earned += gross_credit
+            r = calculate_and_apply_194r_tds(user=recipient, gross_amount=gross_credit)
+            wallet.total_earned += r.gross_amount
+            wallet.tds_payable = (wallet.tds_payable or Decimal("0")) + r.tds_amount
             wallet.save()
-            entry.amount = gross_credit
-            entry.tds_deducted = Decimal("0")
-            entry.net_amount = gross_credit
+            entry.amount = r.gross_amount
+            entry.tds_deducted = r.tds_amount
+            entry.net_amount = r.gross_amount
             entry.slot_band_held = True
         else:
             tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
@@ -131,6 +137,12 @@ def release_held_commissions_for_user(
                         "linked_reference": f"COMM-{order.order_number}",
                     },
                 ),
+            )
+            settle_tds_payable(
+                wallet=wallet,
+                recipient=recipient,
+                reference=f"TDS-194R-SETTLE-{order.order_number}",
+                defer_save=True,
             )
             wallet.save()
             entry.amount = tds.gross_amount

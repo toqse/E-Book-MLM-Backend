@@ -26,6 +26,7 @@ from apps.wallet.services.member_money import (
 
 from .bands import describe_bands_status
 from .models import Wallet, WalletTransaction, WithdrawalRequest
+from .tds_settlement import settle_tds_payable
 
 
 CASH_BANDS = frozenset({1, 3, 5, 7, 9})
@@ -278,6 +279,13 @@ def wallet_withdraw(request):
                 errors={"detail": "band_mismatch", "current_band": wallet.current_band},
                 status=400,
             )
+        # Settle any accrued Sec 194R TDS payable from cash before sizing
+        # the withdrawal so the user can't drain cash that owes TDS.
+        settle_tds_payable(
+            wallet=wallet,
+            recipient=user,
+            reference="TDS-194R-SETTLE-PRE-WITHDRAW",
+        )
         cfg = get_system_config()
         cooling_days = max(0, int(cfg.cooling_off_days))
         cutoff = timezone.now() - timedelta(days=cooling_days)

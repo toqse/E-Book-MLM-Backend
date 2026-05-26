@@ -11,9 +11,16 @@ from apps.tds.models import TdsLedger
 from apps.users.models import User
 
 
+# Sec 194H — commission income (cash bands)
 TDS_THRESHOLD = Decimal("20000.00")
 RATE_PAN = Decimal("0.02")
 RATE_NO_PAN = Decimal("0.20")
+
+# Sec 194R — perquisite / benefit (slot bands)
+TDS_THRESHOLD_194R = Decimal("20000.00")
+RATE_194R_PAN = Decimal("0.10")
+RATE_194R_NO_PAN = Decimal("0.20")
+
 ZERO = Decimal("0.00")
 TWO_PLACES = Decimal("0.01")
 
@@ -38,6 +45,12 @@ def get_194h_rate_for_user(user: User) -> Decimal:
     return RATE_PAN if pan else RATE_NO_PAN
 
 
+def get_194r_rate_for_user(user: User) -> Decimal:
+    """Sec 194R: 10% when PAN present, else 20%."""
+    pan = (getattr(user, "pan_number", None) or "").strip()
+    return RATE_194R_PAN if pan else RATE_194R_NO_PAN
+
+
 def _q2(v: Decimal) -> Decimal:
     return (v or ZERO).quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
 
@@ -50,21 +63,24 @@ class TdsResult:
     tds_rate_percent: Decimal
     tds_applicable: bool
     financial_year: str
+    section: str = TdsLedger.SECTION_194H
 
 
-@transaction.atomic
-def calculate_and_apply_194h_tds(*, user: User, gross_amount: Decimal) -> TdsResult:
-    """
-    Implements the cumulative-FY 'catch-up' logic from tds-implementation-logic.md.
-    Updates (or creates) the per-user-per-FY TdsLedger row under select_for_update.
-    """
+def _apply_section_tds(
+    *,
+    user: User,
+    gross_amount: Decimal,
+    section: str,
+    rate: Decimal,
+    threshold: Decimal,
+) -> TdsResult:
     gross_amount = _q2(gross_amount)
     fy = get_current_financial_year()
-    rate = get_194h_rate_for_user(user)
 
     ledger, _ = TdsLedger.objects.select_for_update().get_or_create(
         user=user,
         financial_year=fy,
+        section=section,
         defaults={
             "total_earned": ZERO,
             "total_tds": ZERO,
@@ -86,7 +102,7 @@ def calculate_and_apply_194h_tds(*, user: User, gross_amount: Decimal) -> TdsRes
         if tds_amount < ZERO:
             tds_amount = ZERO
         tds_applicable = True
-    elif new_total > TDS_THRESHOLD:
+    elif new_total > threshold:
         required_total = _q2(new_total * rate)
         already = _q2(ledger.total_tds)
         tds_amount = _q2(required_total - already)
@@ -104,7 +120,15 @@ def calculate_and_apply_194h_tds(*, user: User, gross_amount: Decimal) -> TdsRes
 
     ledger.total_earned = _q2(ledger.total_earned + gross_amount)
     ledger.total_tds = _q2(ledger.total_tds + tds_amount)
-    ledger.save(update_fields=["total_earned", "total_tds", "tds_triggered", "tds_triggered_at", "updated_at"])
+    ledger.save(
+        update_fields=[
+            "total_earned",
+            "total_tds",
+            "tds_triggered",
+            "tds_triggered_at",
+            "updated_at",
+        ]
+    )
 
     return TdsResult(
         gross_amount=gross_amount,
@@ -113,12 +137,48 @@ def calculate_and_apply_194h_tds(*, user: User, gross_amount: Decimal) -> TdsRes
         tds_rate_percent=_q2(rate * Decimal("100")),
         tds_applicable=tds_applicable and tds_amount > ZERO,
         financial_year=fy,
+        section=section,
     )
 
 
 @transaction.atomic
-def reverse_194h_tds(*, user: User, gross_amount: Decimal, tds_amount: Decimal) -> None:
-    """Undo a prior commission/milestone TDS application on the FY income ledger."""
+def calculate_and_apply_194h_tds(*, user: User, gross_amount: Decimal) -> TdsResult:
+    """
+    Sec 194H (cash commission income). Cumulative-FY catch-up logic.
+    Updates (or creates) the per-user-per-FY TdsLedger row under select_for_update.
+    """
+    return _apply_section_tds(
+        user=user,
+        gross_amount=gross_amount,
+        section=TdsLedger.SECTION_194H,
+        rate=get_194h_rate_for_user(user),
+        threshold=TDS_THRESHOLD,
+    )
+
+
+@transaction.atomic
+def calculate_and_apply_194r_tds(*, user: User, gross_amount: Decimal) -> TdsResult:
+    """
+    Sec 194R (perquisite / slot-band income). Independent FY threshold (₹20,000)
+    and catch-up logic, tracked under section='194R'.
+    """
+    return _apply_section_tds(
+        user=user,
+        gross_amount=gross_amount,
+        section=TdsLedger.SECTION_194R,
+        rate=get_194r_rate_for_user(user),
+        threshold=TDS_THRESHOLD_194R,
+    )
+
+
+def _reverse_section_tds(
+    *,
+    user: User,
+    gross_amount: Decimal,
+    tds_amount: Decimal,
+    section: str,
+    threshold: Decimal,
+) -> None:
     gross_amount = _q2(gross_amount)
     tds_amount = _q2(tds_amount)
     if gross_amount <= ZERO and tds_amount <= ZERO:
@@ -126,14 +186,14 @@ def reverse_194h_tds(*, user: User, gross_amount: Decimal, tds_amount: Decimal) 
     fy = get_current_financial_year()
     ledger = (
         TdsLedger.objects.select_for_update()
-        .filter(user=user, financial_year=fy)
+        .filter(user=user, financial_year=fy, section=section)
         .first()
     )
     if ledger is None:
         return
     ledger.total_earned = max(ZERO, _q2(ledger.total_earned - gross_amount))
     ledger.total_tds = max(ZERO, _q2(ledger.total_tds - tds_amount))
-    if ledger.total_earned <= TDS_THRESHOLD and ledger.total_tds == ZERO:
+    if ledger.total_earned <= threshold and ledger.total_tds == ZERO:
         ledger.tds_triggered = False
         ledger.tds_triggered_at = None
     ledger.save(
@@ -147,14 +207,49 @@ def reverse_194h_tds(*, user: User, gross_amount: Decimal, tds_amount: Decimal) 
     )
 
 
-def compute_correct_tds_for_cumulative_gross(*, user: User, cumulative_gross: Decimal) -> Decimal:
+@transaction.atomic
+def reverse_194h_tds(*, user: User, gross_amount: Decimal, tds_amount: Decimal) -> None:
+    """Undo a prior commission/milestone TDS application on the FY 194H ledger."""
+    _reverse_section_tds(
+        user=user,
+        gross_amount=gross_amount,
+        tds_amount=tds_amount,
+        section=TdsLedger.SECTION_194H,
+        threshold=TDS_THRESHOLD,
+    )
+
+
+@transaction.atomic
+def reverse_194r_tds(*, user: User, gross_amount: Decimal, tds_amount: Decimal) -> None:
+    """Undo a prior slot-band TDS application on the FY 194R ledger."""
+    _reverse_section_tds(
+        user=user,
+        gross_amount=gross_amount,
+        tds_amount=tds_amount,
+        section=TdsLedger.SECTION_194R,
+        threshold=TDS_THRESHOLD_194R,
+    )
+
+
+def compute_correct_tds_for_cumulative_gross(
+    *, user: User, cumulative_gross: Decimal
+) -> Decimal:
     """
-    FY TDS liability if cumulative cash commission/milestone gross were `cumulative_gross`.
-    Mirrors catch-up: once above threshold, required TDS = cumulative_gross * rate.
+    Sec 194H FY TDS liability if cumulative cash gross were `cumulative_gross`.
     """
     cumulative_gross = _q2(cumulative_gross)
     if cumulative_gross <= TDS_THRESHOLD:
         return ZERO
-    rate = get_194h_rate_for_user(user)
-    return _q2(cumulative_gross * rate)
+    return _q2(cumulative_gross * get_194h_rate_for_user(user))
 
+
+def compute_correct_tds_for_cumulative_gross_194r(
+    *, user: User, cumulative_gross: Decimal
+) -> Decimal:
+    """
+    Sec 194R FY TDS liability if cumulative slot-band gross were `cumulative_gross`.
+    """
+    cumulative_gross = _q2(cumulative_gross)
+    if cumulative_gross <= TDS_THRESHOLD_194R:
+        return ZERO
+    return _q2(cumulative_gross * get_194r_rate_for_user(user))

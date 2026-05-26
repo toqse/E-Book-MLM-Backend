@@ -184,7 +184,13 @@ def test_user_earnings_overview_and_ledger(system_config):
     assert "summary" in data
     assert "ledger" in data
     w = data["summary"]["wallet"]
-    assert set(w.keys()) == {"available_to_withdraw", "locked", "withdrawn"}
+    assert set(w.keys()) == {
+        "available_to_withdraw",
+        "locked",
+        "withdrawn",
+        "tds_payable_194r",
+        "total_tds_deducted",
+    }
     assert data["summary"]["income"]["direct_l1"]["amount"] != "0.00"
     assert data["ledger"]["total_count"] >= 1
     assert len(data["ledger"]["rows"]) >= 1

@@ -15,7 +15,13 @@ from apps.wallet.bands import (
     on_total_earned_updated,
 )
 from apps.wallet.models import Wallet, WalletTransaction
-from apps.tds.services import calculate_and_apply_194h_tds, reverse_194h_tds
+from apps.tds.services import (
+    calculate_and_apply_194h_tds,
+    calculate_and_apply_194r_tds,
+    reverse_194h_tds,
+    reverse_194r_tds,
+)
+from apps.wallet.tds_settlement import settle_tds_payable
 
 from .credit_helpers import tds_wallet_meta, write_commission_wallet_entries
 from .milestone_tiers import get_milestones
@@ -229,25 +235,30 @@ class CommissionEngine:
         band_before_credit = _band_index_for_earnings(wallet.total_earned)
         slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
         if slot_band_held:
-            wallet.total_earned += gross_credit
+            r = calculate_and_apply_194r_tds(user=recipient, gross_amount=gross_credit)
+            wallet.total_earned += r.gross_amount
+            wallet.tds_payable = (wallet.tds_payable or Decimal("0")) + r.tds_amount
             wallet.save()
             CommissionLedger.objects.create(
                 recipient=recipient,
                 source_user=source,
                 order=order,
                 commission_type=ctype,
-                amount=gross_credit,
-                tds_deducted=Decimal("0"),
-                net_amount=gross_credit,
+                amount=r.gross_amount,
+                tds_deducted=r.tds_amount,
+                # net_amount kept equal to gross because cash_balance is unchanged
+                # for slot-band credits; the 194R TDS is on tds_payable.
+                net_amount=r.gross_amount,
                 status=CommissionLedger.Status.CREDITED,
                 slot_band_held=True,
             )
             logger.info(
-                "commission_credited_slot_band order_id=%s recipient_id=%s type=%s gross=%s",
+                "commission_credited_slot_band order_id=%s recipient_id=%s type=%s gross=%s tds_194r=%s",
                 order.id,
                 recipient.id,
                 ctype,
-                gross_credit,
+                r.gross_amount,
+                r.tds_amount,
             )
         else:
             tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
@@ -269,6 +280,15 @@ class CommissionEngine:
                     tds,
                     extra={"type": ctype, "linked_reference": f"COMM-{order.order_number}"},
                 ),
+            )
+            # Opportunistically settle any accumulated 194R TDS now that
+            # cash has been credited; defer the save so we batch it with
+            # the 194H credit mutations.
+            settle_tds_payable(
+                wallet=wallet,
+                recipient=recipient,
+                reference=f"TDS-194R-SETTLE-{order.order_number}",
+                defer_save=True,
             )
             wallet.save()
             CommissionLedger.objects.create(
@@ -333,14 +353,16 @@ class CommissionEngine:
             band_before_credit = _band_index_for_earnings(wallet.total_earned)
             slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
             if slot_band_held:
-                wallet.total_earned += gross_pay
+                r = calculate_and_apply_194r_tds(user=sponsor, gross_amount=gross_pay)
+                wallet.total_earned += r.gross_amount
+                wallet.tds_payable = (wallet.tds_payable or Decimal("0")) + r.tds_amount
                 wallet.save()
                 MilestoneRecord.objects.create(
                     user=sponsor,
                     milestone_referrals=threshold,
-                    bonus_amount=gross_pay,
-                    tds_deducted=Decimal("0"),
-                    net_bonus=gross_pay,
+                    bonus_amount=r.gross_amount,
+                    tds_deducted=r.tds_amount,
+                    net_bonus=r.gross_amount,
                     status="CREDITED",
                     slot_band_held=True,
                 )
@@ -368,6 +390,12 @@ class CommissionEngine:
                         },
                     ),
                 )
+                settle_tds_payable(
+                    wallet=wallet,
+                    recipient=sponsor,
+                    reference=f"TDS-194R-SETTLE-MILESTONE-{threshold}",
+                    defer_save=True,
+                )
                 wallet.save()
                 MilestoneRecord.objects.create(
                     user=sponsor,
@@ -388,19 +416,32 @@ class CommissionEngine:
         ).select_related("recipient")
         for e in entries:
             wallet = Wallet.objects.select_for_update().get(user=e.recipient)
-            # Slot-band-held credits never increased cash_balance; cash reversals
-            # use net_amount (actual cash delta under Model A).
-            if not e.slot_band_held:
+            if e.slot_band_held:
+                # Slot-band 194R: gross never hit cash, TDS sits in tds_payable
+                # (unless already settled by a later cash event). Reverse the
+                # 194R ledger and unwind tds_payable up to the remaining accrual.
+                reverse_194r_tds(
+                    user=e.recipient,
+                    gross_amount=e.amount,
+                    tds_amount=e.tds_deducted,
+                )
+                payable_dec = min(
+                    wallet.tds_payable or Decimal("0"), e.tds_deducted
+                )
+                wallet.tds_payable = (
+                    wallet.tds_payable or Decimal("0")
+                ) - payable_dec
+            else:
                 wallet.cash_balance -= e.net_amount
                 reverse_194h_tds(
                     user=e.recipient,
                     gross_amount=e.amount,
                     tds_amount=e.tds_deducted,
                 )
+                wallet.total_tds_deducted = max(
+                    Decimal("0"), wallet.total_tds_deducted - e.tds_deducted
+                )
             wallet.total_earned -= e.amount
-            wallet.total_tds_deducted = max(
-                Decimal("0"), wallet.total_tds_deducted - e.tds_deducted
-            )
             wallet.save()
             if not e.slot_band_held:
                 WalletTransaction.objects.create(

@@ -17,7 +17,10 @@ from apps.common.responses import envelope_response
 from apps.commissions.milestone_tiers import MILESTONES
 from apps.commissions.models import MilestoneRecord
 from apps.commissions.credit_helpers import tds_wallet_meta, write_commission_wallet_entries
-from apps.tds.services import calculate_and_apply_194h_tds
+from apps.tds.services import (
+    calculate_and_apply_194h_tds,
+    calculate_and_apply_194r_tds,
+)
 from apps.users.models import User
 from apps.wallet.bands import (
     SLOT_BAND_NUMBERS,
@@ -25,6 +28,7 @@ from apps.wallet.bands import (
     on_total_earned_updated,
 )
 from apps.wallet.models import Wallet
+from apps.wallet.tds_settlement import settle_tds_payable
 
 ZERO = Decimal("0")
 
@@ -97,11 +101,13 @@ def _process_milestone_record_locked(*, record: MilestoneRecord, actor: User) ->
     slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
 
     if slot_band_held:
-        wallet.total_earned = (wallet.total_earned or ZERO) + gross_pay
+        r = calculate_and_apply_194r_tds(user=user, gross_amount=gross_pay)
+        wallet.total_earned = (wallet.total_earned or ZERO) + r.gross_amount
+        wallet.tds_payable = (wallet.tds_payable or ZERO) + r.tds_amount
         wallet.save()
-        record.bonus_amount = gross_pay
-        record.tds_deducted = ZERO
-        record.net_bonus = gross_pay
+        record.bonus_amount = r.gross_amount
+        record.tds_deducted = r.tds_amount
+        record.net_bonus = r.gross_amount
         record.status = "CREDITED"
         record.slot_band_held = True
     else:
@@ -129,6 +135,12 @@ def _process_milestone_record_locked(*, record: MilestoneRecord, actor: User) ->
                     "linked_reference": f"MILESTONE-{record.milestone_referrals}",
                 },
             ),
+        )
+        settle_tds_payable(
+            wallet=wallet,
+            recipient=user,
+            reference=f"TDS-194R-SETTLE-MILESTONE-{record.milestone_referrals}",
+            defer_save=True,
         )
         wallet.save()
         record.bonus_amount = tds.gross_amount

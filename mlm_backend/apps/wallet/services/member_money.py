@@ -275,6 +275,7 @@ def build_overview(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str, A
             "total_withdrawn": str(wallet.total_withdrawn),
             "on_hold": str(hold),
             "tds_fy": str(wallet.total_tds_deducted),
+            "tds_payable_194r": str(wallet.tds_payable),
             "reversed": str(rev),
         },
         "cap": {
@@ -343,6 +344,8 @@ def build_ui_summary(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str,
             "available_to_withdraw": _fmt_money(available_balance),
             "locked": _fmt_money(locked_balance),
             "withdrawn": _fmt_money(wallet.total_withdrawn),
+            "tds_payable_194r": _fmt_money(wallet.tds_payable),
+            "total_tds_deducted": _fmt_money(wallet.total_tds_deducted),
         },
         "income": {
             "direct_l1": {
@@ -422,17 +425,24 @@ def _tds_withheld_description(*, base_desc: str, tds_amount: Decimal, rate_note:
 
 
 def _serialize_commission_entries(row: CommissionLedger) -> list[dict[str, Any]]:
-    """One or two ledger rows: gross credit plus optional TDS withholding line."""
-    if (
-        row.slot_band_held
-        or (row.tds_deducted or ZERO) <= ZERO
-        or row.status != CommissionLedger.Status.CREDITED
-    ):
+    """
+    Up to two ledger rows: gross credit + optional TDS withholding line.
+
+    Cash bands (194H): TDS is debited from cash_balance, so the TDS row carries
+    a negative balance delta.
+    Slot bands (194R): TDS is accrued to tds_payable (settled later from a real
+    WalletTransaction(TxType.TDS) row), so the virtual TDS line here carries a
+    ZERO balance delta to avoid double-counting at settlement time.
+    """
+    tds_amt = row.tds_deducted or ZERO
+    if tds_amt <= ZERO or row.status != CommissionLedger.Status.CREDITED:
         return [_serialize_commission(row)]
 
     gross = row.amount or ZERO
-    tds_amt = row.tds_deducted or ZERO
     base = _serialize_commission(row)
+    is_slot = bool(row.slot_band_held)
+    rate_note = "194R" if is_slot else "194H"
+    credit_delta = ZERO if is_slot else gross
     credit = {
         **base,
         "gross": _fmt_money(gross),
@@ -440,10 +450,10 @@ def _serialize_commission_entries(row: CommissionLedger) -> list[dict[str, Any]]
         "net": _fmt_money(gross),
         "net_credited": _fmt_money(gross),
         "tds_deducted": "0",
-        "_balance_delta": gross,
-        "cash_credited": True,
+        "_balance_delta": credit_delta,
+        "cash_credited": not is_slot,
     }
-    rate_note = "194H"
+    tds_delta = ZERO if is_slot else -tds_amt
     tds_row = {
         **base,
         "id": -abs(row.id),
@@ -459,29 +469,29 @@ def _serialize_commission_entries(row: CommissionLedger) -> list[dict[str, Any]]
             tds_amount=tds_amt,
             rate_note=rate_note,
         ),
-        "gross": _fmt_money(-tds_amt),
+        "gross": _fmt_money(-tds_amt if not is_slot else ZERO),
         "tds": _fmt_money(tds_amt),
-        "net": _fmt_money(-tds_amt),
-        "net_credited": _fmt_money(-tds_amt),
+        "net": _fmt_money(-tds_amt if not is_slot else ZERO),
+        "net_credited": _fmt_money(-tds_amt if not is_slot else ZERO),
         "tds_deducted": _fmt_money(tds_amt),
-        "status_label": "TDS Withheld",
-        "_balance_delta": -tds_amt,
+        "status_label": "TDS Accrued" if is_slot else "TDS Withheld",
+        "tds_section": rate_note,
+        "_balance_delta": tds_delta,
         "cash_credited": False,
     }
     return [credit, tds_row]
 
 
 def _serialize_milestone_entries(row: MilestoneRecord) -> list[dict[str, Any]]:
-    if (
-        row.slot_band_held
-        or (row.tds_deducted or ZERO) <= ZERO
-        or row.status != "CREDITED"
-    ):
+    tds_amt = row.tds_deducted or ZERO
+    if tds_amt <= ZERO or row.status != "CREDITED":
         return [_serialize_milestone(row)]
 
     gross = row.bonus_amount or ZERO
-    tds_amt = row.tds_deducted or ZERO
     base = _serialize_milestone(row)
+    is_slot = bool(row.slot_band_held)
+    rate_note = "194R" if is_slot else "194H"
+    credit_delta = ZERO if is_slot else gross
     credit = {
         **base,
         "gross": _fmt_money(gross),
@@ -489,9 +499,10 @@ def _serialize_milestone_entries(row: MilestoneRecord) -> list[dict[str, Any]]:
         "net": _fmt_money(gross),
         "net_credited": _fmt_money(gross),
         "tds_deducted": "0",
-        "_balance_delta": gross,
-        "cash_credited": True,
+        "_balance_delta": credit_delta,
+        "cash_credited": not is_slot,
     }
+    tds_delta = ZERO if is_slot else -tds_amt
     tds_row = {
         **base,
         "id": -abs(row.id),
@@ -500,23 +511,54 @@ def _serialize_milestone_entries(row: MilestoneRecord) -> list[dict[str, Any]]:
         "detail": _tds_withheld_description(
             base_desc=base["detail"],
             tds_amount=tds_amt,
-            rate_note="194H",
+            rate_note=rate_note,
         ),
         "description": _tds_withheld_description(
             base_desc=base["description"],
             tds_amount=tds_amt,
-            rate_note="194H",
+            rate_note=rate_note,
         ),
-        "gross": _fmt_money(-tds_amt),
+        "gross": _fmt_money(-tds_amt if not is_slot else ZERO),
         "tds": _fmt_money(tds_amt),
-        "net": _fmt_money(-tds_amt),
-        "net_credited": _fmt_money(-tds_amt),
+        "net": _fmt_money(-tds_amt if not is_slot else ZERO),
+        "net_credited": _fmt_money(-tds_amt if not is_slot else ZERO),
         "tds_deducted": _fmt_money(tds_amt),
-        "status_label": "TDS Withheld",
-        "_balance_delta": -tds_amt,
+        "status_label": "TDS Accrued" if is_slot else "TDS Withheld",
+        "tds_section": rate_note,
+        "_balance_delta": tds_delta,
         "cash_credited": False,
     }
     return [credit, tds_row]
+
+
+def _serialize_tds_settlement(wt: WalletTransaction) -> dict[str, Any]:
+    """Real WalletTransaction(TxType.TDS) settlement of accrued 194R TDS."""
+    amt = wt.amount or ZERO
+    date_s, time_s = _fmt_date_time(wt.created_at)
+    neg = _fmt_money(-amt)
+    section = (wt.meta or {}).get("section", "194R")
+    desc = f"TDS settled (Sec {section}) — ₹{_fmt_money(amt)}"
+    return {
+        "id": wt.id,
+        "kind": "TDS_SETTLEMENT",
+        "at": wt.created_at.isoformat(),
+        "date": date_s,
+        "time": time_s,
+        "type": "TDS Settled",
+        "detail": desc,
+        "description": desc,
+        "triggered_by": None,
+        "via_downline": None,
+        "level": None,
+        "gross": neg,
+        "tds": _fmt_money(amt),
+        "net": neg,
+        "status": "SETTLED",
+        "status_label": "TDS Settled",
+        "tds_section": section,
+        "_balance_delta": -amt,
+        "cash_credited": False,
+    }
 
 
 def _serialize_commission(row: CommissionLedger) -> dict[str, Any]:
@@ -763,7 +805,9 @@ def _ledger_type_sql_commission(typ: str) -> tuple[str, list[Any]]:
     st = CommissionLedger.Status
     ct = CommissionLedger.CommissionType
     if typ == "tds":
-        return " AND 1=0 ", []
+        # Fetch rows that will produce a virtual TDS row in the serializer:
+        # any CREDITED row with tds_deducted > 0 (covers 194H + 194R/slot).
+        return " AND status = %s AND tds_deducted > 0", [st.CREDITED]
     if typ == "withdrawal":
         return " AND 1=0 ", []
     if typ == "milestone":
@@ -783,8 +827,10 @@ def _ledger_type_sql_commission(typ: str) -> tuple[str, list[Any]]:
 
 
 def _ledger_type_sql_milestone(typ: str) -> tuple[str, list[Any]]:
-    if typ in ("direct", "passive", "reversed", "withdrawal", "tds"):
+    if typ in ("direct", "passive", "reversed", "withdrawal"):
         return " AND 1=0 ", []
+    if typ == "tds":
+        return " AND status = %s AND tds_deducted > 0", ["CREDITED"]
     if typ == "pending":
         return " AND status = %s", ["PENDING"]
     if typ == "milestone":
@@ -792,30 +838,49 @@ def _ledger_type_sql_milestone(typ: str) -> tuple[str, list[Any]]:
     return "", []
 
 
-def _ledger_type_sql_withdrawal(typ: str) -> tuple[str, list[Any]]:
-    if typ in ("all", "withdrawal"):
-        return "", []
-    if typ == "tds":
-        return " AND 1=0 ", []
-    return " AND 1=0 ", []
-
-
 def _ledger_wallet_where(user_pk: int, since: datetime | None, typ: str) -> tuple[str, list[Any]]:
+    """
+    Wallet rows surfaced in the earnings ledger union:
+    - Withdrawal debits (tx_type=DEBIT, reference=withdrawal:%)
+    - Withdrawal rejection refunds (tx_type=ADJUSTMENT, reference=withdrawal_reject:%)
+    - Sec 194R TDS settlements (tx_type=TDS, reference=TDS-194R-SETTLE%)
+    """
     debit = WalletTransaction.TxType.DEBIT
     adj = WalletTransaction.TxType.ADJUSTMENT
-    w_where = (
-        f"user_id = {user_pk} AND ("
-        "(tx_type = %s AND reference LIKE %s) OR "
-        "(tx_type = %s AND reference LIKE %s)"
-        f")"
-    )
-    params: list[Any] = [debit, "withdrawal:%", adj, "withdrawal_reject:%"]
+    tds = WalletTransaction.TxType.TDS
+
+    if typ == "tds":
+        w_where = f"user_id = {user_pk} AND tx_type = %s AND reference LIKE %s"
+        params: list[Any] = [tds, "TDS-194R-SETTLE%"]
+    elif typ == "withdrawal":
+        w_where = (
+            f"user_id = {user_pk} AND ("
+            "(tx_type = %s AND reference LIKE %s) OR "
+            "(tx_type = %s AND reference LIKE %s)"
+            f")"
+        )
+        params = [debit, "withdrawal:%", adj, "withdrawal_reject:%"]
+    elif typ in ("direct", "passive", "milestone", "reversed", "pending"):
+        # These typed filters never include wallet movement rows.
+        w_where = "1=0"
+        params = []
+    else:  # all
+        w_where = (
+            f"user_id = {user_pk} AND ("
+            "(tx_type = %s AND reference LIKE %s) OR "
+            "(tx_type = %s AND reference LIKE %s) OR "
+            "(tx_type = %s AND reference LIKE %s)"
+            f")"
+        )
+        params = [
+            debit, "withdrawal:%",
+            adj, "withdrawal_reject:%",
+            tds, "TDS-194R-SETTLE%",
+        ]
+
     if since:
         w_where += " AND created_at >= %s"
         params.append(since)
-    frag_w, extra_w = _ledger_type_sql_withdrawal(typ)
-    w_where += frag_w
-    params.extend(extra_w)
     return w_where, params
 
 
@@ -959,6 +1024,11 @@ def _hydrate_ledger_keys(
         else:
             wt = wt_by_id.get(rid)
             if not wt:
+                continue
+            if wt.tx_type == WalletTransaction.TxType.TDS:
+                # 194R settlement: emitted regardless of typ since the WHERE
+                # already restricts to TDS-194R-SETTLE% references.
+                results.append(_serialize_tds_settlement(wt))
                 continue
             wr_id = _withdrawal_id_from_transaction(wt)
             wr = wr_by_id.get(wr_id) if wr_id else None
@@ -1173,6 +1243,7 @@ def build_payouts_bundle(user: User, *, include_movements: bool) -> dict[str, An
             "total_earned": str(wallet.total_earned),
             "total_withdrawn": str(wallet.total_withdrawn),
             "total_tds_deducted": str(wallet.total_tds_deducted),
+            "tds_payable_194r": str(wallet.tds_payable),
             "fy_label": wallet.fy_label,
             "band_cash_withdrawn_fy": str(wallet.band_cash_withdrawn_fy),
             "current_band": wallet.current_band,

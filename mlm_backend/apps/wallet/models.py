@@ -12,6 +12,10 @@ class Wallet(models.Model):
     total_earned = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_withdrawn = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_tds_deducted = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Sec 194R TDS accrued on perquisite/slot-band credits but not yet
+    # settled in cash. Settled opportunistically on next cash event
+    # (commission credit or withdrawal) by apps.wallet.tds_settlement.
+    tds_payable = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     current_band = models.PositiveSmallIntegerField(default=1)
     band_cash_withdrawn_fy = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     fy_label = models.CharField(max_length=9, default="2026-27")

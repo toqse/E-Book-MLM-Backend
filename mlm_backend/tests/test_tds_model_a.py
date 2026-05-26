@@ -284,6 +284,9 @@ def test_recompute_tds_and_recredit_idempotent(system_config):
     w1 = Wallet.objects.get(user=u)
     bal1 = w1.cash_balance
     assert bal1 == Decimal("130.00")
+    entry = CommissionLedger.objects.get(recipient=u, order=order)
+    assert entry.tds_deducted == Decimal("0.00")
+    assert entry.net_amount == Decimal("30.00")
 
     call_command("recompute_tds_and_recredit", f"--fy={fy}", "--apply")
     w2 = Wallet.objects.get(user=u)
