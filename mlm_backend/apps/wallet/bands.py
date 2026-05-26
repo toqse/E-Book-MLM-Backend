@@ -37,6 +37,65 @@ def _band_index_for_earnings(total: Decimal) -> int:
     return 9
 
 
+def _next_band_edge(total: Decimal) -> Decimal | None:
+    """Upper cumulative-earnings threshold for the band `total` is currently in."""
+    band = _band_index_for_earnings(total)
+    if band == 0:
+        return BAND_EDGES[0]
+    if band >= len(BAND_EDGES):
+        return None
+    return BAND_EDGES[band]
+
+
+def iter_band_split_pieces(
+    *,
+    total_earned: Decimal,
+    gross: Decimal,
+    cap: Decimal | None = None,
+):
+    """
+    Yield (piece_amount, slot_band_held) splitting `gross` at each band edge.
+
+    When `cap` is set, stops once ``total_earned + credited`` would exceed it.
+    Caller must ensure ``gross <= cap - total_earned`` when cap applies.
+    """
+    remaining = gross
+    cursor = total_earned
+    while remaining > 0:
+        if cap is not None:
+            cap_room = cap - cursor
+            if cap_room <= 0:
+                break
+        else:
+            cap_room = remaining
+
+        edge = _next_band_edge(cursor)
+        if edge is None:
+            piece = min(remaining, cap_room)
+        else:
+            band_room = edge - cursor
+            piece = min(remaining, band_room, cap_room)
+
+        if piece <= 0:
+            break
+
+        band_before = _band_index_for_earnings(cursor)
+        yield piece, band_before in SLOT_BAND_NUMBERS
+        cursor += piece
+        remaining -= piece
+
+
+def slot_gross_if_split_at(*, total_before: Decimal, amount: Decimal) -> Decimal:
+    """Slot-tagged gross if `amount` were credited with band-split routing."""
+    slot = Decimal("0")
+    for piece, is_slot in iter_band_split_pieces(
+        total_earned=total_before, gross=amount, cap=None
+    ):
+        if is_slot:
+            slot += piece
+    return slot
+
+
 def on_total_earned_updated(wallet):
     idx = _band_index_for_earnings(wallet.total_earned)
     prev = wallet.current_band

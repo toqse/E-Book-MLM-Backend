@@ -25,17 +25,14 @@ jobs:
 
             docker compose -f docker/docker-compose.yml up --build -d
 
-            # Wait for the web container to finish applying the latest
-            # wallet + tds migrations needed by the 194R flow.
+            # Wait for the web container to finish applying migrations
+            # before running idempotent post-deploy data fixups.
             echo "Waiting for web service to start..."
             for i in 1 2 3 4 5 6 7 8 9 10; do
-              wallet_ok=$(docker compose -f docker/docker-compose.yml exec -T web \
-                python manage.py showmigrations wallet 2>/dev/null \
-                | grep -c "\[X\] 0004_wallet_tds_payable" || true)
-              tds_ok=$(docker compose -f docker/docker-compose.yml exec -T web \
-                python manage.py showmigrations tds 2>/dev/null \
-                | grep -c "\[X\] 0002_tdsledger_section" || true)
-              if [ "$wallet_ok" -ge 1 ] && [ "$tds_ok" -ge 1 ]; then
+              unapplied=$(docker compose -f docker/docker-compose.yml exec -T web \
+                python manage.py showmigrations --plan 2>/dev/null \
+                | grep -c "^\[ \]" || true)
+              if [ "$unapplied" = "0" ]; then
                 echo "Migrations ready."
                 break
               fi
@@ -43,13 +40,16 @@ jobs:
               sleep 6
             done
 
-            # Idempotent TDS recompute for FY 2026-27 (194H + 194R).
-            # Re-credits over-withheld 194H amounts (skipped if a
-            # TDS-CORRECTION-2026-27 wallet entry already exists for the
-            # user) and normalizes wallet.tds_payable from any historical
-            # slot-band rows under Sec 194R. Safe to leave in place across
-            # deploys.
+            # Idempotent slot-band overshoot reconciliation.
+            # Walks each wallet's CommissionLedger + MilestoneRecord rows
+            # chronologically and credits cash_balance for any gross that
+            # was historically tagged slot but exceeded the 1000-wide
+            # slot-band capacity under the new band-split engine. Writes
+            # one WalletTransaction(ADJUSTMENT) per affected wallet keyed
+            # by RECONCILE-SLOT-OVERSHOOT:<wallet_id> so repeated runs are
+            # no-ops. Skips wallets carrying tds_payable / total_tds_deducted
+            # > 0 to avoid double-counting Sec 194R/194H corrections.
             docker compose -f docker/docker-compose.yml exec -T web \
-              python manage.py recompute_tds_and_recredit --fy 2026-27 --apply
+              python manage.py reconcile_slot_overshoot --apply
 
             docker image prune -f

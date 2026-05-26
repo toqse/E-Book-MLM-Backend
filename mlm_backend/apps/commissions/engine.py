@@ -8,12 +8,7 @@ from apps.admin_panel.utils import get_system_config
 from apps.audit.services import write_audit
 from apps.payments.models import Order
 from apps.users.models import User
-from apps.wallet.bands import (
-    SLOT_BAND_NUMBERS,
-    _band_index_for_earnings,
-    is_slot_band,
-    on_total_earned_updated,
-)
+from apps.wallet.bands import iter_band_split_pieces, on_total_earned_updated
 from apps.wallet.models import Wallet, WalletTransaction
 from apps.tds.services import (
     calculate_and_apply_194h_tds,
@@ -173,6 +168,159 @@ class CommissionEngine:
         )
 
     @staticmethod
+    def _apply_commission_piece(
+        *,
+        wallet: Wallet,
+        recipient: User,
+        source: User,
+        order: Order,
+        ctype: str,
+        piece: Decimal,
+        slot_band_held: bool,
+        ref_suffix: str,
+    ) -> None:
+        ref_credit = f"COMM-{order.order_number}{ref_suffix}"
+        ref_tds = f"TDS-COMM-{order.order_number}{ref_suffix}"
+        if slot_band_held:
+            r = calculate_and_apply_194r_tds(user=recipient, gross_amount=piece)
+            wallet.total_earned += r.gross_amount
+            wallet.tds_payable = (wallet.tds_payable or Decimal("0")) + r.tds_amount
+            wallet.save()
+            CommissionLedger.objects.create(
+                recipient=recipient,
+                source_user=source,
+                order=order,
+                commission_type=ctype,
+                amount=r.gross_amount,
+                tds_deducted=r.tds_amount,
+                net_amount=r.gross_amount,
+                status=CommissionLedger.Status.CREDITED,
+                slot_band_held=True,
+            )
+            logger.info(
+                "commission_credited_slot_band order_id=%s recipient_id=%s type=%s gross=%s tds_194r=%s",
+                order.id,
+                recipient.id,
+                ctype,
+                r.gross_amount,
+                r.tds_amount,
+            )
+        else:
+            tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=piece)
+            wallet.total_earned += tds.gross_amount
+            wallet.total_tds_deducted += tds.tds_amount
+            write_commission_wallet_entries(
+                wallet=wallet,
+                recipient=recipient,
+                gross=tds.gross_amount,
+                tds=tds.tds_amount,
+                ref_credit=ref_credit,
+                ref_tds=ref_tds,
+                credit_meta={
+                    "type": ctype,
+                    "gross": str(tds.gross_amount),
+                    "financial_year": tds.financial_year,
+                },
+                tds_meta=tds_wallet_meta(
+                    tds,
+                    extra={"type": ctype, "linked_reference": ref_credit},
+                ),
+            )
+            settle_tds_payable(
+                wallet=wallet,
+                recipient=recipient,
+                reference=f"TDS-194R-SETTLE-{order.order_number}{ref_suffix}",
+                defer_save=True,
+            )
+            wallet.save()
+            CommissionLedger.objects.create(
+                recipient=recipient,
+                source_user=source,
+                order=order,
+                commission_type=ctype,
+                amount=tds.gross_amount,
+                tds_deducted=tds.tds_amount,
+                net_amount=tds.net_amount,
+                status=CommissionLedger.Status.CREDITED,
+                slot_band_held=False,
+            )
+            logger.info(
+                "commission_credited order_id=%s recipient_id=%s type=%s gross=%s net=%s",
+                order.id,
+                recipient.id,
+                ctype,
+                tds.gross_amount,
+                tds.net_amount,
+            )
+
+    @staticmethod
+    def _apply_milestone_piece(
+        *,
+        wallet: Wallet,
+        sponsor: User,
+        threshold: int,
+        piece: Decimal,
+        slot_band_held: bool,
+        ref_suffix: str,
+    ) -> None:
+        ref_credit = f"MILESTONE-{threshold}{ref_suffix}"
+        ref_tds = f"TDS-MILESTONE-{threshold}{ref_suffix}"
+        if slot_band_held:
+            r = calculate_and_apply_194r_tds(user=sponsor, gross_amount=piece)
+            wallet.total_earned += r.gross_amount
+            wallet.tds_payable = (wallet.tds_payable or Decimal("0")) + r.tds_amount
+            wallet.save()
+            MilestoneRecord.objects.create(
+                user=sponsor,
+                milestone_referrals=threshold,
+                bonus_amount=r.gross_amount,
+                tds_deducted=r.tds_amount,
+                net_bonus=r.gross_amount,
+                status="CREDITED",
+                slot_band_held=True,
+            )
+        else:
+            tds = calculate_and_apply_194h_tds(user=sponsor, gross_amount=piece)
+            wallet.total_earned += tds.gross_amount
+            wallet.total_tds_deducted += tds.tds_amount
+            write_commission_wallet_entries(
+                wallet=wallet,
+                recipient=sponsor,
+                gross=tds.gross_amount,
+                tds=tds.tds_amount,
+                ref_credit=ref_credit,
+                ref_tds=ref_tds,
+                credit_meta={
+                    "type": "MILESTONE",
+                    "gross": str(tds.gross_amount),
+                    "financial_year": tds.financial_year,
+                },
+                tds_meta=tds_wallet_meta(
+                    tds,
+                    extra={
+                        "type": "MILESTONE",
+                        "linked_reference": ref_credit,
+                    },
+                ),
+            )
+            settle_tds_payable(
+                wallet=wallet,
+                recipient=sponsor,
+                reference=f"TDS-194R-SETTLE-MILESTONE-{threshold}{ref_suffix}",
+                defer_save=True,
+            )
+            wallet.save()
+            MilestoneRecord.objects.create(
+                user=sponsor,
+                milestone_referrals=threshold,
+                bonus_amount=tds.gross_amount,
+                tds_deducted=tds.tds_amount,
+                net_bonus=tds.net_amount,
+                status="CREDITED",
+                slot_band_held=False,
+            )
+
+    @staticmethod
     def _credit_user(
         recipient: User,
         source: User,
@@ -231,89 +379,28 @@ class CommissionEngine:
                 gross,
                 gross_credit,
             )
-        # Slot-band routing: read band BEFORE bump; slot bands skip TDS and cash.
-        band_before_credit = _band_index_for_earnings(wallet.total_earned)
-        slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
-        if slot_band_held:
-            r = calculate_and_apply_194r_tds(user=recipient, gross_amount=gross_credit)
-            wallet.total_earned += r.gross_amount
-            wallet.tds_payable = (wallet.tds_payable or Decimal("0")) + r.tds_amount
-            wallet.save()
-            CommissionLedger.objects.create(
-                recipient=recipient,
-                source_user=source,
-                order=order,
-                commission_type=ctype,
-                amount=r.gross_amount,
-                tds_deducted=r.tds_amount,
-                # net_amount kept equal to gross because cash_balance is unchanged
-                # for slot-band credits; the 194R TDS is on tds_payable.
-                net_amount=r.gross_amount,
-                status=CommissionLedger.Status.CREDITED,
-                slot_band_held=True,
-            )
-            logger.info(
-                "commission_credited_slot_band order_id=%s recipient_id=%s type=%s gross=%s tds_194r=%s",
-                order.id,
-                recipient.id,
-                ctype,
-                r.gross_amount,
-                r.tds_amount,
-            )
-        else:
-            tds = calculate_and_apply_194h_tds(user=recipient, gross_amount=gross_credit)
-            wallet.total_earned += tds.gross_amount
-            wallet.total_tds_deducted += tds.tds_amount
-            write_commission_wallet_entries(
+        piece_idx = 0
+        for piece, slot_band_held in iter_band_split_pieces(
+            total_earned=wallet.total_earned,
+            gross=gross_credit,
+            cap=cap,
+        ):
+            piece_idx += 1
+            suffix = "" if piece_idx == 1 else f"-S{piece_idx}"
+            CommissionEngine._apply_commission_piece(
                 wallet=wallet,
                 recipient=recipient,
-                gross=tds.gross_amount,
-                tds=tds.tds_amount,
-                ref_credit=f"COMM-{order.order_number}",
-                ref_tds=f"TDS-COMM-{order.order_number}",
-                credit_meta={
-                    "type": ctype,
-                    "gross": str(tds.gross_amount),
-                    "financial_year": tds.financial_year,
-                },
-                tds_meta=tds_wallet_meta(
-                    tds,
-                    extra={"type": ctype, "linked_reference": f"COMM-{order.order_number}"},
-                ),
-            )
-            # Opportunistically settle any accumulated 194R TDS now that
-            # cash has been credited; defer the save so we batch it with
-            # the 194H credit mutations.
-            settle_tds_payable(
-                wallet=wallet,
-                recipient=recipient,
-                reference=f"TDS-194R-SETTLE-{order.order_number}",
-                defer_save=True,
-            )
-            wallet.save()
-            CommissionLedger.objects.create(
-                recipient=recipient,
-                source_user=source,
+                source=source,
                 order=order,
-                commission_type=ctype,
-                amount=tds.gross_amount,
-                tds_deducted=tds.tds_amount,
-                net_amount=tds.net_amount,
-                status=CommissionLedger.Status.CREDITED,
-                slot_band_held=False,
+                ctype=ctype,
+                piece=piece,
+                slot_band_held=slot_band_held,
+                ref_suffix=suffix,
             )
-            logger.info(
-                "commission_credited order_id=%s recipient_id=%s type=%s gross=%s net=%s",
-                order.id,
-                recipient.id,
-                ctype,
-                tds.gross_amount,
-                tds.net_amount,
-            )
+            on_total_earned_updated(wallet)
         if wallet.total_earned >= cap:
             recipient.account_status = User.AccountStatus.CAPPED
             recipient.save(update_fields=["account_status"])
-        on_total_earned_updated(wallet)
 
     @staticmethod
     def _maybe_milestone(sponsor: User, cfg):
@@ -350,63 +437,23 @@ class CommissionEngine:
             if remaining <= 0:
                 return
             gross_pay = min(bonus, remaining)
-            band_before_credit = _band_index_for_earnings(wallet.total_earned)
-            slot_band_held = band_before_credit in SLOT_BAND_NUMBERS
-            if slot_band_held:
-                r = calculate_and_apply_194r_tds(user=sponsor, gross_amount=gross_pay)
-                wallet.total_earned += r.gross_amount
-                wallet.tds_payable = (wallet.tds_payable or Decimal("0")) + r.tds_amount
-                wallet.save()
-                MilestoneRecord.objects.create(
-                    user=sponsor,
-                    milestone_referrals=threshold,
-                    bonus_amount=r.gross_amount,
-                    tds_deducted=r.tds_amount,
-                    net_bonus=r.gross_amount,
-                    status="CREDITED",
-                    slot_band_held=True,
-                )
-            else:
-                tds = calculate_and_apply_194h_tds(user=sponsor, gross_amount=gross_pay)
-                wallet.total_earned += tds.gross_amount
-                wallet.total_tds_deducted += tds.tds_amount
-                write_commission_wallet_entries(
+            piece_idx = 0
+            for piece, slot_band_held in iter_band_split_pieces(
+                total_earned=wallet.total_earned,
+                gross=gross_pay,
+                cap=cfg.earning_cap,
+            ):
+                piece_idx += 1
+                suffix = "" if piece_idx == 1 else f"-S{piece_idx}"
+                CommissionEngine._apply_milestone_piece(
                     wallet=wallet,
-                    recipient=sponsor,
-                    gross=tds.gross_amount,
-                    tds=tds.tds_amount,
-                    ref_credit=f"MILESTONE-{threshold}",
-                    ref_tds=f"TDS-MILESTONE-{threshold}",
-                    credit_meta={
-                        "type": "MILESTONE",
-                        "gross": str(tds.gross_amount),
-                        "financial_year": tds.financial_year,
-                    },
-                    tds_meta=tds_wallet_meta(
-                        tds,
-                        extra={
-                            "type": "MILESTONE",
-                            "linked_reference": f"MILESTONE-{threshold}",
-                        },
-                    ),
+                    sponsor=sponsor,
+                    threshold=threshold,
+                    piece=piece,
+                    slot_band_held=slot_band_held,
+                    ref_suffix=suffix,
                 )
-                settle_tds_payable(
-                    wallet=wallet,
-                    recipient=sponsor,
-                    reference=f"TDS-194R-SETTLE-MILESTONE-{threshold}",
-                    defer_save=True,
-                )
-                wallet.save()
-                MilestoneRecord.objects.create(
-                    user=sponsor,
-                    milestone_referrals=threshold,
-                    bonus_amount=tds.gross_amount,
-                    tds_deducted=tds.tds_amount,
-                    net_bonus=tds.net_amount,
-                    status="CREDITED",
-                    slot_band_held=False,
-                )
-            on_total_earned_updated(wallet)
+                on_total_earned_updated(wallet)
 
     @staticmethod
     @transaction.atomic
