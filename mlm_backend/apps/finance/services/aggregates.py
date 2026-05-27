@@ -347,6 +347,39 @@ def _multi_book_order_count(d0: date, d1: date) -> int:
     )
 
 
+def _commission_credited_count(d0: date, d1: date) -> int:
+    return CommissionLedger.objects.filter(
+        status=CommissionLedger.Status.CREDITED,
+        created_at__date__gte=d0,
+        created_at__date__lte=d1,
+    ).count()
+
+
+def _withdrawals_paid_count(d0: date, d1: date) -> int:
+    return WithdrawalRequest.objects.filter(
+        status=WithdrawalRequest.Status.PAID,
+        paid_at__isnull=False,
+        paid_at__date__gte=d0,
+        paid_at__date__lte=d1,
+    ).count()
+
+
+def _refunds_approved_count(d0: date, d1: date) -> int:
+    return RefundRequest.objects.filter(
+        status=RefundRequest.Status.APPROVED,
+        approved_at__isnull=False,
+        approved_at__date__gte=d0,
+        approved_at__date__lte=d1,
+    ).count()
+
+
+def _gst_invoice_count(d0: date, d1: date) -> int:
+    return GSTInvoice.objects.filter(
+        created_at__date__gte=d0,
+        created_at__date__lte=d1,
+    ).count()
+
+
 def _net_platform_in_window(d0: date, d1: date) -> Decimal:
     orders_cur = paid_orders_qs(d0, d1)
     gross = _sum_amount_paid(orders_cur)
@@ -358,12 +391,12 @@ def _net_platform_in_window(d0: date, d1: date) -> Decimal:
     return _net_platform(gross, comm, ms, wd, ref, gw)
 
 
-def _sponsor_active_stats() -> tuple[int, str]:
+def _sponsor_active_stats() -> tuple[int, str, Decimal]:
     cfg = get_system_config()
     unit = Decimal(str(cfg.product_base_price or 200))
     n = SponsorSlotCode.objects.filter(status=SponsorSlotCode.Status.ACTIVE).count()
     slot_value = q2(unit * Decimal(n))
-    return n, str(slot_value)
+    return n, str(slot_value), q2(unit)
 
 
 def build_overview(fr: FinanceDateRange) -> dict[str, Any]:
@@ -421,7 +454,19 @@ def build_overview(fr: FinanceDateRange) -> dict[str, Any]:
     payout_split = _payouts_by_method(d0, d1)
     pending_wd = _pending_withdrawals_net(d0, d1)
 
-    active_slots, slot_value_str = _sponsor_active_stats()
+    active_slots, slot_value_str, slot_unit_price = _sponsor_active_stats()
+
+    comm_credited_count = _commission_credited_count(d0, d1)
+    wd_paid_count = _withdrawals_paid_count(d0, d1)
+    refund_approved_count = _refunds_approved_count(d0, d1)
+    ms_credited_count = _milestone_unlocked_count(d0, d1)
+    gst_invoice_count = _gst_invoice_count(d0, d1)
+    gst_source_label = (
+        "GST invoices issued in this range" if gst_invoice_count > 0 else "paid orders in this range"
+    )
+
+    def _fmt(d: Decimal) -> str:
+        return str(q2(d))
 
     dist: list[dict[str, Any]] = []
     if gross_cur > ZERO:
@@ -454,93 +499,88 @@ def build_overview(fr: FinanceDateRange) -> dict[str, Any]:
         },
         "kpis": {
             "gross_revenue": {
-                "amount_paid": str(q2(gross_cur)),
+                "amount_paid": _fmt(gross_cur),
                 "enrollments": enroll,
                 "avg_per_enrollment": str(avg),
                 "trend_percent_vs_previous": _trend_pct(gross_cur, gross_prev),
-                "formula": (
-                    "amount_paid = SUM(Order.amount_paid) WHERE status=PAID AND "
-                    "paid_at IN [from..to]; enrollments = COUNT(Enrollment) for those "
-                    "orders; avg_per_enrollment = amount_paid / enrollments"
-                ),
+                "formula": [
+                    f"amount_paid = sum(amount_paid across {order_split['total_paid']} paid orders) = {_fmt(gross_cur)}",
+                    f"avg_per_enrollment = amount_paid / enrollments = {_fmt(gross_cur)} / {enroll} = {avg}",
+                ],
             },
             "commission_paid_net": {
-                "amount": str(q2(comm_net_cur)),
-                "gross_credited": str(q2(comm_gross_cur)),
+                "amount": _fmt(comm_net_cur),
+                "gross_credited": _fmt(comm_gross_cur),
                 "trend_percent_vs_previous": _trend_pct(comm_net_cur, comm_net_prev),
-                "formula": (
-                    "amount = SUM(CommissionLedger.net_amount) WHERE status=CREDITED "
-                    "AND created_at IN [from..to]; gross_credited = SUM(amount) on the "
-                    "same rows"
-                ),
+                "formula": [
+                    f"amount = sum(net_amount across {comm_credited_count} credited commission entries) = {_fmt(comm_net_cur)}",
+                    f"gross_credited = sum(amount across {comm_credited_count} credited commission entries) = {_fmt(comm_gross_cur)}",
+                ],
             },
             "payouts_processed_net": {
-                "amount": str(q2(wd_net_cur)),
-                "by_method": {k: str(q2(v)) for k, v in payout_split.items()},
+                "amount": _fmt(wd_net_cur),
+                "by_method": {k: _fmt(v) for k, v in payout_split.items()},
                 "trend_percent_vs_previous": _trend_pct(wd_net_cur, wd_net_prev),
-                "pending_net_created_in_range": str(q2(pending_wd)),
-                "formula": (
-                    "amount = SUM(WithdrawalRequest.net_payable) WHERE status=PAID "
-                    "AND paid_at IN [from..to]; by_method groups the same rows by "
-                    "payout_method; pending_net_created_in_range = SUM(net_payable) "
-                    "WHERE status IN (PENDING, PROCESSING, APPROVED) AND created_at "
-                    "IN [from..to]"
-                ),
+                "pending_net_created_in_range": _fmt(pending_wd),
+                "formula": [
+                    f"amount = sum(net_payable across {wd_paid_count} paid withdrawals) = {_fmt(wd_net_cur)}",
+                    "by_method = same paid withdrawals grouped by channel: "
+                    + (
+                        ", ".join(f"{k} = {_fmt(v)}" for k, v in payout_split.items())
+                        if payout_split
+                        else "(none)"
+                    ),
+                    f"pending_net_created_in_range = sum(net_payable across pending/processing/approved withdrawals raised in this range) = {_fmt(pending_wd)}",
+                ],
             },
             "net_platform_income": {
                 "amount": str(net_platform),
                 "margin_percent_of_gross": margin_pct,
                 "trend_percent_vs_previous": _trend_pct(net_platform, net_prev),
-                "formula": (
-                    "amount = gross_revenue.amount_paid - commission_paid_net.amount "
-                    "- milestone_bonuses.net_credited - payouts_processed_net.amount "
-                    "- refunds_approved.amount - gateway_charges.amount; "
-                    "margin_percent_of_gross = amount / gross_revenue.amount_paid * 100"
-                ),
+                "formula": [
+                    "amount = gross_revenue - commission_paid_net - milestone_bonuses_net - payouts_processed_net - refunds_approved - gateway_charges",
+                    f"amount = {_fmt(gross_cur)} - {_fmt(comm_net_cur)} - {_fmt(ms_net_cur)} - {_fmt(wd_net_cur)} - {_fmt(refunds_cur)} - {_fmt(gateway_cur)} = {net_platform}",
+                    f"margin_percent_of_gross = amount / gross_revenue x 100 = {net_platform} / {_fmt(gross_cur)} x 100 = {margin_pct}",
+                ],
             },
             "tds_deducted": {
                 "total": str(tds_total),
-                "from_commissions": str(q2(tds_comm)),
-                "from_withdrawals": str(q2(tds_wd)),
-                "from_milestones": str(q2(tds_ms)),
-                "formula": (
-                    "from_commissions = SUM(CommissionLedger.tds_deducted) WHERE "
-                    "status=CREDITED AND created_at IN [from..to]; from_withdrawals "
-                    "= SUM(WithdrawalRequest.tds_amount) WHERE status=PAID AND "
-                    "paid_at IN [from..to]; from_milestones = SUM(MilestoneRecord."
-                    "tds_deducted) WHERE status=CREDITED AND created_at IN [from..to]; "
-                    "total = from_commissions + from_withdrawals + from_milestones"
-                ),
+                "from_commissions": _fmt(tds_comm),
+                "from_withdrawals": _fmt(tds_wd),
+                "from_milestones": _fmt(tds_ms),
+                "formula": [
+                    f"from_commissions = sum(tds_deducted across {comm_credited_count} credited commission entries) = {_fmt(tds_comm)}",
+                    f"from_withdrawals = sum(tds_amount across {wd_paid_count} paid withdrawals) = {_fmt(tds_wd)}",
+                    f"from_milestones = sum(tds_deducted across {ms_credited_count} credited milestone records) = {_fmt(tds_ms)}",
+                    f"total = from_commissions + from_withdrawals + from_milestones = {_fmt(tds_comm)} + {_fmt(tds_wd)} + {_fmt(tds_ms)} = {tds_total}",
+                ],
             },
             "milestone_bonuses": {
-                "gross_credited": str(q2(ms_gross_cur)),
-                "net_credited": str(q2(ms_net_cur)),
-                "credited_rows": _milestone_unlocked_count(d0, d1),
+                "gross_credited": _fmt(ms_gross_cur),
+                "net_credited": _fmt(ms_net_cur),
+                "credited_rows": ms_credited_count,
                 "trend_percent_vs_previous": _trend_pct(ms_net_cur, ms_net_prev),
-                "formula": (
-                    "gross_credited = SUM(MilestoneRecord.bonus_amount); net_credited "
-                    "= SUM(MilestoneRecord.net_bonus); credited_rows = COUNT(*); all "
-                    "filtered by status=CREDITED AND created_at IN [from..to]"
-                ),
+                "formula": [
+                    f"gross_credited = sum(bonus_amount across {ms_credited_count} credited milestone records) = {_fmt(ms_gross_cur)}",
+                    f"net_credited = sum(net_bonus across {ms_credited_count} credited milestone records) = {_fmt(ms_net_cur)}",
+                    f"credited_rows = {ms_credited_count}",
+                ],
             },
             "sponsor_slots": {
                 "active_count": active_slots,
                 "active_slot_value_proxy": slot_value_str,
                 "note": "slot_value_proxy = active_count * system_config.product_base_price",
-                "formula": (
-                    "active_count = COUNT(SponsorSlotCode WHERE status=ACTIVE); "
-                    "active_slot_value_proxy = active_count * "
-                    "system_config.product_base_price (ignores selected date range)"
-                ),
+                "formula": [
+                    f"active_count = count(sponsor slot codes with status=Active right now) = {active_slots}",
+                    f"active_slot_value_proxy = active_count x product_base_price = {active_slots} x {slot_unit_price} = {slot_value_str}",
+                ],
             },
             "gst_collected": {
-                "amount": str(q2(gst_collected)),
+                "amount": _fmt(gst_collected),
                 "source": "gst_invoice_sum_fallback_order_gst",
-                "formula": (
-                    "amount = SUM(GSTInvoice.total_gst) WHERE created_at IN [from..to]; "
-                    "if zero, falls back to SUM(Order.gst_amount) WHERE status=PAID "
-                    "AND paid_at IN [from..to]"
-                ),
+                "formula": [
+                    f"amount = sum(GST across {gst_invoice_count if gst_invoice_count > 0 else order_split['total_paid']} {gst_source_label}) = {_fmt(gst_collected)}",
+                ],
             },
             "orders_count": {
                 "total_paid": order_split["total_paid"],
@@ -548,27 +588,22 @@ def build_overview(fr: FinanceDateRange) -> dict[str, Any]:
                 "sponsor_slot": order_split["sponsor_slot"],
                 "single_book": single_book,
                 "multi_book": multi_book,
-                "formula": (
-                    "total_paid = COUNT(Order WHERE status=PAID AND paid_at IN "
-                    "[from..to]); actual_paid = same with is_sponsor_slot_redemption="
-                    "False; sponsor_slot = same with is_sponsor_slot_redemption=True; "
-                    "multi_book = same orders having 2+ OrderLine rows; single_book = "
-                    "total_paid - multi_book"
-                ),
+                "formula": [
+                    f"total_paid = actual_paid + sponsor_slot = {order_split['actual_paid']} + {order_split['sponsor_slot']} = {order_split['total_paid']}",
+                    f"single_book = total_paid - multi_book = {order_split['total_paid']} - {multi_book} = {single_book}",
+                ],
             },
             "refunds_approved": {
-                "amount": str(q2(refunds_cur)),
-                "formula": (
-                    "amount = SUM(RefundRequest.amount) WHERE status=APPROVED AND "
-                    "approved_at IN [from..to]"
-                ),
+                "amount": _fmt(refunds_cur),
+                "formula": [
+                    f"amount = sum(amount across {refund_approved_count} approved refund requests) = {_fmt(refunds_cur)}",
+                ],
             },
             "gateway_charges": {
-                "amount": str(q2(gateway_cur)),
-                "formula": (
-                    "amount = SUM(Order.gateway_charge) WHERE status=PAID AND "
-                    "paid_at IN [from..to]"
-                ),
+                "amount": _fmt(gateway_cur),
+                "formula": [
+                    f"amount = sum(gateway_charge across {order_split['total_paid']} paid orders) = {_fmt(gateway_cur)}",
+                ],
             },
         },
         "charts": {

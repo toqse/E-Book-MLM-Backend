@@ -123,8 +123,17 @@ def test_finance_overview_and_income_streams_and_commission_dates(system_config)
         "refunds_approved",
         "gateway_charges",
     ):
-        assert isinstance(data["kpis"][key].get("formula"), str)
-        assert data["kpis"][key]["formula"]
+        formula = data["kpis"][key].get("formula")
+        assert isinstance(formula, list) and formula
+        assert all(isinstance(s, str) and s for s in formula)
+    assert any(
+        "241.72" in line
+        for line in data["kpis"]["gross_revenue"]["formula"]
+    )
+    assert any(
+        "= 5.72" in line
+        for line in data["kpis"]["gateway_charges"]["formula"]
+    )
 
     inc = client.get("/api/v1/admin/finance/income-streams/", params).json()["data"]
     assert inc["total_income"] == "241.72"
