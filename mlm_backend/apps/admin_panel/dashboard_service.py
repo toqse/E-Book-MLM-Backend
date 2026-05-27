@@ -172,8 +172,28 @@ def _summary_cards(now) -> list[dict[str, Any]]:
     baseline_members = member_qs.filter(created_at__date__lte=today - timedelta(days=30)).count()
     dm_members = pct_delta(total_members, baseline_members) if baseline_members else None
 
-    active_today = member_qs.filter(last_login__isnull=False, last_login__date=today).count()
-    active_yesterday = member_qs.filter(last_login__isnull=False, last_login__date=yesterday).count()
+    # "Active Today" = members who joined today AND have at least one paid
+    # book order on the same calendar day (yesterday baseline mirrors this rule).
+    paid_today_exists = Order.objects.filter(
+        user_id=OuterRef("pk"),
+        status=Order.Status.PAID,
+        paid_at__date=today,
+    )
+    paid_yesterday_exists = Order.objects.filter(
+        user_id=OuterRef("pk"),
+        status=Order.Status.PAID,
+        paid_at__date=yesterday,
+    )
+    active_today = (
+        member_qs.filter(created_at__date=today)
+        .filter(Exists(paid_today_exists))
+        .count()
+    )
+    active_yesterday = (
+        member_qs.filter(created_at__date=yesterday)
+        .filter(Exists(paid_yesterday_exists))
+        .count()
+    )
     dm_active = pct_delta(active_today, active_yesterday) if active_yesterday else None
 
     cut24 = now - timedelta(hours=24)
