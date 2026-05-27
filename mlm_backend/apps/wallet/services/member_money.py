@@ -135,6 +135,60 @@ def get_wallet_row(user: User) -> Wallet:
     return w
 
 
+_HELD_STATUSES = (
+    WithdrawalRequest.Status.PENDING,
+    WithdrawalRequest.Status.APPROVED,
+    WithdrawalRequest.Status.PROCESSING,
+    WithdrawalRequest.Status.FAILED,
+)
+
+
+def withdrawal_status_breakdown(user_id: int) -> dict[str, Decimal]:
+    """
+    Break down wallet withdrawals by request status.
+
+    - already_paid_out: PAID withdrawals (net_payable)
+    - held_for_review: PENDING/APPROVED/PROCESSING/FAILED withdrawals (net_payable)
+
+    REJECTED is intentionally excluded because the money is already restored to the wallet.
+    """
+    dec = DecimalField(max_digits=12, decimal_places=2)
+    agg = WithdrawalRequest.objects.filter(user_id=user_id).aggregate(
+        already_paid_out=Sum(
+            Case(
+                When(status=WithdrawalRequest.Status.PAID, then=F("net_payable")),
+                default=ZERO,
+                output_field=dec,
+            )
+        ),
+        held_for_review=Sum(
+            Case(
+                When(status__in=_HELD_STATUSES, then=F("net_payable")),
+                default=ZERO,
+                output_field=dec,
+            )
+        ),
+    )
+    return {
+        "already_paid_out": agg.get("already_paid_out") or ZERO,
+        "held_for_review": agg.get("held_for_review") or ZERO,
+    }
+
+
+def build_withdrawn_block(wallet: Wallet) -> dict[str, str]:
+    """
+    JSON payload for the member wallet "withdrawn" breakdown.
+
+    total is Wallet.total_withdrawn to keep backward compatibility with existing accounting.
+    """
+    br = withdrawal_status_breakdown(wallet.user_id)
+    return {
+        "total": _fmt_money(wallet.total_withdrawn),
+        "already_paid_out": _fmt_money(br["already_paid_out"]),
+        "held_for_review": _fmt_money(br["held_for_review"]),
+    }
+
+
 def commission_aggregates_for_user(user_id: int) -> dict[str, Any]:
     """Single aggregate query for commission-type nets and units."""
     ct = CommissionLedger.CommissionType
@@ -270,6 +324,7 @@ def build_overview(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str, A
             "cash_balance": str(wallet.cash_balance),
             "total_earned": str(wallet.total_earned),
             "total_withdrawn": str(wallet.total_withdrawn),
+            "withdrawn": build_withdrawn_block(wallet),
             "on_hold": str(hold),
             "tds_fy": str(wallet.total_tds_deducted),
             "tds_payable_194r": str(wallet.tds_payable),
@@ -340,7 +395,7 @@ def build_ui_summary(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str,
         "wallet": {
             "available_to_withdraw": _fmt_money(available_balance),
             "locked": _fmt_money(locked_balance),
-            "withdrawn": _fmt_money(wallet.total_withdrawn),
+            "withdrawn": build_withdrawn_block(wallet),
             "tds_payable_194r": _fmt_money(wallet.tds_payable),
             "total_tds_deducted": _fmt_money(wallet.total_tds_deducted),
         },
@@ -1239,6 +1294,10 @@ def build_payouts_bundle(user: User, *, include_movements: bool) -> dict[str, An
             "cooling_days": cool["cooling_days"],
             "total_earned": str(wallet.total_earned),
             "total_withdrawn": str(wallet.total_withdrawn),
+            # Kept alongside `total_withdrawn` (additive) so existing clients
+            # can keep reading the scalar, while newer clients can show
+            # "paid out vs under review" clarity.
+            "withdrawn": build_withdrawn_block(wallet),
             "total_tds_deducted": str(wallet.total_tds_deducted),
             "tds_payable_194r": str(wallet.tds_payable),
             "fy_label": wallet.fy_label,

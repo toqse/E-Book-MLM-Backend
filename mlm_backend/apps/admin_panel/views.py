@@ -25,6 +25,7 @@ from apps.payments.services import ensure_gst_invoice_pdf
 from apps.users.models import User
 from apps.users.services import effective_company_referral_code, environment_company_referral_code
 from apps.wallet.models import Wallet
+from apps.wallet.services.member_money import build_withdrawn_block
 
 
 def _coerce_int_list(val) -> list[int]:
@@ -443,6 +444,7 @@ def admin_users_detail(request, pk: int):
                             "total_earned": str(w.total_earned),
                             "cash_balance": str(w.cash_balance),
                             "total_withdrawn": str(w.total_withdrawn),
+                            "withdrawn": build_withdrawn_block(w),
                             "total_tds_deducted": str(w.total_tds_deducted),
                             "updated_at": w.updated_at.isoformat() if w.updated_at else None,
                         }
@@ -608,15 +610,25 @@ def _fmt_ddmmyyyy(date_obj):
 @api_view(["GET"])
 @permission_classes([IsSupportAdmin])
 def compliance_queue(request):
-    qs = (
-        User.objects.filter(
-            kyc_status=User.KYCStatus.PENDING,
-            kyc_submitted_at__isnull=False,
-        )
-        .order_by(F("kyc_submitted_at").desc(nulls_last=True), "-id")[:100]
+    page = _parse_positive_int(
+        request.query_params.get("page"), 1, min_v=1, max_v=1_000_000
     )
+    page_size = _parse_positive_int(
+        request.query_params.get("page_size"), 20, min_v=1, max_v=100
+    )
+
+    qs = User.objects.filter(
+        kyc_status=User.KYCStatus.PENDING,
+        kyc_submitted_at__isnull=False,
+    ).order_by(F("kyc_submitted_at").desc(nulls_last=True), "-id")
+
+    total_count = qs.count()
+    total_pages = (total_count + page_size - 1) // page_size if total_count else 0
+    start = (page - 1) * page_size
+    page_qs = qs.select_related("compliance_profile")[start : start + page_size]
+
     out = []
-    for u in qs.select_related("compliance_profile"):
+    for u in page_qs:
         p = getattr(u, "compliance_profile", None)
         row = {
             "user_id": u.id,
@@ -669,7 +681,15 @@ def compliance_queue(request):
             row["aadhar_front_url"] = None
             row["aadhar_back_url"] = None
         out.append(row)
-    return envelope_response({"results": out})
+    return envelope_response(
+        {
+            "results": out,
+            "count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+        }
+    )
 
 
 @api_view(["GET"])

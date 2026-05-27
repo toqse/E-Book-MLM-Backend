@@ -191,6 +191,12 @@ def test_user_earnings_overview_and_ledger(system_config):
         "tds_payable_194r",
         "total_tds_deducted",
     }
+    assert isinstance(w["withdrawn"], dict)
+    assert set(w["withdrawn"].keys()) == {
+        "total",
+        "already_paid_out",
+        "held_for_review",
+    }
     assert data["summary"]["income"]["direct_l1"]["amount"] != "0.00"
     assert data["ledger"]["total_count"] >= 1
     assert len(data["ledger"]["rows"]) >= 1
@@ -244,6 +250,11 @@ def test_user_payouts_bundle_ladder_length(system_config):
     assert len(body["bands"]) == 9
     assert "recent_movements" in body
     assert "bank_details" in body
+    assert set((body["wallet"]["withdrawn"] or {}).keys()) == {
+        "total",
+        "already_paid_out",
+        "held_for_review",
+    }
     assert body["bank_details"]["account_number"] == "XXXX9012"
     assert body["bank_details"]["ifsc"] == "HDFC0001234"
     assert body["bank_details"]["bank_name"] == "HDFC Bank"
@@ -255,6 +266,79 @@ def test_user_payouts_bundle_ladder_length(system_config):
     client.force_authenticate(user=sponsor)
     r2 = client.get("/api/v1/user/payouts/")
     assert r2.json()["data"]["upi_id"] is None
+
+
+@pytest.mark.django_db
+def test_withdrawn_breakdown_buckets(system_config):
+    _root, sponsor, _buyer = _three_level_tree()
+    # Ensure wallet exists (builder reads wallet.total_withdrawn, not derived).
+    wallet = get_wallet_row(sponsor)
+
+    paid_net = Decimal("120.00")
+    pending_net = Decimal("40.00")
+    failed_net = Decimal("25.00")
+    rejected_net = Decimal("999.00")
+
+    # Seed withdrawal requests in various states.
+    WithdrawalRequest.objects.create(
+        user=sponsor,
+        band=1,
+        amount_requested=paid_net,
+        tds_amount=Decimal("0.00"),
+        net_payable=paid_net,
+        tds_section="",
+        payout_method=WithdrawalRequest.PayoutMethod.UPI,
+        payout_destination_hint="sponsor@okhdfcbank",
+        status=WithdrawalRequest.Status.PAID,
+    )
+    WithdrawalRequest.objects.create(
+        user=sponsor,
+        band=1,
+        amount_requested=pending_net,
+        tds_amount=Decimal("0.00"),
+        net_payable=pending_net,
+        tds_section="",
+        payout_method=WithdrawalRequest.PayoutMethod.UPI,
+        payout_destination_hint="sponsor@okhdfcbank",
+        status=WithdrawalRequest.Status.PENDING,
+    )
+    WithdrawalRequest.objects.create(
+        user=sponsor,
+        band=1,
+        amount_requested=failed_net,
+        tds_amount=Decimal("0.00"),
+        net_payable=failed_net,
+        tds_section="",
+        payout_method=WithdrawalRequest.PayoutMethod.UPI,
+        payout_destination_hint="sponsor@okhdfcbank",
+        status=WithdrawalRequest.Status.FAILED,
+    )
+    WithdrawalRequest.objects.create(
+        user=sponsor,
+        band=1,
+        amount_requested=rejected_net,
+        tds_amount=Decimal("0.00"),
+        net_payable=rejected_net,
+        tds_section="",
+        payout_method=WithdrawalRequest.PayoutMethod.UPI,
+        payout_destination_hint="sponsor@okhdfcbank",
+        status=WithdrawalRequest.Status.REJECTED,
+    )
+
+    # wallet.total_withdrawn should exclude REJECTED (mirrors admin reject logic).
+    wallet.total_withdrawn = paid_net + pending_net + failed_net
+    wallet.save(update_fields=["total_withdrawn"])
+
+    client = APIClient()
+    client.force_authenticate(user=sponsor)
+    r = client.get("/api/v1/user/earnings/?include=overview")
+    assert r.status_code == 200
+    payload = r.json()["data"]
+    withdrawn = payload["summary"]["wallet"]["withdrawn"]
+
+    assert Decimal(withdrawn["already_paid_out"]) == paid_net
+    assert Decimal(withdrawn["held_for_review"]) == pending_net + failed_net
+    assert Decimal(withdrawn["total"]) == paid_net + pending_net + failed_net
 
 
 @pytest.mark.django_db
