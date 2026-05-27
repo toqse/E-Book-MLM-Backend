@@ -94,6 +94,14 @@ def admin_placement_reassign(request: Request, order_id: int):
             status=400,
         )
     buyer = order.user
+    sponsor = buyer.sponsor
+    if sponsor and not hasattr(sponsor, "binary_node"):
+        return envelope_response(
+            None,
+            message="Sponsor is not placed in the binary tree yet; place the sponsor first.",
+            success=False,
+            status=400,
+        )
     try:
         with transaction.atomic():
             Order.objects.select_for_update().filter(pk=order.pk).first()
@@ -101,7 +109,6 @@ def admin_placement_reassign(request: Request, order_id: int):
                 admin_reverse_placement(order=order, actor=request.user)
                 order.refresh_from_db()
             if leg:
-                sponsor = buyer.sponsor
                 if not sponsor:
                     return envelope_response(
                         None,

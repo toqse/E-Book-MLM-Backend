@@ -217,11 +217,13 @@ def test_auto_place_reassigns_sponsor_when_capped(system_config, django_capture_
     _company_admin()
     company = company_fallback_sponsor()
     assert company is not None
+    # Company fallback sponsor must itself be in the binary tree to host placements.
+    BinaryTreeService.place_member(company, None)
 
-    capped = _member("+918100000009", account_status=User.AccountStatus.CAPPED)
+    capped = _member("+918100000009", account_status=User.AccountStatus.CAPPED, sponsor=company)
     capped.is_member = True
     capped.save(update_fields=["is_member"])
-    BinaryTreeService.place_member(capped, None)
+    BinaryTreeService.place_member_manual_leg(capped, company, BinaryNode.Position.LEFT)
 
     buyer = _member("+918100000010", sponsor=capped)
     order = _paid_order(buyer, suffix="a")

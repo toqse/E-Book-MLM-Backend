@@ -220,7 +220,9 @@ class BinaryTreeService:
         if sponsor_user is None:
             return BinaryTreeService._create_root_node(new_user)
         if not BinaryNode.objects.filter(user_id=sponsor_user.pk).exists():
-            BinaryTreeService._create_root_node(sponsor_user)
+            # Refuse to silently create an orphan root for the sponsor. The sponsor
+            # must already be placed in the binary tree before they can host a placement.
+            raise ValueError("Sponsor is not placed in the binary tree.")
         sponsor_node = BinaryNode.objects.select_for_update().get(user=sponsor_user)
         strat = strategy or SystemConfig.AutoPlacementStrategy.LEFT_FIRST
         parent, position = BinaryTreeService.find_slot_for_auto_strategy(sponsor_node, strat)
@@ -238,7 +240,9 @@ class BinaryTreeService:
         if leg not in (pos.LEFT, pos.RIGHT):
             raise ValueError("leg must be LEFT or RIGHT")
         if not BinaryNode.objects.filter(user_id=sponsor_user.pk).exists():
-            BinaryTreeService._create_root_node(sponsor_user)
+            # Refuse to silently create an orphan root for the sponsor. The sponsor
+            # must already be placed in the binary tree before they can host a placement.
+            raise ValueError("Sponsor is not placed in the binary tree.")
         sponsor_node = BinaryNode.objects.select_for_update().get(user=sponsor_user)
         parent, position = BinaryTreeService._find_slot_prefer_leg(sponsor_node, leg)
         return BinaryTreeService._attach_under_parent(new_user, parent, position)

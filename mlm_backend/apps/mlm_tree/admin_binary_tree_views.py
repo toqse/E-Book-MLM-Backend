@@ -450,6 +450,13 @@ def admin_binary_tree_place_under_parent(request: Request, order_id: int):
     parent = User.objects.filter(member_id__iexact=parent_member_id).first()
     if not parent:
         return envelope_response(None, message="Parent not found", success=False, status=404)
+    if not BinaryNode.objects.filter(user_id=parent.pk).exists():
+        return envelope_response(
+            None,
+            message="Selected parent is not placed in the binary tree.",
+            success=False,
+            status=400,
+        )
     if is_account_capped(parent):
         return envelope_response(
             None,

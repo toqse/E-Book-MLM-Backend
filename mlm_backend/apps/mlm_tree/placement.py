@@ -160,12 +160,15 @@ def complete_placement_for_order(
 
 
 def try_auto_place_order(order: Order) -> bool:
-    """Run auto strategy for one PENDING order past deadline. Returns True if placed."""
+    """Run auto strategy for one PENDING/FAILED order past deadline. Returns True if placed."""
     cfg = get_system_config()
     buyer = order.user
     if hasattr(buyer, "binary_node"):
         return False
-    if order.placement_status != Order.PlacementStatus.PENDING:
+    if order.placement_status not in (
+        Order.PlacementStatus.PENDING,
+        Order.PlacementStatus.FAILED,
+    ):
         return False
     if order.placement_deadline_at and timezone.now() < order.placement_deadline_at:
         return False
@@ -210,6 +213,13 @@ def sponsor_may_manual_place(sponsor: User, buyer: User, order: Order) -> tuple[
             )
     except Exception:
         return False, "Compliance verification status unavailable; contact support."
+    if not hasattr(sponsor, "binary_node"):
+        # The sponsor must already be placed in the binary tree before they can host
+        # a placement; otherwise we would silently fork the tree into an orphan root.
+        return False, (
+            "You must be placed in the binary tree by your sponsor "
+            "before you can place your referrals."
+        )
     if not buyer.sponsor_id:
         return False, "Member has no sponsor"
     if buyer.sponsor_id != sponsor.id:
@@ -267,9 +277,9 @@ def admin_place_under_parent(
     buyer = order.user
     if buyer.id == parent_user.id:
         raise ValueError("Parent cannot be the buyer")
-    # Ensure parent exists in tree.
     if not BinaryNode.objects.filter(user_id=parent_user.pk).exists():
-        BinaryTreeService.place_member_auto(parent_user, None, None)
+        # Refuse to silently create an orphan root for the chosen parent.
+        raise ValueError("Selected parent is not placed in the binary tree.")
     parent_node = BinaryNode.objects.select_for_update().get(user_id=parent_user.pk)
     # If buyer already placed, reverse first (leaf-only).
     if hasattr(buyer, "binary_node"):

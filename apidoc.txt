@@ -575,6 +575,11 @@ POST /api/v1/user/tree/place-direct/
   KYC gate:
     Caller must have kyc_status VERIFIED and a MemberComplianceProfile on file.
     Errors: 403 — { errors: { detail: "kyc_required" | "compliance_profile_required" } }.
+  Sponsor-placed gate:
+    The calling sponsor MUST themselves be placed in the binary tree before they
+    can host any placement. Otherwise the system would silently fork the tree.
+    Error: 400 — { "success": false, "message": "You must be placed in the
+    binary tree by your sponsor before you can place your referrals." }
   Body: { "member_id": "<buyer member_id>", "leg": "LEFT" | "RIGHT" } (alias: position).
   Rules: buyer has a PAID non-retail order in PENDING (or FAILED after auto error)
     placement queue, no binary_node yet, and current time is on or before
@@ -583,7 +588,7 @@ POST /api/v1/user/tree/place-direct/
   Success: { "member_id", "leg", "order_id" } — binary placed; commissions run
     for all eligible PAID MLM orders for that buyer (idempotent per order).
   Errors: 400 validation; 404 member; 400 no pending queue / wrong sponsor /
-    window expired.
+    window expired / sponsor not yet placed.
 
 
 MODULE: Admin — Tree
@@ -627,6 +632,11 @@ POST /api/v1/admin/placements/<order_id>/reassign/
   Cool-off: allowed only while now <= order.refund_eligible_until (refund window).
   Body: either "leg": "LEFT"|"RIGHT" (manual under sponsor) or "strategy":
     "LEFT_FIRST"|"RIGHT_FIRST"|"LONG_LEG"|"WEAK_LEG" (auto under sponsor).
+  Sponsor-placed gate:
+    The buyer's sponsor MUST itself be placed in the binary tree. The admin
+    must place the sponsor first.
+    Error: 400 — { "success": false, "message": "Sponsor is not placed in the
+    binary tree yet; place the sponsor first." }
   If buyer already placed: reverse (leaf-only) then place again with
     placement_status PLACED_ADMIN.
   Success: { "order_id", "status": "reassigned" }.
@@ -724,10 +734,16 @@ POST /api/v1/admin/binary-tree/placements/<order_id>/place/
   Auth: Bearer + IsAdminRole.
   Cool-off: allowed only while now <= order.refund_eligible_until (refund window).
   Body: { "parent_member_id": "<member_id>", "leg": "LEFT"|"RIGHT" }
+  Parent-placed gate:
+    The chosen parent_member_id MUST already be in the binary tree.
+    Error: 400 — { "success": false, "message": "Selected parent is not placed
+    in the binary tree." }
   Behavior:
     - If buyer already placed: reverse (leaf-only) then place under the chosen parent/leg (spill within that leg).
     - Sets placement_status PLACED_ADMIN and reprocesses commissions for the buyer’s PAID MLM orders.
   Success: { "order_id", "status": "placed", "parent_member_id", "leg" }
+  Errors: 404 order or parent member not found; 400 validation / parent not in tree / capped parent;
+    409 placement engine refused (e.g. parent==buyer or no free slot).
 
 
 MODULE: User — Earnings bundle (preferred for My Earnings UI)
@@ -2162,6 +2178,14 @@ INFRASTRUCTURE & SETTINGS
     pytest
 - Celery + Redis: broker/result from REDIS_URL; beat includes sponsor-slot expiry
     and auto_place_pending_binary every 5 minutes (MLM placement past deadline).
+    The auto-placer picks up orders in placement_status PENDING or FAILED past
+    their deadline. FAILED orders are retried so the rare child-pays-before-sponsor
+    edge case heals on the next tick after the sponsor is placed: when the auto-
+    placer hits a buyer whose sponsor is not yet in the binary tree it refuses to
+    silently create an orphan root and instead marks the order placement_status
+    FAILED with placement_failure_reason "Sponsor is not placed in the binary tree.";
+    once the sponsor's own placement completes, the next tick retries and places
+    the FAILED order normally.
 - Docker: mlm_backend/docker/docker-compose.yml (web, nginx, mysql, redis, celery, beat).
 
 ENVIRONMENT VARIABLES (representative)
