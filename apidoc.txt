@@ -751,7 +751,7 @@ GET /api/v1/user/earnings/
       },
       "income": {
         "direct_l1" { amount, units, unit },
-        "passive_l2_l4" { amount, units, unit },
+        "passive_l1_l3" { amount, units, unit },
         "milestone" { amount },
         "slots" { amount, redeemed, unit }     # `unit` is live SystemConfig.product_base_price
       },
@@ -769,7 +769,7 @@ GET /api/v1/user/earnings/
       "total_count", "page", "page_size"
     }
   Per-stream lifetime amounts are the four strings under summary.income.*.amount
-  (direct_l1, passive_l2_l4, milestone, slots); summary.breakdown is not returned.
+  (direct_l1, passive_l1_l3, milestone, slots); summary.breakdown is not returned.
   Ledger row fields (commissions + milestones + withdrawals; aliases kept for existing clients):
     id, kind (COMMISSION|MILESTONE|WITHDRAWAL|WITHDRAWAL_REFUND), at (ISO datetime),
     date (e.g. "13 May 2026"), time (12h local, e.g. "01:45 PM"),
@@ -778,7 +778,7 @@ GET /api/v1/user/earnings/
     detail, description (same string as detail, for table DESCRIPTION column),
     triggered_by { member_id, full_name }|null (joiner / source user; null for milestones),
     via_downline null (reserved for future tree context),
-    level (L1–L4 for commissions; null for milestones),
+    level (L1–L3 for commissions; null for milestones),
     gross, tds, tds_deducted (same as tds), net, net_credited (same as net),
     status (CREDITED|REVERSED|PENDING|HELD), status_label ("Credited"|… title case for UI chips;
       slot-band-held credits get a " (Slot fund)" suffix on both label and description),
@@ -841,7 +841,7 @@ GET /api/v1/user/earnings/export/
     Notes:
     - description carries the joiner / source-member context (e.g. "Direct commission — Jinu George joined",
       "Tree passive — Rosmi Shaji (JST000013)", "Milestone bonus — 10 direct referrals").
-    - level is L1 for DIRECT, L2/L3/L4 for UPLINE_*, empty for milestone rows.
+    - level is L1 for DIRECT and UPLINE_L1, L2 for UPLINE_L2, L3 for UPLINE_L3; empty for milestone rows.
     - running_balance is walked newest-first from the current wallet cash balance, matching the UI table.
     - status is the title-cased label (Credited | Reversed | Pending | Held).
   Headers (both formats):
@@ -870,7 +870,7 @@ GET /api/v1/user/dashboard/
       "todays_earnings": "<decimal string>",           # sum today: direct_commission + tree_passive + milestone_bonuses (net credited)
       "direct_commission": "<decimal string>",         # net L1 direct credited today
       "milestone_bonuses": "<decimal string>",        # net milestone credited today
-      "tree_passive": "<decimal string>",              # net L2-L4 passive credited today
+      "tree_passive": "<decimal string>",              # net L1-L3 passive credited today
       "wallet_balance": "<decimal string>"            # current wallet cash_balance
     },
     "earnings_cap": {
@@ -946,7 +946,7 @@ GET /api/v1/user/commissions/
 GET /api/v1/user/commissions/summary/
   Success data: {
     "direct", "upline", "milestone", "tree_passive" — all decimal strings
-    (tree_passive = passive upline L2–L4 credited net; aligned with earnings overview).
+    (tree_passive = passive upline L1–L3 credited net; aligned with earnings overview).
 
 GET /api/v1/user/commissions/milestones/
   Auth: Bearer.
@@ -986,7 +986,7 @@ Shared query params (list, summary, export; not on detail):
   - q: search earner full_name, earner member_id, order_number, razorpay_order_id (icontains).
   - status: all (default) | processed | pending | reversed | held
       processed → ledger CREDITED; pending → PENDING + HELD; reversed → REVERSED; held → HELD only.
-  - level: all (default) | L1 | L2 | L3 | L4 | passive  (L1=DIRECT; L2..L4=upline types; passive=all uplines).
+  - level: all (default) | L1 | L2 | L3 | L4 | passive  (L1=DIRECT; L2=UPLINE_L1; L3=UPLINE_L2; L4=UPLINE_L3; passive=all uplines).
   - exclude_milestone: default true (book MLM ledger). Pass false | 0 | off to include MILESTONE rows.
   - from, to: optional YYYY-MM-DD — filter `CommissionLedger.created_at` date (inclusive).
 List pagination:
@@ -1012,7 +1012,7 @@ GET /api/v1/admin/commissions/
         "order": { "id", "order_number", "razorpay_order_id" },
         "earner": { "member_id", "full_name" },
         "buyer": { "member_id", "full_name" },
-        "commission_type", "level" (L1|L2|L3|L4|MS|null),
+        "commission_type", "level" (L1|L2|L3|MS|null),
         "gross", "tds_deducted", "net_amount" (strings),
         "tds_rate_percent" (string or null),
         "status", "status_display" (Processed|Pending|Reversed),

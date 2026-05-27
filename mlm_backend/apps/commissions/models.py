@@ -5,9 +5,9 @@ from django.db import models
 class CommissionLedger(models.Model):
     class CommissionType(models.TextChoices):
         DIRECT = "DIRECT", "Direct"
+        UPLINE_L1 = "UPLINE_L1", "Upline L1"
         UPLINE_L2 = "UPLINE_L2", "Upline L2"
         UPLINE_L3 = "UPLINE_L3", "Upline L3"
-        UPLINE_L4 = "UPLINE_L4", "Upline L4"
         MILESTONE = "MILESTONE", "Milestone"
 
     class Status(models.TextChoices):

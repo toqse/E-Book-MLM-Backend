@@ -90,10 +90,11 @@ def apply_admin_commission_filters(
     elif flt.level == "l3":
         qs = qs.filter(commission_type=ct.UPLINE_L3)
     elif flt.level == "l4":
-        qs = qs.filter(commission_type=ct.UPLINE_L4)
+        # Backward compatible: l4 maps to passive UPLINE_L3 after rename.
+        qs = qs.filter(commission_type=ct.UPLINE_L3)
     elif flt.level == "passive":
         qs = qs.filter(
-            commission_type__in=(ct.UPLINE_L2, ct.UPLINE_L3, ct.UPLINE_L4),
+            commission_type__in=(ct.UPLINE_L1, ct.UPLINE_L2, ct.UPLINE_L3),
         )
     st = CommissionLedger.Status
     if flt.status == "processed":
@@ -115,9 +116,9 @@ def commission_level_label(commission_type: str) -> str | None:
     if commission_type == CommissionLedger.CommissionType.DIRECT:
         return "L1"
     mapping = {
+        CommissionLedger.CommissionType.UPLINE_L1: "L1",
         CommissionLedger.CommissionType.UPLINE_L2: "L2",
         CommissionLedger.CommissionType.UPLINE_L3: "L3",
-        CommissionLedger.CommissionType.UPLINE_L4: "L4",
         CommissionLedger.CommissionType.MILESTONE: "MS",
     }
     return mapping.get(commission_type)

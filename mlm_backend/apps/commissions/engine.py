@@ -133,26 +133,29 @@ class CommissionEngine:
         sponsor.save(update_fields=["direct_referral_count"])
         CommissionEngine._maybe_milestone(sponsor, cfg)
 
-        # Binary uplines: parent chain up to 3, skip sponsor
+        # Binary uplines: 3 passive credits excluding the sponsor.
+        # Important: when the sponsor appears in the binary parent chain, we skip
+        # that recipient without consuming a passive credit slot.
         node = buyer_node.parent
-        hops = 0
-        while node and hops < 3:
+        passive_types = [
+            CommissionLedger.CommissionType.UPLINE_L1,
+            CommissionLedger.CommissionType.UPLINE_L2,
+            CommissionLedger.CommissionType.UPLINE_L3,
+        ]
+        credits_given = 0
+        while node and credits_given < 3:
             u = node.user
             if u.id != sponsor.id:
                 CommissionEngine._credit_user(
                     recipient=u,
                     source=buyer,
                     order=order,
-                    ctype=[
-                        CommissionLedger.CommissionType.UPLINE_L2,
-                        CommissionLedger.CommissionType.UPLINE_L3,
-                        CommissionLedger.CommissionType.UPLINE_L4,
-                    ][hops],
+                    ctype=passive_types[credits_given],
                     gross=upline_amt,
                     cap=cap,
                 )
+                credits_given += 1
             node = node.parent
-            hops += 1
 
         logger.info(
             "commission_process_done order_id=%s order_number=%s sponsor_id=%s",

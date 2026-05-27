@@ -402,7 +402,7 @@ def user_dashboard(request: Request):
     cap_block = summary.get("cap") or {}
     income = summary.get("income") or {}
     direct_l1 = income.get("direct_l1") or {}
-    passive_l2_l4 = income.get("passive_l2_l4") or {}
+    passive_l1_l3 = income.get("passive_l1_l3") or {}
     milestone_inc = income.get("milestone") or {}
     slots_inc = income.get("slots") or {}
 
@@ -508,7 +508,7 @@ def user_dashboard(request: Request):
         },
         "earnings_breakdown": {
             "direct": direct_l1.get("amount"),
-            "passive": passive_l2_l4.get("amount"),
+            "passive": passive_l1_l3.get("amount"),
             "milestone": milestone_inc.get("amount"),
             "slots": slots_inc.get("amount"),
         },

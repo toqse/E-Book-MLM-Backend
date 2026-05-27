@@ -193,7 +193,7 @@ def commission_aggregates_for_user(user_id: int) -> dict[str, Any]:
     """Single aggregate query for commission-type nets and units."""
     ct = CommissionLedger.CommissionType
     st = CommissionLedger.Status
-    passive_types = (ct.UPLINE_L2, ct.UPLINE_L3, ct.UPLINE_L4)
+    passive_types = (ct.UPLINE_L1, ct.UPLINE_L2, ct.UPLINE_L3)
     qs = CommissionLedger.objects.filter(recipient_id=user_id)
     dec = DecimalField(max_digits=12, decimal_places=2)
     return qs.aggregate(
@@ -311,7 +311,7 @@ def build_overview(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str, A
                 "amount": str(passive),
                 "units": int(agg["passive_units"] or 0),
                 "unit_amount": str(cfg.upline_commission),
-                "levels": "L2-L4",
+                "levels": "L1-L3",
             },
             "milestone": {"amount": str(ms_total), "units": None, "unit_amount": None},
             "slots": {
@@ -377,7 +377,7 @@ def build_ui_summary(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str,
         f"trigger from {_fmt_money(cfg.tds_cash_trigger)}."
     )
     one_credit = (
-        f"Direct L1 {_fmt_money(cfg.direct_commission)} or passive L2–L4 "
+        f"Direct L1 {_fmt_money(cfg.direct_commission)} or passive L1–L3 "
         f"{_fmt_money(cfg.upline_commission)} per qualifying join."
     )
 
@@ -404,7 +404,7 @@ def build_ui_summary(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str,
                 "units": int(agg["direct_units"] or 0),
                 "unit": _fmt_money(cfg.direct_commission),
             },
-            "passive_l2_l4": {
+            "passive_l1_l3": {
                 "amount": _fmt_money(passive),
                 "units": int(agg["passive_units"] or 0),
                 "unit": _fmt_money(cfg.upline_commission),
@@ -432,9 +432,9 @@ def _commission_level_label(ctype: str) -> str | None:
     if ctype == CommissionLedger.CommissionType.DIRECT:
         return "L1"
     mapping = {
+        CommissionLedger.CommissionType.UPLINE_L1: "L1",
         CommissionLedger.CommissionType.UPLINE_L2: "L2",
         CommissionLedger.CommissionType.UPLINE_L3: "L3",
-        CommissionLedger.CommissionType.UPLINE_L4: "L4",
     }
     return mapping.get(ctype)
 
@@ -447,9 +447,9 @@ def _commission_display_type(row: CommissionLedger) -> str:
     if row.commission_type == CommissionLedger.CommissionType.DIRECT:
         return "Direct"
     if row.commission_type in (
+        CommissionLedger.CommissionType.UPLINE_L1,
         CommissionLedger.CommissionType.UPLINE_L2,
         CommissionLedger.CommissionType.UPLINE_L3,
-        CommissionLedger.CommissionType.UPLINE_L4,
     ):
         return "Passive"
     return row.commission_type
@@ -462,9 +462,9 @@ def _commission_description(row: CommissionLedger) -> str:
     if row.commission_type == CommissionLedger.CommissionType.DIRECT:
         return f"Direct commission — {src} joined"
     if row.commission_type in (
+        CommissionLedger.CommissionType.UPLINE_L1,
         CommissionLedger.CommissionType.UPLINE_L2,
         CommissionLedger.CommissionType.UPLINE_L3,
-        CommissionLedger.CommissionType.UPLINE_L4,
     ):
         mid = row.source_user.member_id if row.source_user_id else ""
         return f"Tree passive — {src} ({mid})".strip()
@@ -868,7 +868,7 @@ def _ledger_type_sql_commission(typ: str) -> tuple[str, list[Any]]:
     if typ == "passive":
         return (
             " AND commission_type IN (%s,%s,%s) AND status = %s",
-            [ct.UPLINE_L2, ct.UPLINE_L3, ct.UPLINE_L4, st.CREDITED],
+            [ct.UPLINE_L1, ct.UPLINE_L2, ct.UPLINE_L3, st.CREDITED],
         )
     if typ == "reversed":
         return " AND status = %s", [st.REVERSED]
@@ -1345,7 +1345,7 @@ def build_todays_earnings_for_dashboard(user: User) -> dict[str, str]:
     wallet = get_wallet_row(user)
     ct = CommissionLedger.CommissionType
     st = CommissionLedger.Status
-    passive_types = (ct.UPLINE_L2, ct.UPLINE_L3, ct.UPLINE_L4)
+    passive_types = (ct.UPLINE_L1, ct.UPLINE_L2, ct.UPLINE_L3)
     dec = DecimalField(max_digits=12, decimal_places=2)
     agg = CommissionLedger.objects.filter(
         recipient_id=user.pk,
