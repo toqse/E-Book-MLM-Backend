@@ -400,7 +400,8 @@ DELETE /api/v1/admin/agreements/compliance-required/
 
 GET /api/v1/admin/compliance-queue/
   Auth: IsSupportAdmin.
-  Returns rich pending submissions: profile fields, nominee, bank echoes, signed media URLs when DEBUG/media served.
+  Returns KYC/compliance submissions awaiting admin review only (kyc_status=PENDING and kyc_submitted_at set).
+  Excludes users who have never submitted. Payload: profile fields, nominee, bank echoes, signed media URLs when DEBUG/media served.
 
 POST /api/v1/admin/users/<id>/compliance/approve/
   Auth: IsSupportAdmin.
@@ -1125,7 +1126,9 @@ GET /api/v1/admin/withdrawals/
     "results": [
       { "id", "member": { "member_id", "full_name", "phone", "kyc_status" },
         "band", "status", "amount_requested", "tds_amount", "tds_section", "net_payable",
-        "payout_method", "payout_destination_hint",
+        "payout_method",
+        "payout_destination_hint",  # BANK: "<full_account_number> (<IFSC>)"; UPI: full UPI id
+        "bank_name",                # full bank name when payout_method=BANK, else null
         "utr_number", "reject_reason", "approved_at", "paid_at", "created_at", "updated_at"
       }, ...
     ]
@@ -1139,6 +1142,7 @@ GET /api/v1/admin/withdrawals/pending/
         "band", "amount_requested", "tds_amount", "tds_section", "net_payable",
         "status", "payout_method",
         "payout_destination_hint",  # BANK: "<full_account_number> (<IFSC>)"; UPI: full UPI id
+        "bank_name",                # full bank name when payout_method=BANK, else null
         "created_at", "updated_at"
       }, ...
     ]
@@ -1162,6 +1166,10 @@ POST /api/v1/admin/withdrawals/batch-process/
 
 GET /api/v1/admin/withdrawals/export/
   Plain CSV attachment (no envelope). Supports filters: status, q, from, to.
+  Columns: id, member_id, full_name, phone, kyc_status, band, status, amount_requested,
+    tds_amount, net_payable, payout_method,
+    payout_destination_hint  (BANK: "<full_account_number> (<IFSC>)"; UPI: full UPI id),
+    bank_name (filled only for BANK), utr_number, created_at, approved_at, paid_at.
 
 
 MODULE: Sponsor slots

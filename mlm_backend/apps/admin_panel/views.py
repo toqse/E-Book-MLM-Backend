@@ -608,9 +608,13 @@ def _fmt_ddmmyyyy(date_obj):
 @api_view(["GET"])
 @permission_classes([IsSupportAdmin])
 def compliance_queue(request):
-    qs = User.objects.filter(kyc_status=User.KYCStatus.PENDING).order_by(
-        F("kyc_submitted_at").desc(nulls_last=True), "-id"
-    )[:100]
+    qs = (
+        User.objects.filter(
+            kyc_status=User.KYCStatus.PENDING,
+            kyc_submitted_at__isnull=False,
+        )
+        .order_by(F("kyc_submitted_at").desc(nulls_last=True), "-id")[:100]
+    )
     out = []
     for u in qs.select_related("compliance_profile"):
         p = getattr(u, "compliance_profile", None)

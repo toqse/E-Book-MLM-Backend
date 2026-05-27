@@ -110,6 +110,21 @@ def test_finance_overview_and_income_streams_and_commission_dates(system_config)
     assert data["kpis"]["orders_count"]["multi_book"] == 0
     assert data["kpis"]["gateway_charges"]["amount"] == "5.72"
     assert data["kpis"]["refunds_approved"]["amount"] == "0.00"
+    for key in (
+        "gross_revenue",
+        "commission_paid_net",
+        "payouts_processed_net",
+        "net_platform_income",
+        "tds_deducted",
+        "milestone_bonuses",
+        "sponsor_slots",
+        "gst_collected",
+        "orders_count",
+        "refunds_approved",
+        "gateway_charges",
+    ):
+        assert isinstance(data["kpis"][key].get("formula"), str)
+        assert data["kpis"][key]["formula"]
 
     inc = client.get("/api/v1/admin/finance/income-streams/", params).json()["data"]
     assert inc["total_income"] == "241.72"

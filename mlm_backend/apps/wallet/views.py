@@ -591,6 +591,10 @@ def admin_withdrawals(request):
             "user__full_name",
             "user__phone",
             "user__kyc_status",
+            "user__bank_account_number",
+            "user__bank_ifsc",
+            "user__bank_name",
+            "user__upi_id",
         )[offset : offset + page_size]
     )
     results = [
@@ -609,7 +613,14 @@ def admin_withdrawals(request):
             "net_payable": str(x.net_payable),
             "status": x.status,
             "payout_method": x.payout_method,
-            "payout_destination_hint": x.payout_destination_hint or None,
+            "payout_destination_hint": (
+                _admin_full_payout_destination_hint(x.user, x.payout_method) or None
+            ),
+            "bank_name": (
+                (getattr(x.user, "bank_name", "") or "").strip() or None
+                if x.payout_method == WithdrawalRequest.PayoutMethod.BANK
+                else None
+            ),
             "utr_number": x.utr_number or None,
             "reject_reason": x.reject_reason or None,
             "approved_at": x.approved_at.isoformat() if x.approved_at else None,
@@ -655,6 +666,11 @@ def admin_withdrawals_pending(request):
             "payout_method": x.payout_method,
             "payout_destination_hint": (
                 _admin_full_payout_destination_hint(x.user, x.payout_method) or None
+            ),
+            "bank_name": (
+                (getattr(x.user, "bank_name", "") or "").strip() or None
+                if x.payout_method == WithdrawalRequest.PayoutMethod.BANK
+                else None
             ),
             "created_at": x.created_at.isoformat(),
             "updated_at": x.updated_at.isoformat(),
@@ -847,6 +863,7 @@ def admin_withdrawals_export(request):
             "net_payable",
             "payout_method",
             "payout_destination_hint",
+            "bank_name",
             "utr_number",
             "created_at",
             "approved_at",
@@ -854,6 +871,9 @@ def admin_withdrawals_export(request):
         ]
     )
     for x in qs.order_by("-id").iterator():
+        bank_name = ""
+        if x.payout_method == WithdrawalRequest.PayoutMethod.BANK:
+            bank_name = (getattr(x.user, "bank_name", "") or "").strip()
         w.writerow(
             [
                 x.id,
@@ -867,7 +887,8 @@ def admin_withdrawals_export(request):
                 str(x.tds_amount),
                 str(x.net_payable),
                 x.payout_method,
-                x.payout_destination_hint or "",
+                _admin_full_payout_destination_hint(x.user, x.payout_method) or "",
+                bank_name,
                 x.utr_number or "",
                 x.created_at.isoformat(),
                 x.approved_at.isoformat() if x.approved_at else "",
