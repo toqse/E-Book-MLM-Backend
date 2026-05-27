@@ -191,8 +191,7 @@ def wallet_me(request):
             "total_earned": str(w.total_earned),
             "current_band": w.current_band,
             "fy_withdrawn": str(w.band_cash_withdrawn_fy),
-            "total_withdrawn": str(w.total_withdrawn),
-            "withdrawn": build_withdrawn_block(w),
+            "total_withdrawn": build_withdrawn_block(w),
             "fy_label": w.fy_label,
             "withdrawals_blocked": not kyc_ok,
         }

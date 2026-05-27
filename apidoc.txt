@@ -881,8 +881,8 @@ GET /api/v1/user/dashboard/
     },
     "earnings_breakdown": { "direct", "passive", "milestone", "slots" },    # all decimal strings
     "wallet": {                                   # same shape as GET /api/v1/user/payouts/ "wallet"
-      "cash_balance", "total_earned", "total_withdrawn",
-      "withdrawn" : { total, already_paid_out, held_for_review },
+      "cash_balance", "total_earned",
+      "total_withdrawn": { total, already_paid_out, held_for_review },
       "total_tds_deducted",
       "fy_label", "band_cash_withdrawn_fy", "current_band",
       "withdrawals_blocked", "kyc_status"
@@ -909,10 +909,19 @@ GET /api/v1/user/payouts/
   Query: movements — optional "1" or "true" to include recent_movements (last 25).
   Success data: {
     "wallet": { cash_balance, available_balance, locked_balance, cooling_days (int; from SystemConfig.cooling_off_days),
-      total_earned, total_withdrawn,
-      withdrawn: { total, already_paid_out, held_for_review },
+      total_earned,
+      total_withdrawn: { total, already_paid_out, held_for_review },
       total_tds_deducted,
       fy_label, band_cash_withdrawn_fy, current_band, withdrawals_blocked, kyc_status },
+    Notes:
+      - total_withdrawn is now an object (was previously a decimal string).
+        `total` carries the legacy value (Wallet.total_withdrawn), and equals
+        `already_paid_out + held_for_review` by construction.
+        `already_paid_out` sums net_payable for WithdrawalRequest.status = PAID.
+        `held_for_review` sums net_payable for WithdrawalRequest.status in
+        (PENDING, APPROVED, PROCESSING, FAILED) — funds debited from the wallet
+        but not yet paid out. REJECTED requests are restored to the wallet and
+        therefore excluded.
     "bands": [ 9 entries: band, range_low, range_high, kind CASH|SLOT,
       slot_expiry_days (int|null; null for CASH bands), is_current, unlocked, progress_in_band_percent ],
     "withdrawals": [ { id, band, amount_requested, net_payable, tds_amount,
@@ -1071,10 +1080,10 @@ GET /api/v1/user/wallet/
   Success data: {
     "cash_balance", "available_balance", "locked_balance", "cooling_days" (int; from SystemConfig.cooling_off_days),
     "total_earned", "current_band", "fy_withdrawn",
-    "total_withdrawn",
-    "withdrawn" : { total, already_paid_out, held_for_review },
+    "total_withdrawn": { total, already_paid_out, held_for_review },
     "fy_label", "withdrawals_blocked"
-  } (amounts as strings; current_band int).
+  } (scalar amounts as strings; current_band int; total_withdrawn is the nested
+    object documented in GET /api/v1/user/payouts/).
 
 GET /api/v1/user/wallet/transactions/
   Success data: {
@@ -1972,8 +1981,9 @@ GET /api/v1/admin/users/
 GET /api/v1/admin/users/<id>/
   Auth: IsAdminRole.
   Success: user profile + compliance snapshot + wallet summary + cap_progress.
-  (wallet.earnings.wallet includes: current_band, total_earned, cash_balance, total_withdrawn,
-   withdrawn: { total, already_paid_out, held_for_review }, total_tds_deducted, updated_at)
+  (earnings.wallet includes: current_band, total_earned, cash_balance,
+   total_withdrawn: { total, already_paid_out, held_for_review },
+   total_tds_deducted, updated_at)
 
 PATCH /api/v1/admin/users/<id>/
   Auth: IsAdminRole.

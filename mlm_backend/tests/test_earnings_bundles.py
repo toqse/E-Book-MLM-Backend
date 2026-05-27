@@ -250,7 +250,8 @@ def test_user_payouts_bundle_ladder_length(system_config):
     assert len(body["bands"]) == 9
     assert "recent_movements" in body
     assert "bank_details" in body
-    assert set((body["wallet"]["withdrawn"] or {}).keys()) == {
+    assert isinstance(body["wallet"]["total_withdrawn"], dict)
+    assert set(body["wallet"]["total_withdrawn"].keys()) == {
         "total",
         "already_paid_out",
         "held_for_review",
@@ -339,6 +340,15 @@ def test_withdrawn_breakdown_buckets(system_config):
     assert Decimal(withdrawn["already_paid_out"]) == paid_net
     assert Decimal(withdrawn["held_for_review"]) == pending_net + failed_net
     assert Decimal(withdrawn["total"]) == paid_net + pending_net + failed_net
+
+    # Same nested object must surface as `total_withdrawn` on /user/payouts/
+    r2 = client.get("/api/v1/user/payouts/")
+    assert r2.status_code == 200
+    pwallet = r2.json()["data"]["wallet"]
+    assert isinstance(pwallet["total_withdrawn"], dict)
+    assert Decimal(pwallet["total_withdrawn"]["already_paid_out"]) == paid_net
+    assert Decimal(pwallet["total_withdrawn"]["held_for_review"]) == pending_net + failed_net
+    assert Decimal(pwallet["total_withdrawn"]["total"]) == paid_net + pending_net + failed_net
 
 
 @pytest.mark.django_db

@@ -443,8 +443,7 @@ def admin_users_detail(request, pk: int):
                             "current_band": w.current_band,
                             "total_earned": str(w.total_earned),
                             "cash_balance": str(w.cash_balance),
-                            "total_withdrawn": str(w.total_withdrawn),
-                            "withdrawn": build_withdrawn_block(w),
+                            "total_withdrawn": build_withdrawn_block(w),
                             "total_tds_deducted": str(w.total_tds_deducted),
                             "updated_at": w.updated_at.isoformat() if w.updated_at else None,
                         }

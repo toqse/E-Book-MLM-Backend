@@ -323,8 +323,7 @@ def build_overview(user: User, wallet: Wallet, cfg: SystemConfig) -> dict[str, A
         "wallet": {
             "cash_balance": str(wallet.cash_balance),
             "total_earned": str(wallet.total_earned),
-            "total_withdrawn": str(wallet.total_withdrawn),
-            "withdrawn": build_withdrawn_block(wallet),
+            "total_withdrawn": build_withdrawn_block(wallet),
             "on_hold": str(hold),
             "tds_fy": str(wallet.total_tds_deducted),
             "tds_payable_194r": str(wallet.tds_payable),
@@ -1293,11 +1292,11 @@ def build_payouts_bundle(user: User, *, include_movements: bool) -> dict[str, An
             "locked_balance": str(locked_balance),
             "cooling_days": cool["cooling_days"],
             "total_earned": str(wallet.total_earned),
-            "total_withdrawn": str(wallet.total_withdrawn),
-            # Kept alongside `total_withdrawn` (additive) so existing clients
-            # can keep reading the scalar, while newer clients can show
-            # "paid out vs under review" clarity.
-            "withdrawn": build_withdrawn_block(wallet),
+            # total_withdrawn is a nested breakdown: `total` (= legacy scalar
+            # value), `already_paid_out` (status=PAID), and `held_for_review`
+            # (status in PENDING/APPROVED/PROCESSING/FAILED). REJECTED requests
+            # are restored to the wallet and excluded by construction.
+            "total_withdrawn": build_withdrawn_block(wallet),
             "total_tds_deducted": str(wallet.total_tds_deducted),
             "tds_payable_194r": str(wallet.tds_payable),
             "fy_label": wallet.fy_label,
