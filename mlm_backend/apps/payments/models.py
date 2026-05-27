@@ -203,3 +203,35 @@ class RefundRequest(models.Model):
             models.Index(fields=["status", "-created_at"]),
             models.Index(fields=["user", "-created_at"]),
         ]
+
+
+class CreditNote(models.Model):
+    """GST credit note issued against a tax invoice (e.g. on refund approval)."""
+
+    gst_invoice = models.ForeignKey(
+        GSTInvoice,
+        on_delete=models.PROTECT,
+        related_name="credit_notes",
+    )
+    refund_request = models.OneToOneField(
+        RefundRequest,
+        on_delete=models.PROTECT,
+        related_name="credit_note",
+    )
+    credit_note_number = models.CharField(max_length=40, unique=True)
+    hsn_sac_code = models.CharField(max_length=10, default="9992")
+    base_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    cgst = models.DecimalField(max_digits=10, decimal_places=2)
+    sgst = models.DecimalField(max_digits=10, decimal_places=2)
+    total_gst = models.DecimalField(max_digits=10, decimal_places=2)
+    discount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    grand_total = models.DecimalField(max_digits=10, decimal_places=2)
+    reason = models.CharField(max_length=64, default="refund")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "payments_credit_note"
+        indexes = [
+            models.Index(fields=["-created_at"]),
+            models.Index(fields=["gst_invoice", "-created_at"]),
+        ]

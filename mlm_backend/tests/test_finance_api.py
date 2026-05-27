@@ -1,6 +1,6 @@
 """Admin Finance date parsing and aggregate endpoints."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
@@ -10,7 +10,7 @@ from rest_framework.test import APIClient
 from apps.commissions.models import CommissionLedger
 from apps.courses.models import EBook
 from apps.finance.services.date_range import parse_finance_range
-from apps.payments.models import Order, OrderLine
+from apps.payments.models import CreditNote, GSTInvoice, Order, OrderLine, RefundRequest
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
 
@@ -223,6 +223,125 @@ def test_finance_overview_orders_count_split(system_config):
     assert oc["single_book"] == 2
     assert oc["multi_book"] == 1
     assert data["kpis"]["gateway_charges"]["amount"] == "11.44"
+
+
+@pytest.mark.django_db
+def test_finance_gst_collected_nets_credit_notes(system_config):
+    admin = _finance_admin()
+    buyer = _member("+918080099200")
+    now = timezone.now()
+    d = timezone.localdate()
+
+    order = _paid_order(buyer, "ORD-GST-NET", paid_at=now)
+    inv = GSTInvoice.objects.create(
+        order=order,
+        invoice_number="INV-GST-NET-1",
+        base_amount=Decimal("200"),
+        cgst=Decimal("18"),
+        sgst=Decimal("18"),
+        total_gst=Decimal("36"),
+        grand_total=Decimal("236"),
+    )
+    GSTInvoice.objects.filter(pk=inv.pk).update(created_at=now)
+    rr = RefundRequest.objects.create(
+        reference="RET-GST-NET-1",
+        order=order,
+        user=buyer,
+        amount=Decimal("241.72"),
+        status=RefundRequest.Status.APPROVED,
+        approved_at=now,
+    )
+    cn = CreditNote.objects.create(
+        gst_invoice=inv,
+        refund_request=rr,
+        credit_note_number="CN-FY2526-00001",
+        base_amount=Decimal("200"),
+        cgst=Decimal("18"),
+        sgst=Decimal("18"),
+        total_gst=Decimal("36"),
+        grand_total=Decimal("236"),
+    )
+    CreditNote.objects.filter(pk=cn.pk).update(created_at=now)
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    data = client.get(
+        "/api/v1/admin/finance/overview/",
+        {"from": d.isoformat(), "to": d.isoformat()},
+    ).json()["data"]
+    gst = data["kpis"]["gst_collected"]
+    assert gst["invoiced"] == "36.00"
+    assert gst["credited"] == "36.00"
+    assert gst["amount"] == "0.00"
+    assert gst["credit_note_count"] == 1
+
+    gst_report = client.get(
+        "/api/v1/admin/gst-report/",
+        {"from": d.isoformat(), "to": d.isoformat()},
+    ).json()["data"]
+    assert gst_report["invoiced"] == "36.00"
+    assert gst_report["credited"] == "36.00"
+    assert gst_report["collected"] == "0.00"
+    assert gst_report["credit_note_count"] == 1
+
+
+@pytest.mark.django_db
+def test_finance_gst_credit_note_in_later_period(system_config):
+    admin = _finance_admin()
+    buyer = _member("+918080099201")
+    sale_day = timezone.localdate() - timedelta(days=10)
+    refund_day = timezone.localdate()
+    sale_at = timezone.make_aware(datetime.combine(sale_day, time.min))
+    refund_at = timezone.now()
+
+    order = _paid_order(buyer, "ORD-GST-PERIOD", paid_at=sale_at)
+    inv = GSTInvoice.objects.create(
+        order=order,
+        invoice_number="INV-GST-PERIOD-1",
+        base_amount=Decimal("200"),
+        cgst=Decimal("18"),
+        sgst=Decimal("18"),
+        total_gst=Decimal("36"),
+        grand_total=Decimal("236"),
+    )
+    GSTInvoice.objects.filter(pk=inv.pk).update(created_at=sale_at)
+    rr = RefundRequest.objects.create(
+        reference="RET-GST-PERIOD-1",
+        order=order,
+        user=buyer,
+        amount=Decimal("241.72"),
+        status=RefundRequest.Status.APPROVED,
+        approved_at=refund_at,
+    )
+    cn = CreditNote.objects.create(
+        gst_invoice=inv,
+        refund_request=rr,
+        credit_note_number="CN-FY2526-00002",
+        base_amount=Decimal("200"),
+        cgst=Decimal("18"),
+        sgst=Decimal("18"),
+        total_gst=Decimal("36"),
+        grand_total=Decimal("236"),
+    )
+    CreditNote.objects.filter(pk=cn.pk).update(created_at=refund_at)
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+
+    sale_data = client.get(
+        "/api/v1/admin/finance/overview/",
+        {"from": sale_day.isoformat(), "to": sale_day.isoformat()},
+    ).json()["data"]
+    assert sale_data["kpis"]["gst_collected"]["amount"] == "36.00"
+    assert sale_data["kpis"]["gst_collected"]["credited"] == "0.00"
+
+    refund_data = client.get(
+        "/api/v1/admin/finance/overview/",
+        {"from": refund_day.isoformat(), "to": refund_day.isoformat()},
+    ).json()["data"]
+    assert refund_data["kpis"]["gst_collected"]["invoiced"] == "0.00"
+    assert refund_data["kpis"]["gst_collected"]["credited"] == "36.00"
+    assert refund_data["kpis"]["gst_collected"]["amount"] == "-36.00"
 
 
 @pytest.mark.django_db

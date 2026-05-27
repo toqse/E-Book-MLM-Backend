@@ -19,10 +19,13 @@ from apps.users.models import User
 
 from apps.audit.services import write_audit
 from apps.commissions.engine import CommissionEngine
+from apps.finance.services.date_range import _indian_fy_bounds_for
 
-from .models import GSTInvoice, Order, OrderLine, RefundRequest
+from .models import CreditNote, GSTInvoice, Order, OrderLine, RefundRequest
 
 logger = logging.getLogger(__name__)
+
+Q2 = Decimal("0.01")
 
 
 class RazorpayRefundError(Exception):
@@ -647,6 +650,128 @@ def refund_razorpay_payment_for_order(
     return str(refund_id)
 
 
+def _next_credit_note_number_locked() -> str:
+    fy_start, _ = _indian_fy_bounds_for(timezone.localdate())
+    yy1 = fy_start.year % 100
+    yy2 = (fy_start.year + 1) % 100
+    n = CreditNote.objects.filter(created_at__date__gte=fy_start).count() + 1
+    return f"CN-FY{yy1:02d}{yy2:02d}-{n:05d}"
+
+
+def _refund_proportion(amount: Decimal, cap: Decimal) -> Decimal:
+    if cap <= Decimal("0"):
+        return Decimal("1")
+    return min((amount / cap).quantize(Decimal("0.0001")), Decimal("1"))
+
+
+def _credit_note_amounts(order: Order, rr: RefundRequest) -> tuple[Decimal, Decimal]:
+    """Return (base_amount, total_gst) for the credit note tied to this refund."""
+    cfg = get_system_config()
+    gst_rate = Decimal(str(cfg.gst_rate))
+
+    if rr.order_line_id:
+        line = rr.order_line
+        if line is None:
+            line = OrderLine.objects.get(pk=rr.order_line_id)
+        line_base = line.unit_base_price.quantize(Q2)
+        line_gst = (line_base * gst_rate).quantize(Q2)
+        shares = amount_paid_share_by_order_line_id(order)
+        line_share = shares.get(rr.order_line_id, Decimal("0"))
+        proportion = _refund_proportion(rr.amount, line_share)
+        return (
+            (line_base * proportion).quantize(Q2),
+            (line_gst * proportion).quantize(Q2),
+        )
+
+    paid = order.amount_paid.quantize(Q2)
+    proportion = _refund_proportion(rr.amount, paid)
+    return (
+        (order.base_price * proportion).quantize(Q2),
+        (order.gst_amount * proportion).quantize(Q2),
+    )
+
+
+def create_credit_note_for_refund(
+    *,
+    order: Order,
+    rr: RefundRequest,
+    actor=None,
+) -> CreditNote | None:
+    """
+    Issue a credit note for an approved refund. Returns None when no GST was collected
+    (zero amount_paid) or when no GST invoice exists (legacy orders).
+    """
+    existing = CreditNote.objects.filter(refund_request_id=rr.pk).first()
+    if existing is not None:
+        return existing
+
+    paid = order.amount_paid.quantize(Q2)
+    if paid <= Decimal("0"):
+        logger.info(
+            "credit_note skipped zero paid order_id=%s refund=%s",
+            order.pk,
+            rr.reference,
+        )
+        return None
+
+    inv = GSTInvoice.objects.select_for_update().filter(order_id=order.pk).first()
+    if inv is None:
+        logger.warning(
+            "credit_note skipped no invoice order_id=%s refund=%s",
+            order.pk,
+            rr.reference,
+        )
+        if actor is not None:
+            write_audit(
+                "credit_note.skipped_no_invoice",
+                actor=actor,
+                target_type="RefundRequest",
+                target_id=str(rr.pk),
+                payload={
+                    "order_number": order.order_number,
+                    "refund_reference": rr.reference,
+                },
+            )
+        return None
+
+    cn_base, cn_gst = _credit_note_amounts(order, rr)
+    half = (cn_gst / 2).quantize(Q2)
+    if rr.order_line_id:
+        shares = amount_paid_share_by_order_line_id(order)
+        cap = shares.get(rr.order_line_id, Decimal("0"))
+    else:
+        cap = paid
+    proportion = _refund_proportion(rr.amount, cap)
+    cn_discount = (order.discount_amount * proportion).quantize(Q2)
+
+    cn = CreditNote.objects.create(
+        gst_invoice=inv,
+        refund_request=rr,
+        credit_note_number=_next_credit_note_number_locked(),
+        hsn_sac_code=inv.hsn_sac_code,
+        base_amount=cn_base,
+        cgst=half,
+        sgst=half,
+        total_gst=cn_gst,
+        discount=cn_discount,
+        grand_total=(cn_base + cn_gst).quantize(Q2),
+        reason="refund",
+    )
+    write_audit(
+        "credit_note.issued",
+        actor=actor,
+        target_type="CreditNote",
+        target_id=str(cn.pk),
+        payload={
+            "order_number": order.order_number,
+            "refund_reference": rr.reference,
+            "credit_note_number": cn.credit_note_number,
+            "total_gst": str(cn_gst),
+        },
+    )
+    return cn
+
+
 def apply_approved_refund_fulfillment(
     *,
     order: Order,
@@ -679,6 +804,12 @@ def apply_approved_refund_fulfillment(
         order.save(update_fields=["status"])
         CommissionEngine.reverse_commissions(order)
         Enrollment.objects.filter(order_id=order.pk).delete()
+
+    cn = create_credit_note_for_refund(order=order, rr=rr, actor=actor)
+    if paid > Decimal("0") and GSTInvoice.objects.filter(order_id=order.pk).exists() and cn is None:
+        raise RuntimeError(
+            f"Credit note required for refund {rr.reference} on order {order.order_number}"
+        )
 
     audit_payload: dict = {"order_number": order.order_number, "refund_reference": rr.reference}
     if razorpay_refund_id:

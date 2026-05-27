@@ -15,7 +15,7 @@ from apps.admin_panel.utils import get_system_config
 from apps.audit.models import AuditLog
 from apps.commissions.models import CommissionLedger, MilestoneRecord
 from apps.courses.models import Enrollment
-from apps.payments.models import GSTInvoice, Order, RefundRequest
+from apps.payments.models import CreditNote, GSTInvoice, Order, RefundRequest
 from apps.sponsor_slots.models import SponsorSlotCode
 from apps.wallet.models import WithdrawalRequest
 
@@ -249,7 +249,7 @@ def build_income_streams(fr: FinanceDateRange) -> dict[str, Any]:
     }
 
 
-def _gst_invoices_in_range(d0: date, d1: date) -> Decimal:
+def _gst_invoiced_gross_in_range(d0: date, d1: date) -> Decimal:
     return (
         GSTInvoice.objects.filter(
             created_at__date__gte=d0,
@@ -257,6 +257,28 @@ def _gst_invoices_in_range(d0: date, d1: date) -> Decimal:
         ).aggregate(s=Sum("total_gst"))["s"]
         or ZERO
     )
+
+
+def _credit_notes_gst_in_range(d0: date, d1: date) -> Decimal:
+    return (
+        CreditNote.objects.filter(
+            created_at__date__gte=d0,
+            created_at__date__lte=d1,
+        ).aggregate(s=Sum("total_gst"))["s"]
+        or ZERO
+    )
+
+
+def _credit_note_count(d0: date, d1: date) -> int:
+    return CreditNote.objects.filter(
+        created_at__date__gte=d0,
+        created_at__date__lte=d1,
+    ).count()
+
+
+def _gst_invoices_in_range(d0: date, d1: date) -> Decimal:
+    """Net GST collected: invoiced GST minus credit notes in range."""
+    return q2(_gst_invoiced_gross_in_range(d0, d1) - _credit_notes_gst_in_range(d0, d1))
 
 
 def _fy_monthly_gross_series(fy_start: date, fy_end: date) -> list[dict[str, Any]]:
@@ -443,9 +465,12 @@ def build_overview(fr: FinanceDateRange) -> dict[str, Any]:
     )
     margin_pct = str(((net_platform / gross_cur) * Decimal("100")).quantize(Q2)) if gross_cur > ZERO else "0.00"
 
-    gst_collected = _gst_invoices_in_range(d0, d1)
-    if gst_collected <= ZERO:
-        gst_collected = _sum_gst_on_orders(orders_cur)
+    gst_invoiced = _gst_invoiced_gross_in_range(d0, d1)
+    gst_credited = _credit_notes_gst_in_range(d0, d1)
+    gst_collected = q2(gst_invoiced - gst_credited)
+    if gst_invoiced <= ZERO:
+        gst_collected = q2(_sum_gst_on_orders(orders_cur) - gst_credited)
+    credit_note_count = _credit_note_count(d0, d1)
 
     fy_start, fy_end = _indian_fy_bounds_for(d1)
     fy_label = f"{fy_start.year % 100:02d}-{(fy_end.year % 100):02d}"
@@ -577,9 +602,14 @@ def build_overview(fr: FinanceDateRange) -> dict[str, Any]:
             },
             "gst_collected": {
                 "amount": _fmt(gst_collected),
-                "source": "gst_invoice_sum_fallback_order_gst",
+                "invoiced": _fmt(gst_invoiced),
+                "credited": _fmt(gst_credited),
+                "credit_note_count": credit_note_count,
+                "source": "gst_invoice_sum_minus_credit_notes",
                 "formula": [
-                    f"amount = sum(GST across {gst_invoice_count if gst_invoice_count > 0 else order_split['total_paid']} {gst_source_label}) = {_fmt(gst_collected)}",
+                    f"invoiced = sum(GSTInvoice.total_gst) over range = {_fmt(gst_invoiced)}",
+                    f"credited = sum(CreditNote.total_gst) over range = {_fmt(gst_credited)}",
+                    f"amount = invoiced - credited = {_fmt(gst_collected)}",
                 ],
             },
             "orders_count": {
@@ -715,15 +745,44 @@ def build_gst_report(
                 "created_at": inv.created_at.isoformat(),
             }
         )
-    collected = _gst_invoices_in_range(d0, d1)
-    if collected <= ZERO:
-        collected = _sum_gst_on_orders(paid_orders_qs(d0, d1))
+    invoiced = _gst_invoiced_gross_in_range(d0, d1)
+    credited = _credit_notes_gst_in_range(d0, d1)
+    collected = q2(invoiced - credited)
+    if invoiced <= ZERO:
+        collected = q2(_sum_gst_on_orders(paid_orders_qs(d0, d1)) - credited)
+
+    cn_qs = (
+        CreditNote.objects.filter(created_at__date__gte=d0, created_at__date__lte=d1)
+        .select_related("gst_invoice", "gst_invoice__order", "refund_request")
+        .order_by("-created_at", "-id")
+    )
+    cn_total = cn_qs.count()
+    cn_start = (page - 1) * page_size
+    credit_note_rows = []
+    for cn in cn_qs[cn_start : cn_start + page_size]:
+        credit_note_rows.append(
+            {
+                "credit_note_number": cn.credit_note_number,
+                "invoice_number": cn.gst_invoice.invoice_number,
+                "order_number": cn.gst_invoice.order.order_number,
+                "refund_reference": cn.refund_request.reference,
+                "base_amount": str(q2(cn.base_amount)),
+                "total_gst": str(q2(cn.total_gst)),
+                "grand_total": str(q2(cn.grand_total)),
+                "created_at": cn.created_at.isoformat(),
+            }
+        )
+
     return {
         "collected": str(q2(collected)),
+        "invoiced": str(q2(invoiced)),
+        "credited": str(q2(credited)),
         "count": total,
+        "credit_note_count": cn_total,
         "page": page,
         "page_size": page_size,
         "gstr1": rows,
+        "credit_notes": credit_note_rows,
     }
 
 
