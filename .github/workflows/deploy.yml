@@ -52,24 +52,4 @@ jobs:
             docker compose -f docker/docker-compose.yml exec -T web \
               python manage.py reconcile_slot_overshoot --apply
 
-            # Idempotent upline-passive commission reconciliation.
-            # After renaming UPLINE_L2/L3/L4 -> UPLINE_L1/L2/L3 and changing
-            # the engine so the sponsor never consumes a passive slot, some
-            # historic paid orders are missing the 3rd passive credit (the
-            # binary great-great-grandparent of the buyer when sponsor was
-            # the immediate binary parent). This step (1) relabels any
-            # existing passive ledger rows for each order to the new
-            # commission_type values and (2) pays the missing passive
-            # credit via the live engine path so wallet totals, TDS, cap,
-            # KYC HELD and slot-band routing all behave consistently.
-            # Idempotency: before crediting it checks for a non-reversed
-            # passive row for (order, recipient, source_user); repeated
-            # runs are no-ops.
-            echo "Dry-run upline passive reconciliation:"
-            docker compose -f docker/docker-compose.yml exec -T web \
-              python manage.py reconcile_upline_passive_commissions --dry-run
-            echo "Applying upline passive reconciliation:"
-            docker compose -f docker/docker-compose.yml exec -T web \
-              python manage.py reconcile_upline_passive_commissions --apply
-
             docker image prune -f
