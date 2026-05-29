@@ -535,9 +535,18 @@ MODULE: User — Binary tree (/api/v1/user/tree*)
 GET /api/v1/user/team/network/
   Auth: Bearer.
   Query: include — optional comma-separated list: summary,pending,tree,roster (default summary,pending,tree).
+  Query: member_id (alias: anchor_member_id) — optional. When provided, the
+    "tree" section is anchored at this member instead of the viewer. The member
+    MUST be inside the viewer's binary subtree (or the viewer themselves),
+    otherwise 403 is returned. summary/pending/roster sections continue to be
+    computed from the viewer's perspective and are unchanged.
+  Query: tree_max_depth — optional int, default 3, max 10. Rings BELOW the
+    anchor included in the "tree" section (depth 0 = anchor node).
   KYC gate (when include contains \"pending\" or \"roster\"):
     Caller must have kyc_status VERIFIED and a MemberComplianceProfile on file.
     Errors: 403 — { errors: { detail: \"kyc_required\" | \"compliance_profile_required\" } }.
+  Errors: 404 — member_id does not exist.
+          403 — member_id is not in your binary subtree.
 
 GET /api/v1/user/team/network/roster/
   Auth: Bearer.

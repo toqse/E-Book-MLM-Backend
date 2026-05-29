@@ -179,7 +179,11 @@ def team_network(request: Request):
         default=3,
         cap=10,
     )
-    anchor_raw = (request.query_params.get("anchor_member_id") or "").strip()
+    anchor_raw = (
+        request.query_params.get("member_id")
+        or request.query_params.get("anchor_member_id")
+        or ""
+    ).strip()
     if not anchor_raw or anchor_raw.upper() == (viewer.member_id or "").upper():
         anchor_user = viewer
     else:
