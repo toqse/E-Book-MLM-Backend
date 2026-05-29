@@ -540,7 +540,7 @@ GET /api/v1/user/team/network/
     MUST be inside the viewer's binary subtree (or the viewer themselves),
     otherwise 403 is returned. summary/pending/roster sections continue to be
     computed from the viewer's perspective and are unchanged.
-  Query: tree_max_depth — optional int, default 3, max 10. Rings BELOW the
+  Query: tree_max_depth — optional int, default 4, max 10. Rings BELOW the
     anchor included in the "tree" section (depth 0 = anchor node).
   KYC gate (when include contains \"pending\" or \"roster\"):
     Caller must have kyc_status VERIFIED and a MemberComplianceProfile on file.

@@ -176,7 +176,7 @@ def team_network(request: Request):
     include = team_services.parse_include(request.query_params.get("include"))
     max_depth = team_services.parse_max_depth(
         request.query_params.get("tree_max_depth"),
-        default=3,
+        default=4,
         cap=10,
     )
     anchor_raw = (
