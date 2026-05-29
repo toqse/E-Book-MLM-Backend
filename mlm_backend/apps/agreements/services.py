@@ -3,7 +3,7 @@ from typing import Optional
 
 from django.utils import timezone
 
-from apps.common.aadhaar_utils import mask_aadhaar_display
+from apps.agreements.identity_uniqueness import normalize_aadhaar, normalize_pan
 from apps.agreements.models import (
     AgreementCategory,
     LegalDocument,
@@ -123,5 +123,5 @@ def apply_profile_bank_to_user(user: User, profile: MemberComplianceProfile, upi
 
 
 def sync_identity_to_user(user: User, profile: MemberComplianceProfile, raw_aadhaar_digits: str):
-    user.pan_number = (profile.pan_number or "").strip().upper() or ""
-    user.aadhaar_number = mask_aadhaar_display(raw_aadhaar_digits)
+    user.pan_number = normalize_pan(profile.pan_number) or None
+    user.aadhaar_number = normalize_aadhaar(raw_aadhaar_digits) or None

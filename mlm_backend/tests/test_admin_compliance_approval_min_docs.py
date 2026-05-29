@@ -5,6 +5,7 @@ from rest_framework.test import APIClient
 from apps.agreements.models import MemberComplianceProfile
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
+from tests.conftest import unique_test_aadhaar, unique_test_pan
 
 
 def _member(phone: str) -> User:
@@ -50,8 +51,8 @@ def test_admin_compliance_approve_requires_min_docs(system_config):
 
     # Add minimum docs/fields and approve.
     profile = u.compliance_profile
-    profile.pan_number = "ABCDE1234F"
-    profile.aadhar_number = "123412341234"
+    profile.pan_number = unique_test_pan()
+    profile.aadhar_number = unique_test_aadhaar()
     profile.pan_document = SimpleUploadedFile("pan.pdf", b"fake", content_type="application/pdf")
     profile.aadhar_front = SimpleUploadedFile(
         "aad_front.pdf", b"fake", content_type="application/pdf"

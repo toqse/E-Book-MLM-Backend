@@ -16,6 +16,7 @@ from apps.payments.models import Order
 from apps.sponsor_slots.models import SponsorSlotBatch, SponsorSlotCode
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
+from tests.conftest import unique_test_pan
 from apps.wallet.models import Wallet, WalletTransaction, WithdrawalRequest
 from apps.wallet.services.member_money import build_commissions_summary, get_wallet_row
 
@@ -29,7 +30,7 @@ def _three_level_tree():
         member_id=mid_r,
         referral_code=r_r,
         referral_link=l_r,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     root.set_unusable_password()
@@ -46,7 +47,7 @@ def _three_level_tree():
         referral_code=r_s,
         referral_link=l_s,
         sponsor=root,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     sponsor.set_unusable_password()
@@ -63,7 +64,7 @@ def _three_level_tree():
         referral_code=r_b,
         referral_link=l_b,
         sponsor=sponsor,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     buyer.set_unusable_password()

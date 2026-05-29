@@ -1,6 +1,7 @@
 import re
 from rest_framework import serializers
 
+from apps.agreements.identity_uniqueness import validate_identity_uniqueness_for_user
 from apps.agreements.models import AgreementCategory, LegalDocument, MemberComplianceProfile
 from apps.common.phone_utils import normalize_phone_registration
 from apps.common.url_utils import public_media_url
@@ -247,3 +248,16 @@ class ComplianceSubmitSerializer(serializers.Serializer):
         if raw not in ("BANK", "UPI"):
             raise serializers.ValidationError("Must be BANK or UPI.")
         return raw
+
+    def validate(self, attrs):
+        user = self.context.get("user")
+        if user is None:
+            return attrs
+        errors = validate_identity_uniqueness_for_user(
+            pan=attrs.get("pan_number"),
+            aadhaar=attrs.get("aadhar_number"),
+            user_id=user.pk,
+        )
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs

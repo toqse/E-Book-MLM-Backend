@@ -22,6 +22,7 @@ from apps.payments.models import Order
 from apps.payments.services import finalize_order_as_paid
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
+from tests.conftest import unique_test_aadhaar, unique_test_pan
 
 
 def _member_user(phone: str = "+919887766554") -> User:
@@ -60,9 +61,9 @@ def _paid_order_for_kyc(user: User, ebook: EBook) -> Order:
     return order
 
 
-def _attach_min_kyc_docs(profile: MemberComplianceProfile):
-    profile.pan_number = "ABCDE1234F"
-    profile.aadhar_number = "123412341234"
+def _attach_min_kyc_docs(profile: MemberComplianceProfile, *, seq: int | None = None):
+    profile.pan_number = unique_test_pan(seq=seq)
+    profile.aadhar_number = unique_test_aadhaar(seq=seq)
     profile.pan_document = SimpleUploadedFile("pan.pdf", b"fake", content_type="application/pdf")
     profile.aadhar_front = SimpleUploadedFile(
         "aad_front.pdf", b"fake", content_type="application/pdf"
@@ -218,8 +219,8 @@ def test_admin_bulk_compliance_approve_accepts_body_ids():
     )
     p1 = MemberComplianceProfile.objects.create(user=u1)
     p2 = MemberComplianceProfile.objects.create(user=u2)
-    _attach_min_kyc_docs(p1)
-    _attach_min_kyc_docs(p2)
+    _attach_min_kyc_docs(p1, seq=1)
+    _attach_min_kyc_docs(p2, seq=2)
 
     staff_client = APIClient()
     staff_client.force_authenticate(user=staff)
@@ -778,3 +779,171 @@ def test_admin_agreement_rejects_invalid_category():
         format="json",
     )
     assert r.status_code == 400
+
+
+def _compliance_legal_doc() -> LegalDocument:
+    doc, _ = LegalDocument.objects.get_or_create(
+        name="Terms Uniq",
+        defaults={
+            "category": "legal",
+            "document_type": "terms",
+            "year": 2026,
+            "description": "d",
+            "content_html": "<p>x</p>",
+            "version": "1.0",
+            "requires_acceptance_for_compliance": True,
+            "is_active": True,
+        },
+    )
+    doc.requires_acceptance_for_compliance = True
+    doc.is_active = True
+    doc.save()
+    return doc
+
+
+def _accept_compliance_agreements(client: APIClient, user: User, doc: LegalDocument) -> None:
+    r_send = client.post(
+        "/api/v1/agreements/send-otp/",
+        {
+            "document_ids": [doc.id],
+            "declaration": "I accept for uniqueness testing.",
+        },
+        format="json",
+    )
+    assert r_send.status_code == 200, r_send.content
+    otp = r_send.json()["data"].get("otp")
+    rv = client.post(
+        "/api/v1/agreements/verify/",
+        {"document_ids": [doc.id], "otp_code": otp},
+        format="json",
+    )
+    assert rv.status_code == 200, rv.content
+
+
+def _compliance_submit_payload(**overrides):
+    payload = {
+        "date_of_birth": "15/03/1990",
+        "gender": "Male",
+        "full_address": "1 Main Rd",
+        "city": "Kochi",
+        "pin_code": "682001",
+        "state": "KL",
+        "country": "India",
+        "pan_number": "ABCDE1234F",
+        "name_on_pan": "Test User",
+        "aadhar_number": "123412341234",
+        "name_on_aadhar": "Test User",
+        "nominee_name": "Nominee X",
+        "nominee_relationship": "Sibling",
+        "nominee_phone": "+919887766553",
+        "nominee_date_of_birth": "01/06/1995",
+        "account_holder_name": "Test User",
+        "account_number": "12345678901",
+        "bank_name": "HDFC Bank",
+        "ifsc": "HDFC0000123",
+        "branch": "Ernakulam",
+        "account_type": "SAVINGS",
+        "payout_preference": "BANK",
+        "upi_id": "",
+        "pan_document": SimpleUploadedFile("pan.pdf", b"%PDF", content_type="application/pdf"),
+        "aadhar_front": SimpleUploadedFile(
+            "aad_front.pdf", b"%PDF", content_type="application/pdf"
+        ),
+        "aadhar_back": SimpleUploadedFile(
+            "aad_back.pdf", b"%PDF", content_type="application/pdf"
+        ),
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.django_db
+def test_compliance_submit_rejects_duplicate_pan(system_config, primary_ebook):
+    cfg = get_system_config()
+    cfg.trigger_instant_kyc_submission = True
+    cfg.save(update_fields=["trigger_instant_kyc_submission"])
+    doc = _compliance_legal_doc()
+
+    u1 = _member_user("+919887766601")
+    u2 = _member_user("+919887766602")
+    _paid_order_for_kyc(u1, primary_ebook)
+    _paid_order_for_kyc(u2, primary_ebook)
+
+    c1 = APIClient()
+    c1.force_authenticate(user=u1)
+    _accept_compliance_agreements(c1, u1, doc)
+    r1 = c1.post(
+        "/api/v1/auth/compliance/submit/",
+        _compliance_submit_payload(),
+        format="multipart",
+    )
+    assert r1.status_code == 200, r1.content
+
+    c2 = APIClient()
+    c2.force_authenticate(user=u2)
+    _accept_compliance_agreements(c2, u2, doc)
+    r2 = c2.post(
+        "/api/v1/auth/compliance/submit/",
+        _compliance_submit_payload(pan_number="ABCDE1234F", aadhar_number="999988887777"),
+        format="multipart",
+    )
+    assert r2.status_code == 400
+    body = r2.json()
+    assert "pan_number" in (body.get("errors") or {})
+
+
+@pytest.mark.django_db
+def test_compliance_submit_rejects_duplicate_aadhaar(system_config, primary_ebook):
+    cfg = get_system_config()
+    cfg.trigger_instant_kyc_submission = True
+    cfg.save(update_fields=["trigger_instant_kyc_submission"])
+    doc = _compliance_legal_doc()
+
+    u1 = _member_user("+919887766611")
+    u2 = _member_user("+919887766612")
+    _paid_order_for_kyc(u1, primary_ebook)
+    _paid_order_for_kyc(u2, primary_ebook)
+
+    c1 = APIClient()
+    c1.force_authenticate(user=u1)
+    _accept_compliance_agreements(c1, u1, doc)
+    assert (
+        c1.post(
+            "/api/v1/auth/compliance/submit/",
+            _compliance_submit_payload(),
+            format="multipart",
+        ).status_code
+        == 200
+    )
+
+    c2 = APIClient()
+    c2.force_authenticate(user=u2)
+    _accept_compliance_agreements(c2, u2, doc)
+    r2 = c2.post(
+        "/api/v1/auth/compliance/submit/",
+        _compliance_submit_payload(pan_number="ABCDE9999Z", aadhar_number="123412341234"),
+        format="multipart",
+    )
+    assert r2.status_code == 400
+    body = r2.json()
+    assert "aadhar_number" in (body.get("errors") or {})
+
+
+@pytest.mark.django_db
+def test_compliance_submit_allows_same_user_resubmit(system_config, primary_ebook):
+    cfg = get_system_config()
+    cfg.trigger_instant_kyc_submission = True
+    cfg.save(update_fields=["trigger_instant_kyc_submission"])
+    doc = _compliance_legal_doc()
+
+    u = _member_user("+919887766621")
+    _paid_order_for_kyc(u, primary_ebook)
+    client = APIClient()
+    client.force_authenticate(user=u)
+    _accept_compliance_agreements(client, u, doc)
+    payload = _compliance_submit_payload()
+    assert client.post("/api/v1/auth/compliance/submit/", payload, format="multipart").status_code == 200
+    u.refresh_from_db()
+    assert u.aadhaar_number == "123412341234"
+    r2 = client.post("/api/v1/auth/compliance/submit/", payload, format="multipart")
+    assert r2.status_code == 200, r2.content

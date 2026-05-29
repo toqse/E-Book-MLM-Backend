@@ -32,8 +32,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     full_name = models.CharField(max_length=255)
 
     pan_number = models.CharField(max_length=10, null=True, blank=True)
-    # Stored as masked form (e.g. XXXX-XXXX-1234), which needs 14 chars.
-    aadhaar_number = models.CharField(max_length=14, null=True, blank=True)
+    aadhaar_number = models.CharField(max_length=12, null=True, blank=True)
     kyc_status = models.CharField(
         max_length=20, choices=KYCStatus.choices, default=KYCStatus.PENDING
     )
@@ -92,6 +91,19 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     class Meta:
         db_table = "users_user"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["pan_number"],
+                condition=models.Q(pan_number__isnull=False) & ~models.Q(pan_number=""),
+                name="uniq_user_pan_number",
+            ),
+            models.UniqueConstraint(
+                fields=["aadhaar_number"],
+                condition=models.Q(aadhaar_number__isnull=False)
+                & ~models.Q(aadhaar_number=""),
+                name="uniq_user_aadhaar_number",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.member_id} ({self.full_name})"

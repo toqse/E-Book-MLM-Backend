@@ -8,6 +8,11 @@ from rest_framework.decorators import api_view, permission_classes
 from apps.admin_panel.dashboard_service import build_admin_dashboard_payload
 from apps.admin_panel.models import Grievance
 from apps.admin_panel.utils import get_system_config
+from apps.agreements.identity_uniqueness import (
+    normalize_aadhaar,
+    normalize_pan,
+    validate_identity_uniqueness_for_user,
+)
 from apps.agreements.models import MemberComplianceProfile
 from apps.commissions.milestone_tiers import get_milestones
 from apps.common.permissions import (
@@ -521,7 +526,13 @@ def admin_users_detail(request, pk: int):
         "upi_id",
     ]:
         if field in data:
-            setattr(u, field, _clean_opt_str(data.get(field)) or "")
+            raw = _clean_opt_str(data.get(field)) or ""
+            if field == "pan_number":
+                setattr(u, field, normalize_pan(raw) or None)
+            elif field == "aadhaar_number":
+                setattr(u, field, normalize_aadhaar(raw) or None)
+            else:
+                setattr(u, field, raw)
 
     # Compliance profile fields (create profile if any compliance field is being edited)
     compliance_fields = {
@@ -563,9 +574,39 @@ def admin_users_detail(request, pk: int):
                 continue
             if isinstance(v, str):
                 v2 = v.strip()
+                if k == "pan_number":
+                    v2 = normalize_pan(v2) or ""
+                elif k == "aadhar_number":
+                    v2 = normalize_aadhaar(v2) or ""
                 setattr(profile, k, v2)
             else:
                 setattr(profile, k, v)
+
+    effective_pan = None
+    if profile is not None and (profile.pan_number or "").strip():
+        effective_pan = normalize_pan(profile.pan_number)
+    elif (u.pan_number or "").strip():
+        effective_pan = normalize_pan(u.pan_number)
+
+    effective_aadhaar = None
+    if profile is not None and (profile.aadhar_number or "").strip():
+        effective_aadhaar = normalize_aadhaar(profile.aadhar_number)
+    elif (u.aadhaar_number or "").strip():
+        effective_aadhaar = normalize_aadhaar(u.aadhaar_number)
+
+    identity_errors = validate_identity_uniqueness_for_user(
+        pan=effective_pan,
+        aadhaar=effective_aadhaar,
+        user_id=u.pk,
+    )
+    if identity_errors:
+        return envelope_response(
+            None,
+            message="PAN or Aadhaar already linked to another account.",
+            success=False,
+            errors=identity_errors,
+            status=400,
+        )
 
     u.save()
     if profile:

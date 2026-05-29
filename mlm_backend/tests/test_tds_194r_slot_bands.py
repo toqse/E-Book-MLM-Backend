@@ -20,11 +20,12 @@ from apps.tds.services import (
 )
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
+from tests.conftest import unique_test_pan
 from apps.wallet.models import Wallet, WalletTransaction
 from apps.wallet.tds_settlement import settle_tds_payable
 
 
-def _make_verified_user(phone: str, *, pan: str | None = "ABCDE1234F") -> User:
+def _make_verified_user(phone: str, *, pan: str | None = None) -> User:
     mid, ref, link = allocate_member_identity()
     u = User(
         phone=phone,
@@ -32,7 +33,7 @@ def _make_verified_user(phone: str, *, pan: str | None = "ABCDE1234F") -> User:
         member_id=mid,
         referral_code=ref,
         referral_link=link,
-        pan_number=pan or "",
+        pan_number=pan or unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     u.set_unusable_password()

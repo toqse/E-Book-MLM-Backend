@@ -376,7 +376,10 @@ def compliance_submit(request: Request):
             success=False,
             status=400,
         )
-    ser = ComplianceSubmitSerializer(data=request.data)
+    ser = ComplianceSubmitSerializer(
+        data=request.data,
+        context={"request": request, "user": user},
+    )
     ser.is_valid(raise_exception=True)
     data = ser.validated_data
 

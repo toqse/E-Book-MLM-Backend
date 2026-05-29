@@ -21,6 +21,7 @@ from apps.tds.services import (
 )
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
+from tests.conftest import unique_test_pan
 from apps.wallet.models import Wallet, WalletTransaction
 
 
@@ -32,7 +33,7 @@ def _verified_sponsor_with_tree():
         member_id=mid_r,
         referral_code=r_r,
         referral_link=l_r,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     root.set_unusable_password()
@@ -47,7 +48,7 @@ def _verified_sponsor_with_tree():
         referral_code=r_s,
         referral_link=l_s,
         sponsor=root,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     sponsor.set_unusable_password()
@@ -62,7 +63,7 @@ def _verified_sponsor_with_tree():
         referral_code=r_b,
         referral_link=l_b,
         sponsor=sponsor,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     buyer.set_unusable_password()
@@ -205,7 +206,7 @@ def test_reverse_194h_tds_resets_trigger_when_below_threshold(system_config):
         member_id=mid,
         referral_code=ref,
         referral_link=link,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
     )
     u.set_unusable_password()
     u.save()
@@ -225,7 +226,7 @@ def test_recompute_tds_and_recredit_idempotent(system_config):
         member_id=mid,
         referral_code=ref,
         referral_link=link,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     u.set_unusable_password()

@@ -12,6 +12,7 @@ from apps.mlm_tree.services import BinaryTreeService
 from apps.payments.models import Order
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
+from tests.conftest import unique_test_pan
 from apps.wallet.services.member_money import commission_aggregates_for_user
 from apps.wallet.bands import iter_band_split_pieces, slot_gross_if_split_at
 from apps.wallet.models import Wallet
@@ -25,7 +26,7 @@ def _make_verified_user(phone: str) -> User:
         member_id=mid,
         referral_code=ref,
         referral_link=link,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     u.set_unusable_password()

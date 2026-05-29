@@ -214,3 +214,15 @@ class MemberComplianceProfile(models.Model):
 
     class Meta:
         db_table = "agreements_member_compliance_profile"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["pan_number"],
+                condition=~models.Q(pan_number=""),
+                name="uniq_compliance_profile_pan",
+            ),
+            models.UniqueConstraint(
+                fields=["aadhar_number"],
+                condition=~models.Q(aadhar_number=""),
+                name="uniq_compliance_profile_aadhar",
+            ),
+        ]

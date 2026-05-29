@@ -281,8 +281,11 @@ POST /api/v1/auth/compliance/submit/
     optional payout_preference (BANK|UPI); omitted or blank defaults to UPI,
     optional upi_id for UPI payouts.
   Files: pan_document, aadhar_front, aadhar_back (PDF or image types as accepted by storage).
-  Server syncs PAN + masked Aadhaar onto User alongside MemberComplianceProfile; sets kyc_status PENDING pending admin review.
+  Server syncs PAN + full 12-digit Aadhaar onto User alongside MemberComplianceProfile (both must be unique per member).
+  PAN and Aadhaar are validated for cross-account uniqueness; another member's linked PAN or Aadhaar returns 400 with field errors.
   Success: { "kyc_status", "compliance_submission_version" }; 400 if mandatory agreements missing.
+  Errors: 400 — { errors: { pan_number: "This PAN is already linked to another account." } } or
+    { errors: { aadhar_number: "This Aadhaar is already linked to another account." } } when identity is taken.
   Errors: 403 — { errors: { detail: "kyc_refund_window_active" } } when refund window still open (standard mode) or no PAID ebook purchase (instant mode).
   POST /api/v1/agreements/send-otp/ also returns 403 kyc_refund_window_active when submission is not yet allowed.
 

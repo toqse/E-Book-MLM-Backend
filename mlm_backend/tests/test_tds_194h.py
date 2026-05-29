@@ -7,9 +7,10 @@ from apps.tds.models import TdsLedger
 from apps.tds.services import calculate_and_apply_194h_tds, get_current_financial_year
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
+from tests.conftest import unique_test_pan
 
 
-def _verified_member(*, phone: str, pan: str = "ABCDE1234F") -> User:
+def _verified_member(*, phone: str, pan: str | None = None) -> User:
     mid, ref, link = allocate_member_identity()
     u = User(
         phone=phone,
@@ -17,7 +18,7 @@ def _verified_member(*, phone: str, pan: str = "ABCDE1234F") -> User:
         member_id=mid,
         referral_code=ref,
         referral_link=link,
-        pan_number=pan,
+        pan_number=pan or unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     u.set_unusable_password()

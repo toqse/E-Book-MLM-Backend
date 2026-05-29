@@ -15,6 +15,7 @@ from apps.mlm_tree.services import BinaryTreeService
 from apps.payments.models import Order
 from apps.users.models import User
 from apps.users.services import allocate_member_identity
+from tests.conftest import unique_test_pan
 
 
 def _create_linear_binary_chain(depth: int) -> Tuple[list[User], User]:
@@ -37,7 +38,7 @@ def _create_linear_binary_chain(depth: int) -> Tuple[list[User], User]:
         member_id=mid,
         referral_code=ref,
         referral_link=link,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     top.set_unusable_password()
@@ -61,7 +62,7 @@ def _create_linear_binary_chain(depth: int) -> Tuple[list[User], User]:
             referral_code=ref_i,
             referral_link=link_i,
             sponsor=parent,
-            pan_number="ABCDE1234F",
+            pan_number=unique_test_pan(),
             kyc_status=User.KYCStatus.VERIFIED,
         )
         u.set_unusable_password()
@@ -170,7 +171,7 @@ def test_passive_credits_when_sponsor_is_outside_binary_chain(system_config: Sys
         member_id=mid,
         referral_code=ref,
         referral_link=link,
-        pan_number="ABCDE1234F",
+        pan_number=unique_test_pan(),
         kyc_status=User.KYCStatus.VERIFIED,
     )
     sponsor_other.set_unusable_password()
