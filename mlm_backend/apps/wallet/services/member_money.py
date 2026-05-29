@@ -1258,7 +1258,7 @@ def build_payouts_bundle(user: User, *, include_movements: bool) -> dict[str, An
     available_balance = cool["available_balance"]
     wd_qs = (
         WithdrawalRequest.objects.filter(user=user)
-        .order_by("-id")[:50]
+        .order_by("-id")[:4]
         .only(
             "id",
             "band",

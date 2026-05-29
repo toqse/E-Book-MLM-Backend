@@ -956,7 +956,8 @@ GET /api/v1/user/payouts/
     "bands": [ 9 entries: band, range_low, range_high, kind CASH|SLOT,
       slot_expiry_days (int|null; null for CASH bands), is_current, unlocked, progress_in_band_percent ],
     "withdrawals": [ { id, band, amount_requested, net_payable, tds_amount,
-      tds_section, status, created_at, updated_at }, ... max 50 ],
+      tds_section, status, created_at, updated_at }, ... max 4 most recent;
+      use the withdrawals listing endpoint for full history ],
     "recent_movements": optional [ { type, amount, balance_after, reference, at } ],
     "bank_details": { account_number (masked, e.g. "XXXX1234"|null), ifsc (string|null), bank_name (string|null) },
     "upi_id": string|null
