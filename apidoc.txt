@@ -416,7 +416,10 @@ POST /api/v1/admin/users/<id>/compliance/approve/
   Accepts optional body to approve single or bulk:
     - { "user_id": 123 }  OR  { "user_ids": [123, 456] }
   When body ids omitted, falls back to <id> in URL (backward compatible).
-  Requires MemberComplianceProfile exists per user; sets kyc_status VERIFIED; kyc_reviewed_at now.
+  Requires MemberComplianceProfile exists per user; sets kyc_status VERIFIED; kyc_reviewed_at now;
+  sets kyc_first_approved_at on first approval (sticky, never cleared on resubmit).
+  After approval, eligible HELD/PENDING (net=0) book-commission rows for each approved user are
+  auto-released to wallet on transaction commit (same rules as force-credit).
   For bulk, returns { approved_ids: [...], failed: [{id, reason}...] }.
 
 POST /api/v1/admin/users/compliance/approve/
@@ -1056,7 +1059,7 @@ POST /api/v1/admin/commissions/force-credit/
   Auth: Bearer + IsFinanceAdmin (SUPER_ADMIN or FINANCE + is_staff).
   Body (JSON): { "user_id": <int> } — recipient user whose HELD backlog to process (required).
   Behaviour:
-    - Does not run on KYC/compliance approval; finance triggers this explicitly.
+    - Manual finance trigger; also runs automatically after admin KYC/compliance approval.
     - Processes book-commission ledger rows for that recipient with status HELD or PENDING and net_amount 0,
       excluding commission_type MILESTONE (milestones use the milestone admin queue).
     - Skips a row when: recipient kyc_status is not VERIFIED; order is not PAID (e.g. REFUNDED);
@@ -1124,7 +1127,7 @@ POST /api/v1/user/wallet/withdraw/
     - Client should send the user's current band shown in the UI (from GET /api/v1/user/payouts/ -> wallet.current_band
       or legacy GET /api/v1/user/wallet/ -> current_band).
   Validates:
-    - KYC VERIFIED
+    - KYC VERIFIED (current status — strict; sticky kyc_first_approved_at alone is not enough)
     - payout method details exist (BANK: bank_account_number+bank_ifsc, UPI: upi_id)
     - band must equal wallet.current_band and be a cash band (1,3,5,7,9)
     - amount >= 200 and ≤ available_balance (cash_balance minus locked credits within cooling_off_days)
@@ -1603,6 +1606,14 @@ POST /api/v1/payments/verify/
     placement_manual_window_hours). Sponsor places via POST .../tree/place-direct/;
     after the deadline Celery auto-places using auto_placement_strategy.
     Commissions credit only after binary placement succeeds (idempotent per order).
+  Commission KYC gates:
+    - Credit (ledger/wallet): recipient must have kyc_first_approved_at (sticky). Once ever
+      admin-approved, new commissions credit normally even if kyc_status is PENDING during
+      KYC re-review.
+    - Withdrawal (POST /api/v1/user/wallet/withdraw/): current kyc_status must be VERIFIED
+      (strict). Resubmitted users cannot withdraw until admin re-approves latest KYC.
+    - Admin compliance approve auto-releases eligible HELD/PENDING (net=0) book-commission
+      backlog for approved users (same rules as force-credit).
 
 POST /api/v1/payments/webhook/
   Auth: None.

@@ -1,4 +1,7 @@
-"""Admin-triggered release of HELD / backlog commission ledger rows (no hook on KYC approve)."""
+"""Admin-triggered release of HELD / backlog commission ledger rows.
+
+Also invoked automatically after admin KYC/compliance approval (on transaction commit).
+"""
 
 from __future__ import annotations
 
@@ -40,8 +43,9 @@ def release_held_commissions_for_user(
     """
     Credit wallet for HELD (and eligible PENDING) book-commission rows for recipient user_id.
 
-    Does not run on KYC approval; finance admin calls this explicitly.
-    Mirrors CommissionEngine._credit_user payout rules; updates rows in place; may split remainder HELD.
+    Called automatically after admin KYC/compliance approval and via finance
+    POST /api/v1/admin/commissions/force-credit/. Mirrors CommissionEngine._credit_user
+    payout rules; updates rows in place; may split remainder HELD.
     """
     cfg = get_system_config()
     cap = cfg.earning_cap

@@ -340,7 +340,7 @@ def admin_commissions_pending(request):
 def admin_force_credit(request):
     """
     Release HELD/PENDING (net=0) book commission rows for one recipient after admin review.
-    Body: { "user_id": <int> } — required. Does not run automatically on KYC approval.
+    Body: { "user_id": <int> } — required. Also runs automatically on KYC/compliance approval.
     """
     raw = request.data.get("user_id")
     try:

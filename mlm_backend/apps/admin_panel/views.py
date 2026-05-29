@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import F, Q, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -14,6 +15,7 @@ from apps.agreements.identity_uniqueness import (
     validate_identity_uniqueness_for_user,
 )
 from apps.agreements.models import MemberComplianceProfile
+from apps.commissions.held_release_service import release_held_commissions_for_user
 from apps.commissions.milestone_tiers import get_milestones
 from apps.common.permissions import (
     IsAdminRole,
@@ -156,7 +158,7 @@ def _approve_compliance_by_user_ids(user_ids: list[int]):
         return [], failed, None
 
     now = timezone.now()
-    (
+    with transaction.atomic():
         User.objects.filter(id__in=ok_ids).update(
             kyc_status=User.KYCStatus.VERIFIED,
             kyc_reviewed_at=now,
@@ -164,7 +166,10 @@ def _approve_compliance_by_user_ids(user_ids: list[int]):
             kyc_rejection_reason="",
             updated_at=now,
         )
-    )
+        for uid in ok_ids:
+            transaction.on_commit(
+                lambda user_id=uid: release_held_commissions_for_user(user_id=user_id, actor=None)
+            )
     return ok_ids, failed, now.isoformat()
 
 

@@ -332,7 +332,10 @@ class CommissionEngine:
         gross: Decimal,
         cap: Decimal,
     ):
-        if recipient.kyc_status != User.KYCStatus.VERIFIED:
+        if not User.objects.filter(pk=recipient.pk, kyc_first_approved_at__isnull=False).exists():
+            # Hold only for users who have never been admin-approved. Previously approved
+            # members keep earning during KYC re-review; withdrawals stay blocked separately.
+            # Query DB directly so stale cached User rows on binary nodes do not mis-hold.
             logger.info(
                 "commission_held_kyc order_id=%s recipient_id=%s type=%s",
                 order.id,
@@ -425,7 +428,7 @@ class CommissionEngine:
                     status="PENDING",
                 )
                 return
-            if sponsor.kyc_status != User.KYCStatus.VERIFIED:
+            if not User.objects.filter(pk=sponsor.pk, kyc_first_approved_at__isnull=False).exists():
                 MilestoneRecord.objects.create(
                     user=sponsor,
                     milestone_referrals=threshold,
