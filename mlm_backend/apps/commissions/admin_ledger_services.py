@@ -11,6 +11,9 @@ from django.db.models import Q, QuerySet, Sum
 from django.utils.dateparse import parse_date as django_parse_date
 
 from apps.admin_panel.utils import get_system_config
+from apps.payments.models import Order
+from apps.users.models import User
+from apps.wallet.models import Wallet
 
 from .models import CommissionLedger
 
@@ -135,6 +138,86 @@ def display_status_for_ledger(row: CommissionLedger) -> str:
     return row.status
 
 
+def _build_admin_commission_note(row: CommissionLedger) -> str:
+    """Human-readable note for admin commission detail (derived at read time)."""
+    st = CommissionLedger.Status
+    ct = CommissionLedger.CommissionType
+    recipient = row.recipient
+    order = row.order
+    created_at = row.created_at.isoformat()
+
+    if row.status == st.REVERSED:
+        return (
+            "Reversed: commission rolled back "
+            "(typically due to order refund or admin reversal)."
+        )
+
+    if row.status in (st.HELD, st.PENDING):
+        if order.status != Order.Status.PAID:
+            return (
+                f"Held: order {order.order_number} is currently {order.status}; "
+                "commission cannot be released."
+            )
+        first_approved_at = recipient.kyc_first_approved_at
+        if first_approved_at is None:
+            return (
+                f"{recipient.full_name}'s KYC was not approved when this commission "
+                f"was generated at {created_at}. Will release after first KYC approval."
+            )
+        if row.created_at < first_approved_at:
+            return (
+                f"Forfeited: this commission was generated at {created_at}, before "
+                f"{recipient.full_name}'s first KYC approval at "
+                f"{first_approved_at.isoformat()}. Per policy, pre-first-approval "
+                "commissions are not credited."
+            )
+        if recipient.kyc_status != User.KYCStatus.VERIFIED:
+            return (
+                f"Held: {recipient.full_name}'s KYC is currently "
+                f"{recipient.kyc_status}. Credit will release once KYC is re-verified."
+            )
+        cfg = get_system_config()
+        cap = cfg.earning_cap
+        total_earned = (
+            Wallet.objects.filter(user_id=row.recipient_id)
+            .values_list("total_earned", flat=True)
+            .first()
+        )
+        if total_earned is None:
+            total_earned = Decimal("0")
+        if total_earned >= cap:
+            return (
+                f"Held: {recipient.full_name} has reached the earning cap of {cap}; "
+                "further commissions cannot be credited."
+            )
+        return "Pending admin processing."
+
+    # CREDITED
+    order_number = order.order_number
+    if row.commission_type == ct.DIRECT:
+        note = (
+            f"Direct sponsor commission for order {order_number} "
+            f"from {row.source_user.member_id}."
+        )
+    elif row.commission_type == ct.UPLINE_L1:
+        note = f"Passive upline L1 commission for order {order_number}."
+    elif row.commission_type == ct.UPLINE_L2:
+        note = f"Passive upline L2 commission for order {order_number}."
+    elif row.commission_type == ct.UPLINE_L3:
+        note = f"Passive upline L3 commission for order {order_number}."
+    elif row.commission_type == ct.MILESTONE:
+        note = "Milestone bonus credit."
+    else:
+        note = f"Commission credited for order {order_number}."
+
+    if row.slot_band_held:
+        note += (
+            " Slot-band hold: counts toward total earnings only — not added to cash "
+            "balance until band clears."
+        )
+    return note
+
+
 def _tds_rate_percent(amount: Decimal, tds: Decimal) -> str | None:
     """Statutory Sec 194H rate from config (not misleading per-row effective %)."""
     if amount <= 0 or tds <= 0:
@@ -180,6 +263,7 @@ def serialize_admin_commission_row(row: CommissionLedger) -> dict[str, Any]:
 
 def serialize_admin_commission_detail(row: CommissionLedger) -> dict[str, Any]:
     base = serialize_admin_commission_row(row)
+    base["note"] = _build_admin_commission_note(row)
     o = row.order
     base["order_detail"] = {
         "id": o.id,

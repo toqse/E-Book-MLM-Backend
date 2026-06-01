@@ -1058,8 +1058,16 @@ GET /api/v1/admin/commissions/
 
 GET /api/v1/admin/commissions/<int:pk>/
   Auth: Bearer + IsFinanceAdmin.
-  Same row fields as list item plus "order_detail": order id, order_number, razorpay_order_id, status,
-  amount_paid, paid_at, is_retail_purchase.
+  Same row fields as list item plus:
+    - "note" (string, detail-only — not on list, pending, export, or summary): short human-readable
+      description. CREDITED rows: commission type + order context (e.g. direct sponsor credit from buyer).
+      HELD/PENDING rows: exact derived hold reason at read time (e.g. "<earner>'s KYC was not approved
+      when this commission was generated at <created_at>. Will release after first KYC approval.";
+      forfeited pre-first-approval; order not PAID; earning cap reached; KYC re-review; or fallback
+      "Pending admin processing."). REVERSED: rollback explanation. slot_band_held CREDITED rows append
+      slot-band cash-hold wording.
+    - "order_detail": order id, order_number, razorpay_order_id, status, amount_paid, paid_at,
+      is_retail_purchase.
   Errors: 404 if ledger id missing.
 
 GET /api/v1/admin/commissions/pending/
