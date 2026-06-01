@@ -44,7 +44,7 @@ def envelope_exception_handler(exc, context):
         response.data = {
             "success": False,
             "data": None,
-            "message": "OTP limit exceeded. Try again later",
+            "message": "Too many requests. Please try again later.",
             "errors": {"detail": "rate_limited", "retry_after_seconds": wait},
         }
         return response

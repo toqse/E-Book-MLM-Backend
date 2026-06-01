@@ -133,8 +133,12 @@ POST /api/v1/auth/send-otp/
     }
     When EXPOSE_OTP_IN_RESPONSE=false, "otp" is omitted (production SMS flows).
   message: "OTP sent"
-  Errors: 429 — rate limited (max 3 sends / 10 minutes per identifier);
-    errors may include {"detail": "rate_limited"}.
+  Errors:
+    404 — user not found (LOGIN/KYC purposes when phone/email is not registered).
+    403 — account suspended (LOGIN/KYC/ADMIN_LOGIN purposes when the matched user is SUSPENDED, DEACTIVATED, or otherwise inactive);
+      message "Account suspended"; errors include {"detail": "account_suspended"}. No OTP is generated or sent.
+    403 — forbidden (ADMIN_LOGIN purpose when the matched user is not staff).
+    429 — rate limited (max 3 sends / 10 minutes per identifier); errors may include {"detail": "rate_limited"}.
 
 POST /api/v1/auth/register/send-otp/
   Auth: None.

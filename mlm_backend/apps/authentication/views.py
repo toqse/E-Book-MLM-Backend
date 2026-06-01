@@ -125,12 +125,24 @@ def send_otp(request: Request):
     ident = phone or email
 
     if purpose in (OTPRecord.Purpose.LOGIN, OTPRecord.Purpose.KYC):
-        if not _user_by_phone_or_email(phone, email):
+        u = _user_by_phone_or_email(phone, email)
+        if not u:
             return envelope_response(
                 None,
                 message="User not found",
                 success=False,
                 status=status.HTTP_404_NOT_FOUND,
+            )
+        if (
+            u.account_status in (User.AccountStatus.SUSPENDED, User.AccountStatus.DEACTIVATED)
+            or not u.is_active
+        ):
+            return envelope_response(
+                None,
+                message="Account suspended",
+                success=False,
+                errors={"detail": "account_suspended"},
+                status=status.HTTP_403_FORBIDDEN,
             )
     elif purpose == OTPRecord.Purpose.ADMIN_LOGIN:
         u = _user_by_phone_or_email(phone, email)
@@ -139,6 +151,17 @@ def send_otp(request: Request):
                 None,
                 message="Forbidden",
                 success=False,
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if (
+            u.account_status in (User.AccountStatus.SUSPENDED, User.AccountStatus.DEACTIVATED)
+            or not u.is_active
+        ):
+            return envelope_response(
+                None,
+                message="Account suspended",
+                success=False,
+                errors={"detail": "account_suspended"},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -823,6 +846,17 @@ def admin_send_otp(request: Request):
     if not u or not u.is_staff:
         return envelope_response(
             None, message="Forbidden", success=False, status=status.HTTP_403_FORBIDDEN
+        )
+    if (
+        u.account_status in (User.AccountStatus.SUSPENDED, User.AccountStatus.DEACTIVATED)
+        or not u.is_active
+    ):
+        return envelope_response(
+            None,
+            message="Account suspended",
+            success=False,
+            errors={"detail": "account_suspended"},
+            status=status.HTTP_403_FORBIDDEN,
         )
     if not can_send_otp(ident):
         return envelope_response(
