@@ -11,6 +11,9 @@ from apps.users.models import User
 from .placement import (
     admin_may_change_placement_in_cooloff,
     admin_reverse_placement,
+    admin_reverse_placement_subtree,
+    build_dry_run_payload,
+    collect_subtree_for_reverse,
     complete_placement_for_order,
  )
 
@@ -136,3 +139,79 @@ def admin_placement_reassign(request: Request, order_id: int):
     except ValueError as e:
         return envelope_response(None, message=str(e), success=False, status=409)
     return envelope_response({"order_id": order.id, "status": "reassigned"})
+
+
+@api_view(["POST"])
+@permission_classes([IsAdminRole])
+def admin_placement_reverse_subtree(request: Request, order_id: int):
+    """
+    Cascade-reverse the binary subtree rooted at this order's buyer.
+
+    Modes:
+      - Dry-run (?dry_run=true): read-only preview with full blast radius.
+      - Execute (body { "confirm": true, expected_* }): performs the reverse
+        atomically with TOCTOU protection via expected_* snapshot tokens.
+
+    Existing /reverse/ endpoint remains leaf-only and is NOT changed.
+    """
+    order = Order.objects.filter(pk=order_id).select_related("user").first()
+    if not order:
+        return envelope_response(None, message="Order not found", success=False, status=404)
+    ok, err = admin_may_change_placement_in_cooloff(order)
+    if not ok:
+        return envelope_response(None, message=err, success=False, status=400)
+
+    dry_run = (request.query_params.get("dry_run") or "").strip().lower() == "true"
+
+    if dry_run:
+        try:
+            preview = collect_subtree_for_reverse(order)
+        except ValueError as e:
+            return envelope_response(None, message=str(e), success=False, status=400)
+        payload = build_dry_run_payload(preview)
+        message = (
+            "Dry-run preview. No changes were made."
+            if preview.can_reverse
+            else "Cannot reverse subtree: see `blocking` for details. No changes were made."
+        )
+        return envelope_response(
+            payload, message=message, success=preview.can_reverse
+        )
+
+    confirm = request.data.get("confirm") is True
+    if not confirm:
+        return envelope_response(
+            None,
+            message="confirm must be true to execute subtree reverse",
+            success=False,
+            status=400,
+        )
+
+    expected_root = (request.data.get("expected_root_member_id") or "").strip()
+    expected_count = request.data.get("expected_affected_count")
+    expected_ids_raw = request.data.get("expected_affected_order_ids") or []
+    try:
+        expected_ids = [int(x) for x in expected_ids_raw]
+    except (TypeError, ValueError):
+        return envelope_response(
+            None,
+            message="expected_affected_order_ids must be a list of integers",
+            success=False,
+            status=400,
+        )
+
+    try:
+        with transaction.atomic():
+            Order.objects.select_for_update().filter(pk=order.pk).first()
+            result = admin_reverse_placement_subtree(
+                root_order=order,
+                actor=request.user,
+                expected_root_member_id=expected_root,
+                expected_affected_count=(
+                    int(expected_count) if expected_count is not None else None
+                ),
+                expected_affected_order_ids=expected_ids,
+            )
+    except ValueError as e:
+        return envelope_response(None, message=str(e), success=False, status=409)
+    return envelope_response(result, message="Subtree reversed")

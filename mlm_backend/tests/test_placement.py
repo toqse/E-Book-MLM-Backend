@@ -410,3 +410,309 @@ def test_auto_placer_retries_failed_after_sponsor_placed(
     b_order.refresh_from_db()
     assert b_order.placement_status == Order.PlacementStatus.PLACED_AUTO
     assert buyer_b.binary_node.parent is not None
+
+
+# ---------------------------------------------------------------------------
+# /reverse-subtree/ (cascade-reverse, Option A) tests.
+# These intentionally do NOT touch the existing /reverse/ leaf-only contract.
+# ---------------------------------------------------------------------------
+
+
+def _place_chain(
+    *, root_phone_prefix: str, suffix_prefix: str, capture
+) -> tuple[User, Order, User, Order, User, Order]:
+    """
+    Build a tiny placed chain root -> B (LEFT) -> C (LEFT child of B), with
+    paid orders for B and C inside the refund window. Returns
+    (root, root_order, b, b_order, c, c_order).
+    """
+    root = _member(f"+91{root_phone_prefix}00")
+    root.is_member = True
+    root.save(update_fields=["is_member"])
+    _verified_with_compliance(root)
+    BinaryTreeService.place_member(root, None)
+    root_order = _paid_order(root, suffix=f"{suffix_prefix}root")
+
+    b = _member(f"+91{root_phone_prefix}01", sponsor=root)
+    b.is_member = True
+    b.save(update_fields=["is_member"])
+    _verified_with_compliance(b)
+    b_order = _paid_order(b, suffix=f"{suffix_prefix}b")
+    with capture(execute=True):
+        placement_mod.complete_placement_for_order(
+            b_order,
+            manual_leg=BinaryNode.Position.LEFT,
+            auto_strategy=None,
+            final_status=Order.PlacementStatus.PLACED_MANUAL,
+            actor=root,
+            audit_action="placement.manual",
+        )
+
+    c = _member(f"+91{root_phone_prefix}02", sponsor=b)
+    c.is_member = True
+    c.save(update_fields=["is_member"])
+    _verified_with_compliance(c)
+    c_order = _paid_order(c, suffix=f"{suffix_prefix}c")
+    with capture(execute=True):
+        placement_mod.complete_placement_for_order(
+            c_order,
+            manual_leg=BinaryNode.Position.LEFT,
+            auto_strategy=None,
+            final_status=Order.PlacementStatus.PLACED_MANUAL,
+            actor=b,
+            audit_action="placement.manual",
+        )
+
+    return root, root_order, b, b_order, c, c_order
+
+
+@pytest.mark.django_db
+def test_reverse_subtree_dry_run_lists_affected_members_and_commissions(
+    system_config, django_capture_on_commit_callbacks
+):
+    admin = _admin()
+    root, root_order, b, b_order, c, c_order = _place_chain(
+        root_phone_prefix="8090501",
+        suffix_prefix="dr",
+        capture=django_capture_on_commit_callbacks,
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    r = client.get(f"/api/v1/admin/placements/{b_order.id}/reverse-subtree/?dry_run=true")
+    # GET is not allowed; the endpoint accepts POST only.
+    assert r.status_code == 405
+
+    r = client.post(f"/api/v1/admin/placements/{b_order.id}/reverse-subtree/?dry_run=true")
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["success"] is True
+    data = body["data"]
+
+    assert data["can_reverse"] is True
+    assert data["blocking"] == []
+
+    affected_ids = {m["member_id"] for m in data["affected_members"]}
+    assert b.member_id in affected_ids
+    assert c.member_id in affected_ids
+    assert root.member_id not in affected_ids
+    assert data["summary"]["affected_members_count"] == 2
+    assert data["summary"]["affected_orders_count"] == 2
+    assert data["summary"]["commission_entries_to_reverse"] >= 1
+    assert data["expected_affected_count"] == 2
+    assert sorted(data["expected_affected_order_ids"]) == sorted(
+        [b_order.id, c_order.id]
+    )
+
+    b.refresh_from_db()
+    c.refresh_from_db()
+    assert hasattr(b, "binary_node"), "Dry-run must not detach anyone"
+    assert hasattr(c, "binary_node"), "Dry-run must not detach anyone"
+    assert CommissionLedger.objects.filter(order=b_order).exists()
+
+
+@pytest.mark.django_db
+def test_reverse_subtree_executes_when_all_in_refund_window(
+    system_config, django_capture_on_commit_callbacks
+):
+    admin = _admin()
+    root, root_order, b, b_order, c, c_order = _place_chain(
+        root_phone_prefix="8090502",
+        suffix_prefix="ex",
+        capture=django_capture_on_commit_callbacks,
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+
+    pre = client.post(
+        f"/api/v1/admin/placements/{b_order.id}/reverse-subtree/?dry_run=true"
+    )
+    assert pre.status_code == 200
+    snap = pre.json()["data"]
+
+    r = client.post(
+        f"/api/v1/admin/placements/{b_order.id}/reverse-subtree/",
+        {
+            "confirm": True,
+            "expected_root_member_id": snap["expected_root_member_id"],
+            "expected_affected_count": snap["expected_affected_count"],
+            "expected_affected_order_ids": snap["expected_affected_order_ids"],
+        },
+        format="json",
+    )
+    assert r.status_code == 200, r.content
+    out = r.json()["data"]
+    assert out["status"] == "reversed_subtree"
+    assert sorted(out["affected_order_ids"]) == sorted([b_order.id, c_order.id])
+
+    b.refresh_from_db()
+    c.refresh_from_db()
+    assert not hasattr(b, "binary_node")
+    assert not hasattr(c, "binary_node")
+    b_order.refresh_from_db()
+    c_order.refresh_from_db()
+    assert b_order.placement_status == Order.PlacementStatus.PENDING
+    assert c_order.placement_status == Order.PlacementStatus.PENDING
+    assert (
+        not CommissionLedger.objects.filter(order=b_order)
+        .exclude(status=CommissionLedger.Status.REVERSED)
+        .exists()
+    )
+    assert (
+        not CommissionLedger.objects.filter(order=c_order)
+        .exclude(status=CommissionLedger.Status.REVERSED)
+        .exists()
+    )
+
+
+@pytest.mark.django_db
+def test_reverse_subtree_blocked_when_descendant_outside_refund_window(
+    system_config, django_capture_on_commit_callbacks
+):
+    admin = _admin()
+    root, root_order, b, b_order, c, c_order = _place_chain(
+        root_phone_prefix="8090503",
+        suffix_prefix="bl",
+        capture=django_capture_on_commit_callbacks,
+    )
+    c_order.refund_eligible_until = timezone.now() - timedelta(days=1)
+    c_order.save(update_fields=["refund_eligible_until"])
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+
+    pre = client.post(
+        f"/api/v1/admin/placements/{b_order.id}/reverse-subtree/?dry_run=true"
+    )
+    assert pre.status_code == 200
+    body = pre.json()
+    assert body["success"] is False
+    assert body["data"]["can_reverse"] is False
+    blocking_ids = {row["member_id"] for row in body["data"]["blocking"]}
+    assert c.member_id in blocking_ids
+
+    snap = body["data"]
+    r = client.post(
+        f"/api/v1/admin/placements/{b_order.id}/reverse-subtree/",
+        {
+            "confirm": True,
+            "expected_root_member_id": snap["expected_root_member_id"],
+            "expected_affected_count": snap["expected_affected_count"],
+            "expected_affected_order_ids": snap["expected_affected_order_ids"],
+        },
+        format="json",
+    )
+    assert r.status_code == 409, r.content
+    b.refresh_from_db()
+    c.refresh_from_db()
+    assert hasattr(b, "binary_node")
+    assert hasattr(c, "binary_node")
+
+
+@pytest.mark.django_db
+def test_reverse_subtree_blocked_without_confirm(
+    system_config, django_capture_on_commit_callbacks
+):
+    admin = _admin()
+    root, root_order, b, b_order, c, c_order = _place_chain(
+        root_phone_prefix="8090504",
+        suffix_prefix="nc",
+        capture=django_capture_on_commit_callbacks,
+    )
+    client = APIClient()
+    client.force_authenticate(user=admin)
+
+    r = client.post(
+        f"/api/v1/admin/placements/{b_order.id}/reverse-subtree/",
+        {},
+        format="json",
+    )
+    assert r.status_code == 400, r.content
+    b.refresh_from_db()
+    assert hasattr(b, "binary_node")
+    c.refresh_from_db()
+    assert hasattr(c, "binary_node")
+
+
+@pytest.mark.django_db
+def test_reverse_subtree_rejects_expected_count_mismatch(
+    system_config, django_capture_on_commit_callbacks
+):
+    admin = _admin()
+    root, root_order, b, b_order, c, c_order = _place_chain(
+        root_phone_prefix="8090505",
+        suffix_prefix="mm",
+        capture=django_capture_on_commit_callbacks,
+    )
+    client = APIClient()
+    client.force_authenticate(user=admin)
+
+    r = client.post(
+        f"/api/v1/admin/placements/{b_order.id}/reverse-subtree/",
+        {
+            "confirm": True,
+            "expected_root_member_id": b.member_id,
+            "expected_affected_count": 99,
+            "expected_affected_order_ids": [b_order.id, c_order.id],
+        },
+        format="json",
+    )
+    assert r.status_code == 409, r.content
+    b.refresh_from_db()
+    c.refresh_from_db()
+    assert hasattr(b, "binary_node")
+    assert hasattr(c, "binary_node")
+
+
+@pytest.mark.django_db
+def test_reverse_subtree_single_leaf_behaves_like_leaf_reverse(
+    system_config, django_capture_on_commit_callbacks
+):
+    """If B is a leaf, /reverse-subtree/ should still work and reverse just B."""
+    admin = _admin()
+    root = _member("+918090506000")
+    root.is_member = True
+    root.save(update_fields=["is_member"])
+    _verified_with_compliance(root)
+    BinaryTreeService.place_member(root, None)
+
+    buyer = _member("+918090506001", sponsor=root)
+    buyer.is_member = True
+    buyer.save(update_fields=["is_member"])
+    _verified_with_compliance(buyer)
+    order = _paid_order(buyer, suffix="sl")
+    with django_capture_on_commit_callbacks(execute=True):
+        placement_mod.complete_placement_for_order(
+            order,
+            manual_leg=BinaryNode.Position.LEFT,
+            auto_strategy=None,
+            final_status=Order.PlacementStatus.PLACED_MANUAL,
+            actor=root,
+            audit_action="placement.manual",
+        )
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    pre = client.post(
+        f"/api/v1/admin/placements/{order.id}/reverse-subtree/?dry_run=true"
+    )
+    assert pre.status_code == 200
+    snap = pre.json()["data"]
+    assert snap["expected_affected_count"] == 1
+
+    r = client.post(
+        f"/api/v1/admin/placements/{order.id}/reverse-subtree/",
+        {
+            "confirm": True,
+            "expected_root_member_id": snap["expected_root_member_id"],
+            "expected_affected_count": snap["expected_affected_count"],
+            "expected_affected_order_ids": snap["expected_affected_order_ids"],
+        },
+        format="json",
+    )
+    assert r.status_code == 200, r.content
+    buyer.refresh_from_db()
+    assert not hasattr(buyer, "binary_node")
+    order.refresh_from_db()
+    assert order.placement_status == Order.PlacementStatus.PENDING

@@ -924,3 +924,13 @@ def admin_verify_otp(request: Request):
         },
         message="Admin 2FA OK",
     )
+
+
+# Scoped DRF throttling (defense-in-depth; OTP send also uses DB limiter in otp.py).
+send_otp.view_class.throttle_scope = "otp_send"
+send_register_otp.view_class.throttle_scope = "otp_send"
+verify_otp_register.view_class.throttle_scope = "otp_verify"
+verify_otp_login.view_class.throttle_scope = "otp_verify"
+admin_send_otp.view_class.throttle_scope = "otp_send"
+admin_verify_otp.view_class.throttle_scope = "otp_verify"
+admin_password_login.view_class.throttle_scope = "auth_login"

@@ -146,12 +146,13 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
     ),
     "DEFAULT_THROTTLE_CLASSES": (
-        "rest_framework.throttling.UserRateThrottle",
-        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
     ),
     "DEFAULT_THROTTLE_RATES": {
-        "user": "100/min",
-        "anon": "30/min",
+        # Only sensitive scopes — every other view is unthrottled.
+        "otp_send": "10/min",
+        "otp_verify": "20/min",
+        "auth_login": "15/min",
     },
     "EXCEPTION_HANDLER": "apps.common.exceptions.envelope_exception_handler",
     # Ensure consistent date rendering across API responses (DRF DateField).

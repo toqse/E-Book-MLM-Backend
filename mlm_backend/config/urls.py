@@ -71,6 +71,10 @@ urlpatterns = [
         mlm_placement_admin.admin_placement_reverse,
     ),
     path(
+        "api/v1/admin/placements/<int:order_id>/reverse-subtree/",
+        mlm_placement_admin.admin_placement_reverse_subtree,
+    ),
+    path(
         "api/v1/admin/placements/<int:order_id>/reassign/",
         mlm_placement_admin.admin_placement_reassign,
     ),

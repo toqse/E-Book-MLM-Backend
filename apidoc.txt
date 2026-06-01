@@ -649,6 +649,241 @@ POST /api/v1/admin/placements/<order_id>/reverse/
     deadline from platform settings.
   Success: { "order_id", "status": "reversed" }. 409 if not leaf.
 
+POST /api/v1/admin/placements/<order_id>/reverse-subtree/
+  Auth: Bearer + IsAdminRole.
+  Purpose: Cascade-reverse the entire binary subtree rooted at this order's
+    buyer. Separate endpoint from /reverse/ (which stays leaf-only and is
+    NOT modified). Use this only when the whole branch must come down.
+  Cool-off:
+    - Root order must be PAID and now <= order.refund_eligible_until.
+    - EVERY descendant order in the buyer's binary subtree must also be PAID,
+      non-retail, and still inside its OWN refund window. Otherwise the
+      operation is refused and nothing is changed.
+  Two modes on the same URL (see "Mode 1" and "Mode 2" below).
+
+  Mode 1 — Dry-run preview (read-only, no DB changes):
+    Query: ?dry_run=true
+    Body: ignored.
+    Response envelope success flag = can_reverse (i.e. false when blocked).
+    Success data:
+      {
+        "root": {
+          "order_id", "order_number", "member_id", "full_name",
+          "refund_eligible_until"
+        },
+        "can_reverse": <bool>,
+        "blocking": [
+          {
+            "member_id", "user_id", "full_name",
+            "order_id"|null, "refund_eligible_until"|null,
+            "reason": "outside_refund_window" | "no_paid_mlm_order"
+          }
+        ],
+        "summary": {
+          "affected_members_count", "affected_orders_count",
+          "commission_entries_to_reverse",
+          "gross_amount_to_reverse",  // decimal string
+          "net_amount_to_reverse",    // decimal string
+          "tds_to_unwind",            // decimal string
+          "wallets_going_negative_count"
+        },
+        "affected_members": [
+          {
+            "user_id", "member_id", "full_name", "level",
+            "leg_position": "LEFT"|"RIGHT"|null,
+            "parent_member_id"|null,
+            "order_id"|null, "order_number"|null,
+            "refund_eligible_until"|null,
+            "in_refund_window": <bool>
+          }
+        ],
+        "placement_resets": [
+          {
+            "order_id", "member_id",
+            "new_placement_status": "PENDING",
+            "new_placement_deadline_at"
+          }
+        ],
+        "commission_reversals": [
+          {
+            "ledger_id",
+            "recipient_user_id", "recipient_member_id", "recipient_full_name",
+            "source_user_id", "source_member_id",
+            "order_id", "order_number"|null,
+            "commission_type": "DIRECT"|"UPLINE_L1"|"UPLINE_L2"|"UPLINE_L3",
+            "amount", "tds_deducted", "net_amount",  // decimal strings
+            "slot_band_held": <bool>,
+            "status": "CREDITED"
+          }
+        ],
+        "wallet_impacts": [
+          {
+            "user_id", "member_id"|null, "full_name"|null,
+            "current_cash_balance", "debit_amount",
+            "projected_cash_balance",   // may be negative
+            "will_go_negative": <bool>,
+            "current_total_earned", "tds_unwind"  // all decimal strings
+          }
+        ],
+        "expected_root_member_id",
+        "expected_affected_count",
+        "expected_affected_order_ids": [<int>, ...]  // sorted asc
+      }
+    Notes:
+      - wallet_impacts.projected_cash_balance may be negative if the recipient
+        has already withdrawn cash. The engine does NOT claw back withdrawals;
+        this field exists so the UI can warn the admin before confirming.
+      - Only CREDITED ledger rows are listed/reversed. HELD/PENDING entries
+        are not affected (same gap as leaf-only /reverse/).
+      - leaf_position will be null for the binary root.
+
+  Mode 2 — Execute (no ?dry_run; required body):
+    Body:
+      {
+        "confirm": true,                                  // required, must be true
+        "expected_root_member_id": "<member_id>",         // from dry-run
+        "expected_affected_count": <int>,                 // from dry-run
+        "expected_affected_order_ids": [<int>, ...]       // from dry-run
+      }
+    Behavior (single transaction):
+      - Re-validates refund-window for every descendant.
+      - Re-validates expected_* against the live subtree (mismatch -> 409).
+      - For every affected order: reverses CREDITED commissions via
+        CommissionEngine.reverse_commissions (same semantics as
+        leaf-only /reverse/, applied per order in the subtree).
+      - Bottom-up detaches and deletes each BinaryNode so every removal
+        is a leaf removal; cached left/right_subtree_size on ancestors
+        stays consistent.
+      - Resets every affected order to PENDING with new placement_deadline_at
+        = now + SystemConfig.placement_manual_window_hours.
+      - Writes one audit row "placement.reverse_subtree" with payload:
+        { root_buyer_id, root_member_id, affected_order_ids,
+          affected_member_ids, commission_entries_reversed,
+          gross_reversed, net_reversed }.
+    Success data:
+      {
+        "root_order_id",
+        "status": "reversed_subtree",
+        "affected_order_ids": [<int>, ...],
+        "affected_member_ids": ["<member_id>", ...],
+        "commission_entries_reversed",
+        "gross_reversed", "net_reversed"   // decimal strings
+      }
+    Errors (envelope { success:false, message, data:null }):
+      400 — root order outside cool-off window;
+            confirm missing or not true;
+            expected_affected_order_ids not a list of ints.
+      404 — order_id not found.
+      409 — expected_root_member_id mismatch;
+            expected_affected_count mismatch;
+            expected_affected_order_ids mismatch (tree changed since preview);
+            any descendant outside its own refund window or missing a paid
+              MLM order;
+            subtree changed mid-transaction (e.g. a child re-attached).
+
+  Worked example (root buyer member_id=TQ10010, two-deep subtree):
+    Step 1 — Preview:
+      POST /api/v1/admin/placements/501/reverse-subtree/?dry_run=true
+      Response (envelope.data shown):
+        {
+          "root": {
+            "order_id": 501, "order_number": "ORD-...",
+            "member_id": "TQ10010", "full_name": "B Member",
+            "refund_eligible_until": "2026-06-08T10:00:00+05:30"
+          },
+          "can_reverse": true,
+          "blocking": [],
+          "summary": {
+            "affected_members_count": 2, "affected_orders_count": 2,
+            "commission_entries_to_reverse": 3,
+            "gross_amount_to_reverse": "1400.00",
+            "net_amount_to_reverse": "1260.00",
+            "tds_to_unwind": "140.00",
+            "wallets_going_negative_count": 0
+          },
+          "affected_members": [
+            { "user_id": 22, "member_id": "TQ10012", "full_name": "C Member",
+              "level": 4, "leg_position": "LEFT",
+              "parent_member_id": "TQ10010", "order_id": 502,
+              "order_number": "ORD-...", "in_refund_window": true,
+              "refund_eligible_until": "2026-06-07T09:30:00+05:30" },
+            { "user_id": 20, "member_id": "TQ10010", "full_name": "B Member",
+              "level": 3, "leg_position": "LEFT",
+              "parent_member_id": "TQ10001", "order_id": 501,
+              "order_number": "ORD-...", "in_refund_window": true,
+              "refund_eligible_until": "2026-06-08T10:00:00+05:30" }
+          ],
+          "placement_resets": [
+            { "order_id": 502, "member_id": "TQ10012",
+              "new_placement_status": "PENDING",
+              "new_placement_deadline_at": "2026-06-02T15:14:00+05:30" },
+            { "order_id": 501, "member_id": "TQ10010",
+              "new_placement_status": "PENDING",
+              "new_placement_deadline_at": "2026-06-02T15:14:00+05:30" }
+          ],
+          "commission_reversals": [
+            { "ledger_id": 991, "recipient_user_id": 2,
+              "recipient_member_id": "TQ10001", "recipient_full_name": "A",
+              "source_user_id": 20, "source_member_id": "TQ10010",
+              "order_id": 501, "order_number": "ORD-...",
+              "commission_type": "DIRECT",
+              "amount": "1000.00", "tds_deducted": "100.00",
+              "net_amount": "900.00",
+              "slot_band_held": false, "status": "CREDITED" }
+          ],
+          "wallet_impacts": [
+            { "user_id": 2, "member_id": "TQ10001", "full_name": "A",
+              "current_cash_balance": "5000.00",
+              "debit_amount": "1260.00",
+              "projected_cash_balance": "3740.00",
+              "will_go_negative": false,
+              "current_total_earned": "9000.00",
+              "tds_unwind": "140.00" }
+          ],
+          "expected_root_member_id": "TQ10010",
+          "expected_affected_count": 2,
+          "expected_affected_order_ids": [501, 502]
+        }
+
+    Step 2 — Execute (UI copies expected_* verbatim from dry-run):
+      POST /api/v1/admin/placements/501/reverse-subtree/
+      Body:
+        {
+          "confirm": true,
+          "expected_root_member_id": "TQ10010",
+          "expected_affected_count": 2,
+          "expected_affected_order_ids": [501, 502]
+        }
+      Success response (envelope.data):
+        {
+          "root_order_id": 501,
+          "status": "reversed_subtree",
+          "affected_order_ids": [501, 502],
+          "affected_member_ids": ["TQ10012", "TQ10010"],
+          "commission_entries_reversed": 3,
+          "gross_reversed": "1400.00",
+          "net_reversed": "1260.00"
+        }
+
+    Step 3 — Refresh (existing endpoints):
+      GET /api/v1/admin/placements/pending/
+      GET /api/v1/admin/binary-tree/tree/?anchor_member_id=TQ10001
+
+  Recommended UI flow:
+    1) Always call Mode 1 first; render summary, affected_members,
+       commission_reversals, wallet_impacts, and any blocking entries.
+    2) Require explicit confirmation in the UI (typed root member_id,
+       checked acknowledgements) before enabling the execute button.
+    3) Send expected_root_member_id, expected_affected_count, and
+       expected_affected_order_ids exactly as returned by the dry-run.
+       Backend refuses (409) if anything changed in between.
+    4) After 200, refresh the pending placements list and the binary tree
+       visualization (links above).
+  See also:
+    - POST /api/v1/admin/placements/<order_id>/reverse/        (leaf-only)
+    - POST /api/v1/admin/placements/<order_id>/reassign/        (re-position single buyer)
+    - POST /api/v1/admin/binary-tree/placements/<order_id>/place/ (admin place under parent)
+
 POST /api/v1/admin/placements/<order_id>/reassign/
   Auth: Bearer + IsAdminRole.
   Cool-off: allowed only while now <= order.refund_eligible_until (refund window).

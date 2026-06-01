@@ -296,6 +296,10 @@ def agreement_verify(request: Request):
     )
 
 
+agreement_send_otp.view_class.throttle_scope = "otp_send"
+agreement_verify.view_class.throttle_scope = "otp_verify"
+
+
 @api_view(["GET"])
 @permission_classes([permissions.AllowAny])
 def agreement_acceptance_proof_download(request: Request, acceptance_batch_id: uuid.UUID):
