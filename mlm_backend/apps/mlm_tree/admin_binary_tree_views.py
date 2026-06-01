@@ -23,6 +23,107 @@ from .placement import admin_may_change_placement_in_cooloff, admin_place_under_
 ADMIN_BINARY_TREE_DEPTH_DEFAULT = 2
 ADMIN_BINARY_TREE_DEPTH_MAX = 10
 
+# Tree-view server-side search ("q") caps; matches are computed in-memory
+# over the already-loaded subtree, so no extra DB work.
+ADMIN_BINARY_TREE_SEARCH_LIMIT_DEFAULT = 100
+ADMIN_BINARY_TREE_SEARCH_LIMIT_MAX = 500
+
+
+def _find_matched_pks(
+    nodes_by_pk: dict[int, BinaryNode], q_lower: str
+) -> set[int]:
+    """Case-insensitive substring match on user.member_id and user.full_name."""
+    matched: set[int] = set()
+    for pk, n in nodes_by_pk.items():
+        u = n.user
+        mid = (getattr(u, "member_id", None) or "").lower()
+        name = (getattr(u, "full_name", None) or "").lower()
+        if q_lower in mid or q_lower in name:
+            matched.add(pk)
+    return matched
+
+
+def _stamp_is_match(payload: dict[str, Any] | None, matched_member_ids: set[str]) -> None:
+    """Walk a nested tree payload and set node['is_match'] for matched nodes.
+
+    Also sets is_match=False on non-matching nodes so the field is always
+    present (simpler for the client to consume)."""
+    if not isinstance(payload, dict):
+        return
+    payload["is_match"] = payload.get("member_id") in matched_member_ids
+    _stamp_is_match(payload.get("left"), matched_member_ids)
+    _stamp_is_match(payload.get("right"), matched_member_ids)
+
+
+def _build_search_matches(
+    matched_pks: set[int],
+    nodes_by_pk: dict[int, BinaryNode],
+    anchor_pk: int | None,
+    limit: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return (matches, total_count). ``matches`` is sorted by depth from the
+    anchor (or root when anchor_pk is None), then by member_id, and capped at
+    ``limit``. ``total_count`` is the unbounded match count.
+
+    Each entry includes:
+      - member_id, full_name
+      - depth_from_anchor: int (0 = anchor itself; None if path could not be resolved)
+      - path: list[str] of member_ids from anchor down to the matched member
+    """
+    if not matched_pks:
+        return [], 0
+    parent_by_child = team_services.build_parent_by_child(nodes_by_pk)
+
+    rows: list[dict[str, Any]] = []
+    for pk in matched_pks:
+        n = nodes_by_pk.get(pk)
+        if not n:
+            continue
+        u = n.user
+        mid = getattr(u, "member_id", None)
+        name = getattr(u, "full_name", None)
+
+        # Walk up to the anchor (or until we lose the parent chain) to build
+        # the path of member_ids and the depth.
+        path_pks: list[int] = [pk]
+        cur = pk
+        depth = 0
+        if anchor_pk is None or pk != anchor_pk:
+            while True:
+                p = parent_by_child.get(cur)
+                if p is None:
+                    break
+                path_pks.append(p)
+                depth += 1
+                if anchor_pk is not None and p == anchor_pk:
+                    break
+                cur = p
+                # Safety: don't loop forever on malformed data.
+                if depth > 64:
+                    break
+        # Reverse so path goes from anchor → matched
+        path_pks.reverse()
+        path = []
+        for ppk in path_pks:
+            pn = nodes_by_pk.get(ppk)
+            if pn is not None:
+                path.append(pn.user.member_id)
+
+        rows.append(
+            {
+                "member_id": mid,
+                "full_name": name,
+                "depth_from_anchor": depth,
+                "path": path,
+            }
+        )
+
+    rows.sort(key=lambda r: (r["depth_from_anchor"], r["member_id"] or ""))
+    total = len(rows)
+    if limit > 0 and total > limit:
+        rows = rows[:limit]
+    return rows, total
+
 
 def _pending_binary_placement_orders():
     return Order.objects.filter(
@@ -209,6 +310,18 @@ def admin_binary_tree_tree_view(request: Request):
     depth_capped = depth_requested is not None and depth_requested != depth_effective
     anchor_member_id = (request.query_params.get("anchor_member_id") or "").strip()
 
+    # Optional in-subtree search ("search within results"). Matches are
+    # computed in Python over the already-loaded subtree, so this adds no DB
+    # round-trips. Empty/whitespace q disables the feature.
+    q_raw = request.query_params.get("q") or ""
+    q = q_raw.strip()
+    match_limit = _parse_int(
+        request.query_params.get("match_limit"),
+        default=ADMIN_BINARY_TREE_SEARCH_LIMIT_DEFAULT,
+        lo=1,
+        hi=ADMIN_BINARY_TREE_SEARCH_LIMIT_MAX,
+    )
+
     meta = {
         "depth_requested": depth_requested,
         "depth_effective": depth_effective,
@@ -216,12 +329,50 @@ def admin_binary_tree_tree_view(request: Request):
         "depth_capped": depth_capped,
     }
 
+    def _attach_search_block(
+        payload: dict[str, Any],
+        nodes_by_pk: dict[int, BinaryNode],
+        root_pk: int | None,
+    ) -> dict[str, Any]:
+        """Compute matches over the loaded subtree, stamp is_match on the
+        nested tree, and return the payload with a new ``search`` key."""
+        if not q:
+            return payload
+        q_lower = q.lower()
+        matched_pks = _find_matched_pks(nodes_by_pk, q_lower)
+        matched_member_ids = {
+            nodes_by_pk[pk].user.member_id
+            for pk in matched_pks
+            if pk in nodes_by_pk and nodes_by_pk[pk].user is not None
+        }
+        # Stamp is_match on every node in the nested payload (root may live
+        # under "root" for the anchor case, or be the payload itself for
+        # per-root entries in the no-anchor case).
+        target = payload.get("root") if isinstance(payload.get("root"), dict) else payload
+        _stamp_is_match(target, matched_member_ids)
+
+        matches, total = _build_search_matches(
+            matched_pks, nodes_by_pk, root_pk, match_limit
+        )
+        payload["search"] = {
+            "q": q,
+            "mode": "highlight",
+            "match_count": total,
+            "limit": match_limit,
+            "truncated": total > len(matches),
+            "matches": matches,
+        }
+        return payload
+
     if anchor_member_id:
         anchor = User.objects.filter(member_id__iexact=anchor_member_id).first()
         if not anchor:
             return envelope_response(None, message="Anchor not found", success=False, status=404)
-        payload = team_services.nested_tree_at_anchor_user(anchor, depth_effective)
+        payload, nodes_by_pk, anchor_pk = team_services.nested_tree_at_anchor_user_loaded(
+            anchor, depth_effective
+        )
         if isinstance(payload, dict):
+            payload = _attach_search_block(payload, nodes_by_pk, anchor_pk)
             payload = {**payload, "tree_query": meta}
         return envelope_response(payload)
 
@@ -230,11 +381,46 @@ def admin_binary_tree_tree_view(request: Request):
         .select_related("user")
         .order_by("id")[:50]
     )
-    data = [team_services.nested_tree_at_anchor_user(r.user, depth_effective) for r in roots]
-    for item in data:
+    data: list[dict[str, Any]] = []
+    aggregate_match_total = 0
+    aggregate_matches: list[dict[str, Any]] = []
+    for r in roots:
+        item, nodes_by_pk, root_pk = team_services.nested_tree_at_anchor_user_loaded(
+            r.user, depth_effective
+        )
         if isinstance(item, dict):
+            item = _attach_search_block(item, nodes_by_pk, root_pk)
             item["tree_query"] = meta
-    return envelope_response({"roots": data, "depth": depth_effective, "tree_query": meta})
+            if q and isinstance(item.get("search"), dict):
+                aggregate_match_total += int(item["search"].get("match_count") or 0)
+                aggregate_matches.extend(item["search"].get("matches") or [])
+        data.append(item)
+
+    response: dict[str, Any] = {
+        "roots": data,
+        "depth": depth_effective,
+        "tree_query": meta,
+    }
+    if q:
+        # Provide a top-level rollup so the client doesn't have to merge
+        # per-root search blocks itself. Cap the rolled-up matches list at
+        # match_limit (already sorted by depth then member_id within each
+        # root; we re-sort the merged list to keep ordering deterministic).
+        aggregate_matches.sort(
+            key=lambda r: (r.get("depth_from_anchor") or 0, r.get("member_id") or "")
+        )
+        truncated = len(aggregate_matches) > match_limit
+        if truncated:
+            aggregate_matches = aggregate_matches[:match_limit]
+        response["search"] = {
+            "q": q,
+            "mode": "highlight",
+            "match_count": aggregate_match_total,
+            "limit": match_limit,
+            "truncated": truncated or aggregate_match_total > len(aggregate_matches),
+            "matches": aggregate_matches,
+        }
+    return envelope_response(response)
 
 
 @api_view(["GET"])

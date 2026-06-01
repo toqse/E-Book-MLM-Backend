@@ -934,8 +934,18 @@ GET /api/v1/admin/binary-tree/tree/
     - anchor_member_id: optional member_id (anchors the returned tree at that member)
     - depth: optional int (default 2). Values above the server maximum are clamped (max 10);
       requesting e.g. depth=100 does not load 100 levels — the API uses depth_effective=10 only.
+    - q: optional. Server-side "search within results". Case-insensitive substring match
+      against user.member_id and user.full_name of every node in the loaded subtree.
+      Empty/whitespace q disables the feature. Tree shape is unchanged ("highlight" mode):
+      every node in the response gains an "is_match": <bool> field, and a top-level
+      "search" block summarises the matches (see below).
+    - match_limit: optional int (default 100, max 500). Caps the size of the returned
+      "search.matches" list. The unbounded count is always reported as "search.match_count",
+      and "search.truncated" is true when the list was clipped.
   Example:
     - /api/v1/admin/binary-tree/tree/?anchor_member_id=TQ10021&depth=4
+    - /api/v1/admin/binary-tree/tree/?anchor_member_id=JST000011&depth=10&q=ravi
+    - /api/v1/admin/binary-tree/tree/?anchor_member_id=JST000011&depth=10&q=JST00012&match_limit=50
   Success:
     - Every payload includes "tree_query": {
         "depth_requested": <int|null> — parsed from query when valid; null if omitted/invalid,
@@ -946,9 +956,34 @@ GET /api/v1/admin/binary-tree/tree/
     - when anchor_member_id provided: same shape as member nested tree payload
       (see team_services.nested_tree_at_anchor_user), depth-limited, plus "tree_query" as above.
     - otherwise: { "roots": [ ... ], "depth": <int>, "tree_query": { ... } } (up to 50 roots).
-  Performance: subtree nodes are collected in batched DB queries (no N+1). Large depth still
-    grows the JSON (up to ~2^(depth+1)-1 nodes in a full tree at depth 10); use smaller depth for UI
-    lazy-expand, or anchor on the member you need.
+    - when q is supplied (non-empty after trim):
+        • Every node in the nested tree gains "is_match": <bool>.
+        • A "search" block is added at the top level of the payload (and on each root in the
+          no-anchor variant), shaped as:
+            "search": {
+              "q": "<input>",
+              "mode": "highlight",
+              "match_count": <int> — total matches in the loaded subtree (unbounded),
+              "limit": <int> — match_limit actually applied,
+              "truncated": <bool> — true when match_count > len(matches),
+              "matches": [
+                {
+                  "member_id": "...",
+                  "full_name": "...",
+                  "depth_from_anchor": <int> — 0 = the anchor (or root in no-anchor variant),
+                  "path": ["<anchor_member_id>", ..., "<matched_member_id>"]
+                },
+                ...
+              ]
+            }
+          Matches are sorted by depth_from_anchor, then member_id.
+        • In the no-anchor variant the top-level "search.match_count" and "search.matches"
+          are an aggregate roll-up across all returned roots; per-root "search" blocks are
+          also present on each entry of "roots".
+  Performance: subtree nodes are collected in batched DB queries (no N+1). The q filter
+    runs purely in-memory over the already-loaded subtree, so it adds no DB round-trips.
+    Large depth still grows the JSON (up to ~2^(depth+1)-1 nodes in a full tree at depth 10);
+    use smaller depth for UI lazy-expand, or anchor on the member you need.
 
 GET /api/v1/admin/binary-tree/members/
   Auth: Bearer + IsAdminRole.

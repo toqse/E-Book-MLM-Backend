@@ -262,23 +262,41 @@ def binary_subtree_user_ids_from_viewer(viewer: User) -> set[int] | None:
     return {n.user_id for n in nodes.values()}
 
 
-def nested_tree_at_anchor_user(anchor_user: User, max_depth: int) -> dict[str, Any]:
-    """Depth-limited nested tree for public tree endpoints (batched load, no N+1)."""
+def nested_tree_at_anchor_user_loaded(
+    anchor_user: User, max_depth: int
+) -> tuple[dict[str, Any], dict[int, BinaryNode], int | None]:
+    """Same as ``nested_tree_at_anchor_user`` but also returns the loaded
+    ``nodes_by_pk`` map and the anchor's BinaryNode pk (or None if unplaced).
+
+    Useful for callers that need to post-process the loaded subtree (e.g.
+    server-side search/filter) without re-querying the DB.
+    """
     node = BinaryNode.objects.filter(user_id=anchor_user.pk).first()
     if not node:
-        return {
-            "root": None,
-            "anchor_member_id": anchor_user.member_id,
-            "max_depth": max_depth,
-        }
+        return (
+            {
+                "root": None,
+                "anchor_member_id": anchor_user.member_id,
+                "max_depth": max_depth,
+            },
+            {},
+            None,
+        )
     pks = collect_subtree_node_pks_limited(node.pk, max_depth)
     nodes = load_nodes_with_users(pks)
     root = build_tree_nested(node.pk, max_depth, nodes, 0)
-    return {
+    payload = {
         "root": root,
         "anchor_member_id": anchor_user.member_id,
         "max_depth": max_depth,
     }
+    return payload, nodes, node.pk
+
+
+def nested_tree_at_anchor_user(anchor_user: User, max_depth: int) -> dict[str, Any]:
+    """Depth-limited nested tree for public tree endpoints (batched load, no N+1)."""
+    payload, _nodes, _root_pk = nested_tree_at_anchor_user_loaded(anchor_user, max_depth)
+    return payload
 
 
 def build_subtree_context(viewer: User) -> SubtreeContext:
