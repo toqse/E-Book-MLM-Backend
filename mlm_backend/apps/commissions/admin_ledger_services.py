@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from django.db.models import Q, QuerySet, Sum
+from django.utils import timezone as djtz
 from django.utils.dateparse import parse_date as django_parse_date
 
 from apps.admin_panel.utils import get_system_config
@@ -138,13 +139,32 @@ def display_status_for_ledger(row: CommissionLedger) -> str:
     return row.status
 
 
+def _ordinal_suffix(day: int) -> str:
+    if 11 <= (day % 100) <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
+
+def _format_human_dt(dt) -> str:
+    """Format a datetime as e.g. '10.40 AM, 23rd May 2026' in the project TZ."""
+    if dt is None:
+        return ""
+    local = djtz.localtime(dt) if djtz.is_aware(dt) else dt
+    hour12 = local.strftime("%I").lstrip("0") or "12"
+    minute = local.strftime("%M")
+    meridiem = local.strftime("%p")
+    day = local.day
+    month_year = local.strftime("%B %Y")
+    return f"{hour12}.{minute} {meridiem}, {day}{_ordinal_suffix(day)} {month_year}"
+
+
 def _build_admin_commission_note(row: CommissionLedger) -> str:
     """Human-readable note for admin commission detail (derived at read time)."""
     st = CommissionLedger.Status
     ct = CommissionLedger.CommissionType
     recipient = row.recipient
     order = row.order
-    created_at = row.created_at.isoformat()
+    created_at = _format_human_dt(row.created_at)
 
     if row.status == st.REVERSED:
         return (
@@ -168,8 +188,8 @@ def _build_admin_commission_note(row: CommissionLedger) -> str:
             return (
                 f"Forfeited: this commission was generated at {created_at}, before "
                 f"{recipient.full_name}'s first KYC approval at "
-                f"{first_approved_at.isoformat()}. Per policy, pre-first-approval "
-                "commissions are not credited."
+                f"{_format_human_dt(first_approved_at)}. Per policy, "
+                "pre-first-approval commissions are not credited."
             )
         if recipient.kyc_status != User.KYCStatus.VERIFIED:
             return (
