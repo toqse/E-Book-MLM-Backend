@@ -116,6 +116,8 @@ def test_force_credit_skips_when_kyc_not_verified(system_config):
 def test_force_credit_credits_after_kyc_verified(system_config):
     admin = _finance_admin()
     earner = _member("+917020020001", kyc_status=User.KYCStatus.VERIFIED, full_name="Verified Earner")
+    earner.kyc_first_approved_at = timezone.now() - timedelta(days=30)
+    earner.save(update_fields=["kyc_first_approved_at"])
     buyer = _member("+917020020002", sponsor=earner)
     order = _paid_order(buyer, "ORD-HELD-OK")
     CommissionLedger.objects.create(
@@ -150,6 +152,8 @@ def test_force_credit_credits_after_kyc_verified(system_config):
 def test_force_credit_skips_refunded_order(system_config):
     admin = _finance_admin()
     earner = _member("+917030030001", kyc_status=User.KYCStatus.VERIFIED)
+    earner.kyc_first_approved_at = timezone.now() - timedelta(days=30)
+    earner.save(update_fields=["kyc_first_approved_at"])
     buyer = _member("+917030030002", sponsor=earner)
     order = _paid_order(buyer, "ORD-HELD-REF")
     order.status = Order.Status.REFUNDED
@@ -184,6 +188,8 @@ def test_force_credit_partial_cap_creates_remainder_held(system_config):
 
     admin = _finance_admin()
     earner = _member("+917040040001", kyc_status=User.KYCStatus.VERIFIED)
+    earner.kyc_first_approved_at = timezone.now() - timedelta(days=30)
+    earner.save(update_fields=["kyc_first_approved_at"])
     buyer = _member("+917040040002", sponsor=earner)
     order = _paid_order(buyer, "ORD-HELD-PART")
 
@@ -217,3 +223,47 @@ def test_force_credit_partial_cap_creates_remainder_held(system_config):
     remainder = CommissionLedger.objects.filter(recipient=earner, status=CommissionLedger.Status.HELD)
     assert remainder.count() == 1
     assert remainder.first().amount == Decimal("20.00")
+
+
+@pytest.mark.django_db
+def test_force_credit_skips_pre_first_approval_rows(system_config):
+    """Pre-first-approval HELD rows are forfeited and must NOT be released even via force-credit."""
+    admin = _finance_admin()
+    first_approved_at = timezone.now()
+    earner = _member("+917050050001", kyc_status=User.KYCStatus.VERIFIED)
+    earner.kyc_first_approved_at = first_approved_at
+    earner.save(update_fields=["kyc_first_approved_at"])
+    buyer = _member("+917050050002", sponsor=earner)
+    order = _paid_order(buyer, "ORD-HELD-PRE")
+    held = CommissionLedger.objects.create(
+        recipient=earner,
+        source_user=buyer,
+        order=order,
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+        amount=Decimal("30.00"),
+        tds_deducted=Decimal("0"),
+        net_amount=Decimal("0"),
+        status=CommissionLedger.Status.HELD,
+    )
+    # Force the HELD row's created_at to a moment before the user's first approval.
+    CommissionLedger.objects.filter(pk=held.pk).update(
+        created_at=first_approved_at - timedelta(days=10)
+    )
+    Wallet.objects.create(user=earner, cash_balance=Decimal("0"), total_earned=Decimal("0"))
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    r = client.post(
+        "/api/v1/admin/commissions/force-credit/",
+        {"user_id": earner.pk},
+        format="json",
+    )
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["credited_ids"] == []
+    assert any(s["reason"] == "pre_first_approval" for s in data["skipped"])
+    row = CommissionLedger.objects.get(pk=held.pk)
+    assert row.status == CommissionLedger.Status.HELD
+    assert row.net_amount == Decimal("0")
+    wallet = Wallet.objects.get(user=earner)
+    assert wallet.total_earned == Decimal("0")

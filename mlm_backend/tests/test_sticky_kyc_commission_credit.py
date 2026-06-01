@@ -172,14 +172,15 @@ def test_withdrawal_blocked_when_kyc_pending_even_if_previously_approved(system_
 
 
 @pytest.mark.django_db
-def test_compliance_approve_auto_releases_held_commissions(
+def test_first_time_approval_does_not_release_pre_approval_held(
     system_config, django_capture_on_commit_callbacks
 ):
-    """Admin KYC approval should release backlog HELD rows without manual force-credit."""
+    """First-time KYC approval must NOT retroactively credit commissions earned while never approved."""
     admin = _support_admin()
     earner = _member("+919140140001")
+    assert earner.kyc_first_approved_at is None
     buyer = _member("+919140140002", sponsor=earner)
-    order = _paid_order(buyer, "ORD-STICKY-REL")
+    order = _paid_order(buyer, "ORD-STICKY-FIRST")
     CommissionLedger.objects.create(
         recipient=earner,
         source_user=buyer,
@@ -208,7 +209,100 @@ def test_compliance_approve_auto_releases_held_commissions(
     assert earner.kyc_first_approved_at is not None
 
     row = CommissionLedger.objects.get(recipient=earner, order=order)
+    assert row.status == CommissionLedger.Status.HELD, (
+        "Pre-approval HELD must be forfeited on first-time approval, not retroactively credited"
+    )
+    assert row.net_amount == Decimal("0")
+    wallet = Wallet.objects.get(user=earner)
+    assert wallet.total_earned == Decimal("0")
+
+
+@pytest.mark.django_db
+def test_re_approval_releases_post_first_approval_held(
+    system_config, django_capture_on_commit_callbacks
+):
+    """Re-approval (user was approved before) must auto-release HELD rows created after the first approval."""
+    admin = _support_admin()
+    earlier = timezone.now() - timedelta(days=30)
+    earner = _member(
+        "+919150150001",
+        kyc_status=User.KYCStatus.PENDING,
+        kyc_first_approved_at=earlier,
+    )
+    buyer = _member("+919150150002", sponsor=earner)
+    order = _paid_order(buyer, "ORD-STICKY-REAPP")
+    # HELD row created NOW, well after the user's first approval.
+    CommissionLedger.objects.create(
+        recipient=earner,
+        source_user=buyer,
+        order=order,
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+        amount=Decimal("30.00"),
+        tds_deducted=Decimal("0"),
+        net_amount=Decimal("0"),
+        status=CommissionLedger.Status.HELD,
+    )
+    Wallet.objects.create(user=earner, cash_balance=Decimal("0"), total_earned=Decimal("0"))
+    _profile_with_min_docs(earner)
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    with django_capture_on_commit_callbacks(execute=True):
+        r = client.post(
+            f"/api/v1/admin/users/{earner.id}/compliance/approve/",
+            {},
+            format="json",
+        )
+    assert r.status_code == 200, r.content
+
+    row = CommissionLedger.objects.get(recipient=earner, order=order)
     assert row.status == CommissionLedger.Status.CREDITED
     assert row.net_amount > 0
     wallet = Wallet.objects.get(user=earner)
     assert wallet.total_earned == row.amount
+
+
+@pytest.mark.django_db
+def test_re_approval_does_not_release_pre_first_approval_held(
+    system_config, django_capture_on_commit_callbacks
+):
+    """Even on re-approval, rows created before the user's first approval must stay HELD."""
+    admin = _support_admin()
+    first_approved_at = timezone.now()
+    earner = _member(
+        "+919160160001",
+        kyc_status=User.KYCStatus.PENDING,
+        kyc_first_approved_at=first_approved_at,
+    )
+    buyer = _member("+919160160002", sponsor=earner)
+    order = _paid_order(buyer, "ORD-STICKY-PRE")
+    old = CommissionLedger.objects.create(
+        recipient=earner,
+        source_user=buyer,
+        order=order,
+        commission_type=CommissionLedger.CommissionType.DIRECT,
+        amount=Decimal("30.00"),
+        tds_deducted=Decimal("0"),
+        net_amount=Decimal("0"),
+        status=CommissionLedger.Status.HELD,
+    )
+    pre_first = first_approved_at - timedelta(days=10)
+    CommissionLedger.objects.filter(pk=old.pk).update(created_at=pre_first)
+    Wallet.objects.create(user=earner, cash_balance=Decimal("0"), total_earned=Decimal("0"))
+    _profile_with_min_docs(earner)
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    with django_capture_on_commit_callbacks(execute=True):
+        r = client.post(
+            f"/api/v1/admin/users/{earner.id}/compliance/approve/",
+            {},
+            format="json",
+        )
+    assert r.status_code == 200, r.content
+
+    row = CommissionLedger.objects.get(pk=old.pk)
+    assert row.status == CommissionLedger.Status.HELD
+    assert row.net_amount == Decimal("0")
+    wallet = Wallet.objects.get(user=earner)
+    assert wallet.total_earned == Decimal("0")

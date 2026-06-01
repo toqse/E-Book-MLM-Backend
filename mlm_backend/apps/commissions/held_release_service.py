@@ -88,6 +88,13 @@ def release_held_commissions_for_user(
         if recipient.kyc_status != User.KYCStatus.VERIFIED:
             skipped.append(_skip(entry.id, "kyc_not_verified"))
             continue
+        # Pre-first-approval rows are permanently forfeited. A user who never had any KYC
+        # approval cannot retroactively claim commissions earned in their unverified state,
+        # and rows created before a user's first approval are also off-limits.
+        first_approved_at = recipient.kyc_first_approved_at
+        if first_approved_at is None or entry.created_at < first_approved_at:
+            skipped.append(_skip(entry.id, "pre_first_approval"))
+            continue
         if order.status != Order.Status.PAID:
             skipped.append(_skip(entry.id, "order_not_paid"))
             continue

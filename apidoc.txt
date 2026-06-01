@@ -418,8 +418,11 @@ POST /api/v1/admin/users/<id>/compliance/approve/
   When body ids omitted, falls back to <id> in URL (backward compatible).
   Requires MemberComplianceProfile exists per user; sets kyc_status VERIFIED; kyc_reviewed_at now;
   sets kyc_first_approved_at on first approval (sticky, never cleared on resubmit).
-  After approval, eligible HELD/PENDING (net=0) book-commission rows for each approved user are
-  auto-released to wallet on transaction commit (same rules as force-credit).
+  Post-approval auto-release of HELD/PENDING (net=0) book-commission rows:
+    - Runs ONLY for re-approvals (users who already had kyc_first_approved_at before this call).
+    - First-time approvers' pre-approval HELD rows are permanently forfeited and never auto-credited.
+    - Within a re-approval release, rows whose created_at predates the user's kyc_first_approved_at
+      are also skipped (same forfeiture rule); see force-credit `pre_first_approval` skip reason.
   For bulk, returns { approved_ids: [...], failed: [{id, reason}...] }.
 
 POST /api/v1/admin/users/compliance/approve/
@@ -1072,7 +1075,9 @@ POST /api/v1/admin/commissions/force-credit/
     - Manual finance trigger; also runs automatically after admin KYC/compliance approval.
     - Processes book-commission ledger rows for that recipient with status HELD or PENDING and net_amount 0,
       excluding commission_type MILESTONE (milestones use the milestone admin queue).
-    - Skips a row when: recipient kyc_status is not VERIFIED; order is not PAID (e.g. REFUNDED);
+    - Skips a row when: recipient kyc_status is not VERIFIED; recipient has no kyc_first_approved_at,
+      or the ledger row's created_at predates that timestamp (pre_first_approval — permanently
+      forfeited and never credited, even via manual force-credit); order is not PAID (e.g. REFUNDED);
       earning_cap leaves no room (earning_cap_reached); or payout gross would be zero.
     - Same wallet/TDS/cap rules as live commission credit; WalletTransaction reference COMM-<order_number>;
       meta includes "admin_held_release": true. If gross exceeds remaining cap room, pays a partial gross and
@@ -1084,7 +1089,7 @@ POST /api/v1/admin/commissions/force-credit/
     "skipped": [ { "id", "reason" }, ... ],
     "processed_count": <int>
   }
-  Reasons in skipped examples: kyc_not_verified | order_not_paid | earning_cap_reached | zero_gross_credit
+  Reasons in skipped examples: kyc_not_verified | pre_first_approval | order_not_paid | earning_cap_reached | zero_gross_credit
   Errors:
     - 400 — missing or invalid user_id (errors.detail invalid_user_id)
     - 404 — user_id does not exist (data includes ok: false, detail: user_not_found)
@@ -1623,7 +1628,11 @@ POST /api/v1/payments/verify/
     - Withdrawal (POST /api/v1/user/wallet/withdraw/): current kyc_status must be VERIFIED
       (strict). Resubmitted users cannot withdraw until admin re-approves latest KYC.
     - Admin compliance approve auto-releases eligible HELD/PENDING (net=0) book-commission
-      backlog for approved users (same rules as force-credit).
+      backlog ONLY for re-approvals (users with prior kyc_first_approved_at). First-time
+      approvals do NOT release any pre-approval backlog — those rows are forfeited.
+    - Forfeiture rule (applies to both auto-release and manual force-credit): rows whose
+      created_at predates the recipient's kyc_first_approved_at, or recipients who have never
+      been approved, are permanently skipped (skip reason: pre_first_approval).
 
 POST /api/v1/payments/webhook/
   Auth: None.

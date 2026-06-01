@@ -98,7 +98,8 @@ def test_open_placement_queue_and_manual_place_commissions(
     sponsor.is_member = True
     sponsor.save(update_fields=["is_member"])
     sponsor.kyc_status = User.KYCStatus.VERIFIED
-    sponsor.save(update_fields=["kyc_status"])
+    sponsor.kyc_first_approved_at = timezone.now()
+    sponsor.save(update_fields=["kyc_status", "kyc_first_approved_at"])
     MemberComplianceProfile.objects.create(user=sponsor)
     BinaryTreeService.place_member(sponsor, None)
     buyer = _member("+918020020021", sponsor=sponsor)

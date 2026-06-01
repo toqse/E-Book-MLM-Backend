@@ -159,6 +159,14 @@ def _approve_compliance_by_user_ids(user_ids: list[int]):
 
     now = timezone.now()
     with transaction.atomic():
+        # Snapshot which approvals are re-approvals (already had kyc_first_approved_at)
+        # so we only auto-release backlog for them. First-time approvers' pre-approval
+        # HELD rows are forfeited and must NOT be retroactively credited.
+        reapproved_ids = list(
+            User.objects.filter(
+                id__in=ok_ids, kyc_first_approved_at__isnull=False
+            ).values_list("id", flat=True)
+        )
         User.objects.filter(id__in=ok_ids).update(
             kyc_status=User.KYCStatus.VERIFIED,
             kyc_reviewed_at=now,
@@ -166,7 +174,7 @@ def _approve_compliance_by_user_ids(user_ids: list[int]):
             kyc_rejection_reason="",
             updated_at=now,
         )
-        for uid in ok_ids:
+        for uid in reapproved_ids:
             transaction.on_commit(
                 lambda user_id=uid: release_held_commissions_for_user(user_id=user_id, actor=None)
             )
