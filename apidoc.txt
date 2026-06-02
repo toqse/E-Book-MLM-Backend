@@ -176,6 +176,21 @@ POST /api/v1/auth/logout/
   Auth: Bearer access JWT recommended (session context); body optional.
   Success: data null; message "Logged out" — client removes stored access JWT.
 
+POST /api/v1/auth/account-deletion-request/
+  Auth: Bearer (IsAuthenticated).
+  Body (JSON): { "reason": "<non-empty string>" } — member's reason for requesting account deletion.
+  Success (201): data {
+    "id": <int>,
+    "status": "PENDING",
+    "reason": "<string>",
+    "created_at": "<iso>"
+  }; message "Account deletion request submitted".
+  Errors:
+    - 400 — reason missing or blank; errors.reason
+    - 409 — user already has a PENDING request; errors.detail pending_account_deletion_exists
+  Notes: Does not delete the account. Admin reviews via GET /api/v1/admin/account-deletion-requests/
+    and performs deletion with DELETE /api/v1/admin/users/<id>/ when appropriate.
+
 GET/PATCH /api/v1/auth/me/
   Auth: Bearer.
   GET — Success data: user stub plus profile blocks for the profile screen:
@@ -1045,7 +1060,7 @@ GET /api/v1/user/earnings/
   Query: include — optional. Comma-separated: "overview" (default when omitted),
     "ledger", or "overview,ledger" or "all" (both). Use "ledger" only to skip overview.
   Query: period — optional: today | 7d | 30d | fy | all (default all). Filters ledger.
-  Query: type — optional: all | direct | passive | milestone | reversed | pending | withdrawal.
+  Query: type — optional: all | direct | passive | milestone | withdrawal.
   Query: page (default 1), page_size (default 20, max 100) for the ledger table section.
     Pagination applies to `data.ledger.rows` only: `len(rows)` <= `page_size`, while
     `data.ledger.total_count` is the total count across the active `period` + `type` filters.
@@ -1070,7 +1085,7 @@ GET /api/v1/user/earnings/
     "filters": {
       "period", "type",
       "periods": [today, 7d, 30d, fy, all],
-      "types": [all, direct, passive, milestone, pending, reversed, withdrawal]
+      "types": [all, direct, passive, milestone, withdrawal]
     },
     "ledger": {
       "rows": [ unified rows ],
@@ -2347,6 +2362,9 @@ PATCH /api/v1/admin/users/<id>/
 DELETE /api/v1/admin/users/<id>/
   Auth: IsAdminRole.
   Hard-deletes the member user (staff/non-member deletion forbidden).
+  Before delete, any PENDING AccountDeletionRequest for that user is marked COMPLETED
+  (completed_at set, completed_by = acting admin). The request row is retained with
+  snapshot fields after user hard-delete (user FK becomes null).
   Success: { "ok": true }; 404.
 
 POST /api/v1/admin/users/<id>/suspend/
@@ -2364,6 +2382,24 @@ GET /api/v1/admin/users/kyc-queue/
 
 POST /api/v1/admin/users/<id>/kyc/verify/
   See MODULE: Admin agreements & compliance — alias of compliance approve (requires compliance profile).
+
+GET /api/v1/admin/account-deletion-requests/
+  Auth: IsAdminRole.
+  Query: status (optional PENDING|COMPLETED), q (search member_id/full_name/email/phone),
+    page (default 1), page_size (default 20, max 100).
+  Success: {
+    "results": [
+      {
+        "id", "user_id" (null if user hard-deleted),
+        "member_id", "full_name", "email", "phone",
+        "reason", "status", "created_at", "completed_at",
+        "completed_by": { "id", "full_name" } | null,
+        "user_already_deleted": <bool>
+      }, ...
+    ],
+    "count", "page", "page_size", "total_pages"
+  }
+  Errors: 400 — invalid status filter.
 
 GET /api/v1/admin/users/delisted/
   Auth: IsAdminRole.

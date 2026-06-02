@@ -121,3 +121,49 @@ class User(AbstractBaseUser, PermissionsMixin):
             # Superuser created with email as login_identifier but email field empty
             self.login_identifier = self.login_identifier.strip().lower()
         super().save(*args, **kwargs)
+
+
+class AccountDeletionRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        COMPLETED = "COMPLETED", "Completed"
+
+    user = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="account_deletion_requests",
+    )
+    snapshot_member_id = models.CharField(max_length=32)
+    snapshot_full_name = models.CharField(max_length=255)
+    snapshot_email = models.EmailField(null=True, blank=True)
+    snapshot_phone = models.CharField(max_length=20, null=True, blank=True)
+    reason = models.TextField()
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    completed_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="account_deletion_requests_completed",
+    )
+
+    class Meta:
+        db_table = "users_account_deletion_request"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user"],
+                condition=models.Q(status="PENDING") & models.Q(user__isnull=False),
+                name="uniq_pending_account_deletion_per_user",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.snapshot_member_id} ({self.status})"

@@ -2,6 +2,7 @@ import logging
 
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.db import IntegrityError
 from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 from rest_framework import permissions, status
@@ -25,7 +26,7 @@ from apps.users.kyc_eligibility import (
     user_kyc_invitation_should_send,
     user_kyc_submission_allowed,
 )
-from apps.users.models import User
+from apps.users.models import AccountDeletionRequest, User
 from apps.users import team_services
 from apps.users.services import (
     allocate_member_identity,
@@ -680,6 +681,65 @@ def me(request: Request):
     if profile:
         profile.save()
     return envelope_response(_me_payload(user), message="Updated")
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def account_deletion_request(request: Request):
+    u: User = request.user
+    data = request.data or {}
+    reason = (data.get("reason") if isinstance(data, dict) else None) or ""
+    reason = str(reason).strip()
+    if not reason:
+        return envelope_response(
+            None,
+            message="reason is required",
+            success=False,
+            errors={"reason": ["This field may not be blank."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if AccountDeletionRequest.objects.filter(
+        user=u,
+        status=AccountDeletionRequest.Status.PENDING,
+    ).exists():
+        return envelope_response(
+            None,
+            message="You already have a pending account deletion request.",
+            success=False,
+            errors={"detail": "pending_account_deletion_exists"},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    try:
+        row = AccountDeletionRequest.objects.create(
+            user=u,
+            snapshot_member_id=u.member_id,
+            snapshot_full_name=u.full_name,
+            snapshot_email=u.email,
+            snapshot_phone=u.phone,
+            reason=reason,
+            status=AccountDeletionRequest.Status.PENDING,
+        )
+    except IntegrityError:
+        return envelope_response(
+            None,
+            message="You already have a pending account deletion request.",
+            success=False,
+            errors={"detail": "pending_account_deletion_exists"},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    return envelope_response(
+        {
+            "id": row.id,
+            "status": row.status,
+            "reason": row.reason,
+            "created_at": row.created_at.isoformat(),
+        },
+        message="Account deletion request submitted",
+        status=status.HTTP_201_CREATED,
+    )
 
 
 @api_view(["POST"])

@@ -29,7 +29,7 @@ from apps.finance.services.aggregates import build_gst_report, build_tds_report_
 from apps.finance.services.date_range import parse_finance_range
 from apps.payments.models import GSTInvoice, Order
 from apps.payments.services import ensure_gst_invoice_pdf
-from apps.users.models import User
+from apps.users.models import AccountDeletionRequest, User
 from apps.users.services import effective_company_referral_code, environment_company_referral_code
 from apps.wallet.models import Wallet
 from apps.wallet.services.member_money import build_withdrawn_block
@@ -491,6 +491,14 @@ def admin_users_detail(request, pk: int):
                 success=False,
                 status=403,
             )
+        AccountDeletionRequest.objects.filter(
+            user=u,
+            status=AccountDeletionRequest.Status.PENDING,
+        ).update(
+            status=AccountDeletionRequest.Status.COMPLETED,
+            completed_at=timezone.now(),
+            completed_by=request.user,
+        )
         u.delete()
         return envelope_response({"ok": True})
 
@@ -933,6 +941,81 @@ def admin_kyc_send_invitation(request, pk: int | None = None):
         success=success,
         message=message,
         errors=None if success else {"detail": message},
+    )
+
+
+def _serialize_account_deletion_request(row: AccountDeletionRequest) -> dict:
+    u = row.user
+    completed_by = row.completed_by
+    return {
+        "id": row.id,
+        "user_id": u.id if u else None,
+        "member_id": (u.member_id if u else None) or row.snapshot_member_id,
+        "full_name": (u.full_name if u else None) or row.snapshot_full_name,
+        "email": (u.email if u else None) or row.snapshot_email,
+        "phone": (u.phone if u else None) or row.snapshot_phone,
+        "reason": row.reason,
+        "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "completed_by": (
+            {"id": completed_by.id, "full_name": completed_by.full_name}
+            if completed_by
+            else None
+        ),
+        "user_already_deleted": u is None,
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminRole])
+def admin_account_deletion_requests(request):
+    qs = AccountDeletionRequest.objects.select_related("user", "completed_by").order_by(
+        "-created_at", "-id"
+    )
+
+    status_filter = (request.query_params.get("status") or "").strip().upper()
+    if status_filter:
+        if status_filter not in AccountDeletionRequest.Status.values:
+            return envelope_response(
+                None,
+                message="Invalid status filter",
+                success=False,
+                errors={"status": ["Must be PENDING or COMPLETED"]},
+                status=400,
+            )
+        qs = qs.filter(status=status_filter)
+
+    q = (request.query_params.get("q") or "").strip()
+    if q:
+        qs = qs.filter(
+            Q(snapshot_member_id__icontains=q)
+            | Q(snapshot_full_name__icontains=q)
+            | Q(snapshot_email__icontains=q)
+            | Q(snapshot_phone__icontains=q)
+            | Q(user__member_id__icontains=q)
+            | Q(user__full_name__icontains=q)
+            | Q(user__email__icontains=q)
+            | Q(user__phone__icontains=q)
+        )
+
+    page = _parse_positive_int(request.query_params.get("page"), 1, min_v=1, max_v=1_000_000)
+    page_size = _parse_positive_int(
+        request.query_params.get("page_size"), 20, min_v=1, max_v=100
+    )
+    total_count = qs.count()
+    total_pages = (total_count + page_size - 1) // page_size if total_count else 0
+    start = (page - 1) * page_size
+    rows = list(qs[start : start + page_size])
+
+    return envelope_response(
+        {
+            "results": [_serialize_account_deletion_request(r) for r in rows],
+            "count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+        }
     )
 
 

@@ -122,10 +122,7 @@ def _parse_ledger_type(raw: str | None) -> str:
         "direct",
         "passive",
         "milestone",
-        "reversed",
-        "pending",
         "withdrawal",
-        "tds",
     }
     return t if t in allowed else "all"
 
@@ -1414,10 +1411,7 @@ def build_earnings_response(
                 "direct",
                 "passive",
                 "milestone",
-                "pending",
-                "reversed",
                 "withdrawal",
-                "tds",
             ],
         }
         data["ledger"] = build_ledger(

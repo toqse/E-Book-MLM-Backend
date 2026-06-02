@@ -33,6 +33,10 @@ urlpatterns = [
     path("api/v1/auth/kyc/status/", auth_views.kyc_status),
     path("api/v1/auth/kyc/invite/", auth_views.kyc_invite_validate),
     path("api/v1/auth/bank/", auth_views.bank_update),
+    path(
+        "api/v1/auth/account-deletion-request/",
+        auth_views.account_deletion_request,
+    ),
     path("api/v1/auth/compliance/submit/", agreement_views.compliance_submit),
     path("api/v1/agreements/", agreement_views.legal_documents_public_list),
     path(
@@ -245,6 +249,10 @@ urlpatterns = [
     path(
         "api/v1/admin/agreements/<int:pk>/",
         agreement_views.admin_legal_document_detail,
+    ),
+    path(
+        "api/v1/admin/account-deletion-requests/",
+        adminv.admin_account_deletion_requests,
     ),
     path("api/v1/admin/users/delisted/", adminv.users_delisted),
     path("api/v1/admin/config/", adminv.system_config_view),
