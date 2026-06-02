@@ -5,6 +5,7 @@ from django.db.models import F, Q, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 
 from apps.admin_panel.dashboard_service import build_admin_dashboard_payload
 from apps.admin_panel.models import Grievance
@@ -1070,6 +1071,10 @@ def system_config_view(request):
                 "default_company_referral_code_environment": environment_company_referral_code(),
                 "default_company_referral_code_override": (cfg.default_company_referral_code or "").strip()
                 or None,
+                "app_version": {
+                    "latest_app_version": cfg.latest_app_version or "",
+                    "force_update": bool(cfg.force_update),
+                },
             }
         )
     data = request.data or {}
@@ -1111,10 +1116,24 @@ def system_config_view(request):
         "nodal_officer_phone",
         "grievance_sla_hours",
         "default_company_referral_code",
+        "latest_app_version",
+        "force_update",
     ]:
         if field not in data:
             continue
         val = data[field]
+        if field == "latest_app_version":
+            if val in (None, ""):
+                cfg.latest_app_version = ""
+            elif isinstance(val, str):
+                s = val.strip()
+                if len(s) > 32:
+                    errors[field] = "max_length_32"
+                    continue
+                cfg.latest_app_version = s
+            else:
+                errors[field] = "must_be_string"
+            continue
         if field == "default_company_referral_code":
             if val in (None, ""):
                 cfg.default_company_referral_code = ""
@@ -1131,6 +1150,7 @@ def system_config_view(request):
             "is_repurchase_commission_allowed",
             "auto_process_milestone_bonuses",
             "trigger_instant_kyc_submission",
+            "force_update",
         ):
             setattr(
                 cfg,
@@ -1176,6 +1196,18 @@ def system_config_view(request):
     cfg.updated_by = request.user
     cfg.save()
     return envelope_response({"ok": True})
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def public_app_version(request):
+    cfg = get_system_config()
+    return envelope_response(
+        {
+            "latest_app_version": cfg.latest_app_version or "",
+            "force_update": bool(cfg.force_update),
+        }
+    )
 
 
 @api_view(["GET"])

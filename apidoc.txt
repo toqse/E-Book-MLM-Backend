@@ -2446,8 +2446,25 @@ GET/PATCH /api/v1/admin/config/
       - default_company_referral_code_environment: env/settings value only.
       - default_company_referral_code_override: stored override string or null when empty (env used).
       - PATCH accepts: default_company_referral_code (string, max 64 after trim; empty string clears override).
+    Play Store / mobile app version (admin-configurable):
+      - app_version: {
+          "latest_app_version": "<string>",
+          "force_update": <boolean>
+        }
+      - PATCH accepts: latest_app_version (string, max 32 after trim; empty string clears),
+        force_update (boolean; true, "true", "1", "yes" treated as true).
   PATCH body: any subset of the above; includes refund_request_sla_hours (non-negative int, default 48 for open refund SLA dashboard). refund_window_days (buyer refund / placement cool-off eligibility) and cooling_off_days (wallet credit cooling for withdrawals) are independent non-negative ints. trigger_instant_kyc_submission accepts boolean. sets updated_by.
   Success PATCH: { "ok": true }
+
+GET /api/v1/app-version/
+  Auth: none (public).
+  Success data: {
+    "latest_app_version": "<string>",
+    "force_update": <boolean>
+  }
+  Example: { "latest_app_version": "1.4.6", "force_update": false }
+  Mobile clients compare installed version to latest_app_version; when force_update is true, block
+  app usage until the user updates via Play Store.
 
 
 MODULE: Admin — Milestone bonuses (/api/v1/admin/milestones*)
