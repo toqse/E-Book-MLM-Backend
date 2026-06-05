@@ -15,7 +15,7 @@ _logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://control.msg91.com/api/v5/campaign/api/campaigns/"
 _SLUG_OTP = "email-whatsap-otp"
-_SLUG_INVOICE = "email-whatsapp-purchase"
+_SLUG_INVOICE = "email-whatsapp-purchase1"
 _SLUG_INVITATION = "email-whatsapp-invitation"
 _REQUEST_TIMEOUT_SECONDS = 15
 
@@ -42,8 +42,8 @@ def _text_var(value: str) -> dict[str, str]:
     return {"type": "text", "value": value}
 
 
-def _image_var(value: str = "text") -> dict[str, str]:
-    return {"type": "image", "value": value}
+def _body_text_var(*, parameter_name: str, value: str) -> dict[str, str]:
+    return {"type": "text", "parameter_name": parameter_name, "value": value}
 
 
 def _otp_variables(*, otp: str, company_name: str) -> dict[str, Any]:
@@ -173,12 +173,11 @@ def send_invoice_message(
         "amount": {"value": amount},
         "invoice_download_link": {"value": invoice_link},
         "company_name": {"value": company},
-        "header_1": _image_var(),
-        "body_1": _text_var(name),
-        "body_2": _text_var(invoice_number),
-        "body_3": _text_var(invoice_date),
-        "body_4": _text_var(amount),
-        "body_5": _text_var(invoice_link),
+        "body_amount": _body_text_var(parameter_name="amount", value=amount),
+        "body_customer_name": _body_text_var(parameter_name="customer_name", value=name),
+        "body_invoice_url": _body_text_var(parameter_name="invoice_url", value=invoice_link),
+        "body_invoice_number": _body_text_var(parameter_name="invoice_number", value=invoice_number),
+        "body_invoice_date": _body_text_var(parameter_name="invoice_date", value=invoice_date),
     }
     body = _campaign_body(
         name=name,
@@ -203,9 +202,8 @@ def send_invitation_message(
     variables: dict[str, Any] = {
         "customer_name": {"value": name},
         "company_name": {"value": company},
-        "header_1": _image_var(),
-        "body_1": _text_var(name),
-        "body_2": _text_var(company),
+        "body_customer_name": _body_text_var(parameter_name="customer_name", value=name),
+        "body_company_name": _body_text_var(parameter_name="company_name", value=company),
     }
     body = _campaign_body(
         name=name,

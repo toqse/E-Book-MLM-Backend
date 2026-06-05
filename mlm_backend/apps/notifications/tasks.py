@@ -65,11 +65,11 @@ def send_invoice_message_task(order_id: int) -> bool:
 
     paid_at = order.paid_at
     if paid_at:
-        invoice_date = paid_at.strftime("%d-%m-%Y")
+        invoice_date = paid_at.strftime("%d-%b-%Y")
     else:
         from django.utils import timezone
 
-        invoice_date = timezone.now().strftime("%d-%m-%Y")
+        invoice_date = timezone.now().strftime("%d-%b-%Y")
 
     sent = msg91.send_invoice_message(
         name=user.full_name or "Member",
