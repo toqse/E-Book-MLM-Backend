@@ -7,7 +7,6 @@ services:
       MYSQL_PASSWORD: mlm_pass
       MYSQL_ROOT_PASSWORD: rootpass
     ports:
-      # Host 3307 avoids clash with another stack (e.g. MySQL already on :3306)
       - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
@@ -21,7 +20,6 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      # Host 6380 if another Redis already uses :6379
       - "6380:6379"
 
   web:
@@ -50,11 +48,8 @@ services:
       DB_USER: mlm_user
       DB_PASSWORD: mlm_pass
       REDIS_URL: redis://redis:6379/0
-      # Do not use host .env SQLite mode inside containers
       USE_SQLITE: "false"
-      # Allow session/CSRF cookies over plain HTTP (local Docker)
       USE_INSECURE_COOKIES: "1"
-      # Serve /media via Django routes for local Docker access.
       SERVE_MEDIA: "1"
     depends_on:
       db:
@@ -116,8 +111,10 @@ services:
     image: nginx:alpine
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     ports:
       - "80:80"
+      - "443:443"
     depends_on:
       - web
 
