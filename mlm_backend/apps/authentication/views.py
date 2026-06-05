@@ -43,6 +43,7 @@ from .otp import (
     create_otp_record,
     otp_send_rate_limit_message,
     register_otp_send,
+    send_or_expose_otp,
     verify_otp,
 )
 from .serializers import (
@@ -64,20 +65,6 @@ def _user_has_paid_ebook_purchase(user: User) -> bool:
         .filter(Q(ebook_id__isnull=False) | Exists(OrderLine.objects.filter(order_id=OuterRef("pk"))))
         .exists()
     )
-
-
-def _otp_send_payload(rec: OTPRecord, *, purpose_label: str, recipient_hint: str) -> dict:
-    """expires_in_seconds + optional otp/log when EXPOSE_OTP_IN_RESPONSE is on."""
-    data: dict = {"expires_in_seconds": 600}
-    if getattr(settings, "EXPOSE_OTP_IN_RESPONSE", True):
-        data["otp"] = rec.otp_code
-        _logger.info(
-            "OTP sent purpose=%s otp=%s to=%s",
-            purpose_label,
-            rec.otp_code,
-            recipient_hint or "?",
-        )
-    return data
 
 
 def _tokens_for(user):
@@ -124,6 +111,7 @@ def send_otp(request: Request):
     }
     purpose = purpose_map[purpose_raw]
     ident = phone or email
+    u = None
 
     if purpose in (OTPRecord.Purpose.LOGIN, OTPRecord.Purpose.KYC):
         u = _user_by_phone_or_email(phone, email)
@@ -182,8 +170,19 @@ def send_otp(request: Request):
     )
     register_otp_send(ident)
     write_audit("otp.sent", payload={"purpose": purpose_raw}, ip_address=request.META.get("REMOTE_ADDR"))
-    data = _otp_send_payload(
+    user_name = ""
+    user_email = email
+    user_phone = phone
+    if purpose in (OTPRecord.Purpose.LOGIN, OTPRecord.Purpose.KYC, OTPRecord.Purpose.ADMIN_LOGIN):
+        if u:
+            user_name = u.full_name or ""
+            user_email = user_email or (u.email or None)
+            user_phone = user_phone or (u.phone or None)
+    data = send_or_expose_otp(
         rec,
+        full_name=user_name,
+        email=user_email,
+        phone=user_phone,
         purpose_label=purpose_raw,
         recipient_hint=ident or "",
     )
@@ -254,8 +253,11 @@ def send_register_otp(request: Request):
         payload={"purpose": "REGISTER"},
         ip_address=request.META.get("REMOTE_ADDR"),
     )
-    data = _otp_send_payload(
+    data = send_or_expose_otp(
         rec,
+        full_name=full_name,
+        email=email,
+        phone=phone,
         purpose_label="REGISTER",
         recipient_hint=phone,
     )
@@ -938,8 +940,11 @@ def admin_send_otp(request: Request):
         payload={"purpose": "ADMIN_LOGIN"},
         ip_address=request.META.get("REMOTE_ADDR"),
     )
-    data = _otp_send_payload(
+    data = send_or_expose_otp(
         rec,
+        full_name=u.full_name or "",
+        email=email or (u.email or None),
+        phone=phone or (u.phone or None),
         purpose_label="ADMIN_LOGIN",
         recipient_hint=ident,
     )

@@ -55,6 +55,20 @@ class SystemConfig(models.Model):
     # Stored for admin configuration; do not expose back to clients.
     razorpay_key_secret = models.CharField(max_length=256, blank=True, default="")
 
+    development_mode = models.BooleanField(
+        default=True,
+        help_text=(
+            "When true, skip MSG91 calls and return OTP in API responses (dev/testing). "
+            "When false, send real OTPs, invoices, and invitations via MSG91."
+        ),
+    )
+    msg91_authkey = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text="MSG91 authkey for campaign API; stored write-only in admin config.",
+    )
+
     nodal_officer_name = models.CharField(max_length=120, blank=True, default="")
     nodal_officer_email = models.EmailField(blank=True, default="")
     nodal_officer_phone = models.CharField(max_length=32, blank=True, default="")

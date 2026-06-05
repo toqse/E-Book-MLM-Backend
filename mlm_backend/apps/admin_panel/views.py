@@ -1057,9 +1057,13 @@ def system_config_view(request):
                     }
                     for idx, (th, _pct, bonus) in enumerate(milestones, start=1)
                 ],
+                "development_mode": bool(cfg.development_mode),
                 "razorpay": {
                     "key_id": cfg.razorpay_key_id or None,
                     "key_secret_set": bool((cfg.razorpay_key_secret or "").strip()),
+                },
+                "msg91": {
+                    "authkey_set": bool((cfg.msg91_authkey or "").strip()),
                 },
                 "grievance_nodal_officer": {
                     "nodal_officer_name": cfg.nodal_officer_name or "",
@@ -1111,6 +1115,8 @@ def system_config_view(request):
         "milestone_bonus_overrides",
         "razorpay_key_id",
         "razorpay_key_secret",
+        "development_mode",
+        "msg91_authkey",
         "nodal_officer_name",
         "nodal_officer_email",
         "nodal_officer_phone",
@@ -1146,11 +1152,24 @@ def system_config_view(request):
             else:
                 errors[field] = "must_be_string"
             continue
+        if field == "msg91_authkey":
+            if val in (None, ""):
+                continue
+            if isinstance(val, str):
+                s = val.strip()
+                if len(s) > 128:
+                    errors[field] = "max_length_128"
+                    continue
+                cfg.msg91_authkey = s
+            else:
+                errors[field] = "must_be_string"
+            continue
         if field in (
             "is_repurchase_commission_allowed",
             "auto_process_milestone_bonuses",
             "trigger_instant_kyc_submission",
             "force_update",
+            "development_mode",
         ):
             setattr(
                 cfg,

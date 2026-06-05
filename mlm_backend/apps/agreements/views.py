@@ -15,6 +15,7 @@ from apps.authentication.otp import (
     create_otp_record,
     otp_send_rate_limit_message,
     register_otp_send,
+    send_or_expose_otp,
     verify_otp,
 )
 from apps.common.client_ip import get_client_ip
@@ -79,18 +80,6 @@ def _normalize_category_query(raw: str) -> str:
         if needle == _norm(choice):
             return choice
     return s
-
-
-def _agreement_otp_payload(rec: OTPRecord) -> dict:
-    data: dict = {"expires_in_seconds": 600}
-    if getattr(settings, "EXPOSE_OTP_IN_RESPONSE", True):
-        data["otp"] = rec.otp_code
-        _logger.info(
-            "OTP sent purpose=AGREEMENT otp=%s user_id=%s",
-            rec.otp_code,
-            (rec.payload or {}).get("user_id"),
-        )
-    return data
 
 
 @api_view(["GET"])
@@ -214,7 +203,14 @@ def agreement_send_otp(request: Request):
         ip_address=get_client_ip(request),
     )
     return envelope_response(
-        _agreement_otp_payload(rec),
+        send_or_expose_otp(
+            rec,
+            full_name=user.full_name or "",
+            email=email,
+            phone=phone,
+            purpose_label="AGREEMENT",
+            recipient_hint=ident,
+        ),
         message="OTP sent",
     )
 

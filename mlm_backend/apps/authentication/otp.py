@@ -1,3 +1,4 @@
+import logging
 import random
 import string
 from datetime import timedelta
@@ -6,7 +7,11 @@ from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 
+from apps.admin_panel.utils import is_development_mode
+
 from .models import OTPRecord
+
+_logger = logging.getLogger(__name__)
 
 
 def generate_otp_code() -> str:
@@ -88,6 +93,46 @@ def create_otp_record(
             registration_sponsor=registration_sponsor,
         )
     return OTPRecord.objects.create(**kwargs)
+
+
+def send_or_expose_otp(
+    rec: OTPRecord,
+    *,
+    full_name: str = "",
+    email: str | None = None,
+    phone: str | None = None,
+    purpose_label: str,
+    recipient_hint: str,
+) -> dict:
+    """Return OTP payload; send via MSG91 when development mode is off."""
+    data: dict = {"expires_in_seconds": 600}
+    dev_mode = is_development_mode()
+    if dev_mode:
+        data["otp"] = rec.otp_code
+    else:
+        from apps.notifications import msg91
+
+        msg91.send_otp_message(
+            name=(full_name or "").strip() or "Member",
+            email=email,
+            mobile=phone,
+            otp=rec.otp_code,
+        )
+    # Always log the OTP to the terminal regardless of development mode.
+    _logger.info(
+        "\n"
+        "============================================================\n"
+        "  OTP  >>>  %s  <<<\n"
+        "  purpose : %s\n"
+        "  to      : %s\n"
+        "  via     : %s\n"
+        "============================================================",
+        rec.otp_code,
+        purpose_label,
+        recipient_hint or "?",
+        "development_mode" if dev_mode else "MSG91",
+    )
+    return data
 
 
 def verify_otp(phone=None, email=None, code=None, purpose=OTPRecord.Purpose.LOGIN):

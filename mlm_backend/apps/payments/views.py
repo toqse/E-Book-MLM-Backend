@@ -4,7 +4,6 @@ import secrets
 from collections import defaultdict
 
 from django.conf import settings
-from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.http import FileResponse
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
@@ -18,6 +17,7 @@ from apps.finance.services.aggregates import build_gst_report, build_revenue_rol
 from apps.finance.services.date_range import parse_finance_range
 from apps.courses.models import EBook
 
+from .invoice_links import sign_invoice_download_token, verify_invoice_download_token
 from .models import GSTInvoice, Order, RefundRequest
 from .services import (
     create_checkout_order,
@@ -38,8 +38,6 @@ from .services import (
 )
 
 logger = logging.getLogger(__name__)
-_invoice_link_signer = TimestampSigner(salt="payments.invoice.download")
-_INVOICE_LINK_MAX_AGE_SECONDS = 60 * 60 * 24  # 24h
 
 
 def _invoice_pdf_url(request, inv: GSTInvoice):
@@ -392,7 +390,7 @@ def my_orders(request):
             if inv:
                 ensure_gst_invoice_pdf(o)
                 inv.refresh_from_db()
-                token = _invoice_link_signer.sign(f"{request.user.id}:{o.id}")
+                token = sign_invoice_download_token(user_id=request.user.id, order_id=o.id)
                 row["invoice_url"] = public_absolute_uri(
                     request, f"/api/v1/user/orders/{o.id}/invoice/?token={token}"
                 )
@@ -415,17 +413,11 @@ def order_invoice(request, pk: int):
         token = (request.query_params.get("token") or "").strip()
         if not token:
             return envelope_response(None, message="Unauthorized", success=False, status=401)
-        try:
-            payload = _invoice_link_signer.unsign(
-                token, max_age=_INVOICE_LINK_MAX_AGE_SECONDS
-            )
-            user_id_s, order_id_s = payload.split(":", 1)
-            if int(order_id_s) != int(pk):
-                raise BadSignature("token does not match order")
-            o = Order.objects.filter(pk=pk, user_id=int(user_id_s)).first()
-            inv = GSTInvoice.objects.filter(order_id=o.pk).first() if o else None
-        except (BadSignature, SignatureExpired, ValueError):
+        user_id = verify_invoice_download_token(token, order_id=pk)
+        if user_id is None:
             return envelope_response(None, message="Unauthorized", success=False, status=401)
+        o = Order.objects.filter(pk=pk, user_id=user_id).first()
+        inv = GSTInvoice.objects.filter(order_id=o.pk).first() if o else None
 
     if not o or not inv:
         return envelope_response(None, message="No invoice", success=False, status=404)

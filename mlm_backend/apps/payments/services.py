@@ -385,7 +385,15 @@ def finalize_order_as_paid(order: Order, *, payment_id: str) -> Order:
         _clear_cart_items_for_paid_order(order)
         _place_and_commission(order, order.user)
         _ensure_gst_invoice(order)
+        order_id = order.pk
+        transaction.on_commit(lambda: _schedule_invoice_message(order_id))
     return order
+
+
+def _schedule_invoice_message(order_id: int) -> None:
+    from apps.notifications.tasks import send_invoice_message_task
+
+    send_invoice_message_task.delay(order_id)
 
 
 def _clear_cart_items_for_paid_order(order: Order) -> None:

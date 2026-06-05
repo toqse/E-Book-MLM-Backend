@@ -222,6 +222,10 @@ COMPANY_ADDRESS = os.environ.get("COMPANY_ADDRESS", "")
 COMPANY_PHONE = os.environ.get("COMPANY_PHONE", "")
 COMPANY_EMAIL = os.environ.get("COMPANY_EMAIL", "")
 COMPANY_WEBSITE = os.environ.get("COMPANY_WEBSITE", "")
+
+# MSG91 campaign helpers (authkey is stored in SystemConfig DB, not env).
+MSG91_DEFAULT_COUNTRY_CODE = (os.environ.get("MSG91_DEFAULT_COUNTRY_CODE", "91") or "91").strip()
+MSG91_INVOICE_LINK_TTL_DAYS = _env_positive_int("MSG91_INVOICE_LINK_TTL_DAYS", 30)
 # Multiline OK in .env when quoted — used on GST invoice PDF (payment / footer text).
 INVOICE_PAYMENT_DETAILS = os.environ.get("INVOICE_PAYMENT_DETAILS", "").strip()
 INVOICE_TERMS_AND_CONDITIONS = os.environ.get("INVOICE_TERMS_AND_CONDITIONS", "").strip()

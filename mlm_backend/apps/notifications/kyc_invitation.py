@@ -1,4 +1,4 @@
-"""Post-refund KYC invitation delivery (email log/SMTP; SMS stub for MSG91)."""
+"""Post-refund KYC invitation delivery (MSG91 campaign or dev-mode SMTP/log stub)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import logging
 
 from django.conf import settings
 
+from apps.admin_panel.utils import get_msg91_authkey, is_development_mode
 from apps.agreements.kyc_invite_token import build_kyc_invite_token
 from apps.notifications.models import NotificationLog
 from apps.users.models import User
@@ -66,25 +67,36 @@ def _send_sms_invitation(*, user: User, link: str) -> bool:
     phone = (user.phone or "").strip()
     if not phone:
         return False
-    # MSG91 integration: wire when SMS_PROVIDER_API_KEY and template ids are configured.
-    if not getattr(settings, "SMS_PROVIDER_API_KEY", ""):
-        _logger.info(
-            "KYC invitation SMS stub user_id=%s phone=%s link=%s",
-            user.pk,
-            phone,
-            link,
-        )
-        return False
-    from apps.notifications.tasks import send_kyc_invitation_sms_task
-
-    send_kyc_invitation_sms_task.delay(phone, link)
-    return True
+    _logger.info(
+        "KYC invitation SMS stub user_id=%s phone=%s link=%s",
+        user.pk,
+        phone,
+        link,
+    )
+    return False
 
 
 def deliver_kyc_invitation(*, user: User) -> dict:
     """Send invitation channels; returns payload for NotificationLog."""
     link = build_kyc_invite_url(user_id=user.pk)
     mobile_link = getattr(settings, "KYC_INVITE_MOBILE_URL", "").strip() or link
+
+    if not is_development_mode() and get_msg91_authkey():
+        from apps.notifications import msg91
+
+        sent = msg91.send_invitation_message(
+            name=user.full_name or "Member",
+            email=(user.email or "").strip() or None,
+            mobile=user.phone,
+        )
+        NotificationLog.objects.create(
+            user=user,
+            channel="MSG91" if sent else "LOG",
+            template_key="kyc_invitation",
+            payload={"link": link, "msg91_sent": sent},
+        )
+        return {"link": link, "email_sent": sent, "sms_sent": sent, "msg91_sent": sent}
+
     email_sent = _send_email_invitation(user=user, link=link)
     sms_sent = _send_sms_invitation(user=user, link=mobile_link)
     NotificationLog.objects.create(
