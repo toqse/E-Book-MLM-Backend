@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import GSTInvoice, Order, RefundRequest
+from .models import CreditNote, GSTInvoice, Order, RefundRequest
 
 
 @admin.register(Order)
@@ -141,4 +141,28 @@ class GSTInvoiceAdmin(admin.ModelAdmin):
     search_fields = ("invoice_number", "order__order_number", "order__user__member_id")
     readonly_fields = ("created_at",)
     autocomplete_fields = ("order",)
+    ordering = ("-id",)
+
+
+@admin.register(CreditNote)
+class CreditNoteAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "credit_note_number",
+        "gst_invoice",
+        "refund_request",
+        "base_amount",
+        "total_gst",
+        "grand_total",
+        "reason",
+        "created_at",
+    )
+    list_filter = ("reason", "created_at")
+    search_fields = (
+        "credit_note_number",
+        "gst_invoice__invoice_number",
+        "refund_request__reference",
+    )
+    readonly_fields = ("created_at",)
+    raw_id_fields = ("gst_invoice", "refund_request")
     ordering = ("-id",)
