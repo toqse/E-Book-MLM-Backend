@@ -138,7 +138,7 @@ def test_validate_referral_rejects_capped_sponsor(system_config):
 @pytest.mark.django_db
 def test_validate_public_slot_from_capped_issuer(system_config):
     capped = _member("+918100000003", account_status=User.AccountStatus.CAPPED)
-    redeemer = _member("+918100000004")
+    redeemer = _member("+918100000004", sponsor=capped)
     slot = _slot_code(capped)
     client = APIClient()
     client.force_authenticate(user=redeemer)
@@ -156,7 +156,7 @@ def test_cart_checkout_ignores_slot_from_capped_issuer(system_config, fake_razor
     from apps.courses.models import EBook
 
     capped = _member("+918100000005", account_status=User.AccountStatus.CAPPED)
-    redeemer = _member("+918100000006")
+    redeemer = _member("+918100000006", sponsor=capped)
     slot = _slot_code(capped, code="CAPSLOT02")
     EBook.objects.create(
         title="Cap Book",

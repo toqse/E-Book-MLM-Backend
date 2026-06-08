@@ -24,6 +24,7 @@ class SponsorCodeValidation:
       - "invalid"   : code unknown, not active (locked/redeemed/shared), or self-redemption
       - "expired"   : code's expires_at is in the past (or status was already EXPIRED)
       - "sponsor_inactive" : issuer has reached the earning cap (CAPPED)
+      - "not_your_sponsor" : issuer is not the redeemer's registered sponsor
     """
 
     code: SponsorSlotCode | None
@@ -40,6 +41,10 @@ class SponsorCodeValidation:
     @property
     def is_invalid(self) -> bool:
         return self.reason == "invalid"
+
+    @property
+    def is_not_your_sponsor(self) -> bool:
+        return self.reason == "not_your_sponsor"
 
 
 class SponsorSlotService:
@@ -152,6 +157,10 @@ class SponsorSlotService:
             return SponsorCodeValidation(code=None, reason="invalid")
         if redeemer and c.issued_to_id == redeemer.id:
             return SponsorCodeValidation(code=None, reason="invalid")
+        # A slot code is only usable by the issuer's direct referrals: the
+        # redeemer must have registered under the issuer (sponsor == issuer).
+        if redeemer and redeemer.sponsor_id != c.issued_to_id:
+            return SponsorCodeValidation(code=None, reason="not_your_sponsor")
         if is_account_capped(c.issued_to):
             return SponsorCodeValidation(code=None, reason="sponsor_inactive")
         return SponsorCodeValidation(code=c, reason=None)

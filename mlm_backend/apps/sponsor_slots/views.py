@@ -259,6 +259,14 @@ def validate_public(request):
             status=400,
             errors={"detail": "sponsor_inactive"},
         )
+    if not valid and result.is_not_your_sponsor:
+        return envelope_response(
+            {"valid": False, "issuer": None, "totals": None, "reason": "not_your_sponsor"},
+            message="This slot code belongs to a different sponsor than the one you registered under",
+            success=False,
+            status=400,
+            errors={"detail": "not_your_sponsor"},
+        )
     if not valid and result.is_expired:
         return envelope_response(
             {"valid": False, "issuer": None, "totals": None, "reason": "expired"},
@@ -397,6 +405,19 @@ def validate_public(request):
                 success=False,
                 status=400,
                 errors={"detail": "sponsor_inactive"},
+            )
+        if result.is_not_your_sponsor:
+            return envelope_response(
+                {
+                    "valid": False,
+                    "issuer": None,
+                    "totals": totals_payload,
+                    "reason": "not_your_sponsor",
+                },
+                message="This slot code belongs to a different sponsor than the one you registered under",
+                success=False,
+                status=400,
+                errors={"detail": "not_your_sponsor"},
             )
         return envelope_response(
             {"valid": False, "issuer": None, "totals": totals_payload, "reason": "invalid"},
