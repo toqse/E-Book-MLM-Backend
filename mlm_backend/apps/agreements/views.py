@@ -46,6 +46,8 @@ from apps.users.kyc_eligibility import (
 )
 from .services import (
     apply_profile_bank_to_user,
+    bank_details_locked,
+    bank_submission_differs_from_profile,
     clear_other_compliance_required_flags,
     get_compliance_required_legal_document,
     record_agreement_acceptances,
@@ -386,15 +388,17 @@ def compliance_submit(request: Request):
     pan_f = request.FILES.get("pan_document")
     aad_front_f = request.FILES.get("aadhar_front")
     aad_back_f = request.FILES.get("aadhar_back")
+    upi_qr_f = request.FILES.get("upi_qr")
 
     profile = getattr(user, "compliance_profile", None)
     existing_pan = bool(profile and profile.pan_document)
     existing_aadhaar_front = bool(profile and profile.aadhar_front)
     existing_aadhaar_back = bool(profile and profile.aadhar_back)
-    if not pan_f and not existing_pan:
+    pan_provided = bool((data.get("pan_number") or "").strip())
+    if pan_provided and not pan_f and not existing_pan:
         return envelope_response(
             None,
-            message="pan_document file is required.",
+            message="pan_document file is required when PAN number is provided.",
             success=False,
             status=400,
         )
@@ -419,6 +423,23 @@ def compliance_submit(request: Request):
         )
         before = snapshot_profile_hashes(profile)
 
+        locked = bank_details_locked(user, profile)
+        if locked and bank_submission_differs_from_profile(
+            profile,
+            data,
+            user,
+            upi_qr_uploaded=bool(upi_qr_f),
+        ):
+            return envelope_response(
+                None,
+                message=(
+                    "Bank details cannot be changed after KYC approval. "
+                    "Contact admin to update your bank information."
+                ),
+                success=False,
+                status=400,
+            )
+
         profile.date_of_birth = data["date_of_birth"]
         profile.gender = data["gender"]
         profile.full_address = data["full_address"].strip()
@@ -427,8 +448,8 @@ def compliance_submit(request: Request):
         profile.state = data["state"].strip()
         profile.country = data["country"].strip()
 
-        profile.pan_number = data["pan_number"]
-        profile.name_on_pan = data["name_on_pan"].strip()
+        profile.pan_number = (data.get("pan_number") or "").strip()
+        profile.name_on_pan = (data.get("name_on_pan") or "").strip()
         profile.aadhar_number = data["aadhar_number"]
         profile.name_on_aadhar = data["name_on_aadhar"].strip()
 
@@ -437,13 +458,16 @@ def compliance_submit(request: Request):
         profile.nominee_phone = data["nominee_phone"]
         profile.nominee_date_of_birth = data["nominee_date_of_birth"]
 
-        profile.account_holder_name = data["account_holder_name"].strip()
-        profile.account_number = data["account_number"].strip()
-        profile.bank_name = data["bank_name"].strip()
-        profile.ifsc = data["ifsc"]
-        profile.branch = data["branch"].strip()
-        profile.account_type = data["account_type"]
-        profile.payout_preference = data.get("payout_preference") or "UPI"
+        if not locked:
+            profile.account_holder_name = data["account_holder_name"].strip()
+            profile.account_number = data["account_number"].strip()
+            profile.bank_name = data["bank_name"].strip()
+            profile.ifsc = data["ifsc"]
+            profile.branch = data["branch"].strip()
+            profile.account_type = data["account_type"]
+            profile.payout_preference = data.get("payout_preference") or "UPI"
+            if upi_qr_f:
+                profile.upi_qr = upi_qr_f
 
         if pan_f:
             profile.pan_document = pan_f
@@ -457,7 +481,8 @@ def compliance_submit(request: Request):
         after = snapshot_profile_hashes(profile)
         material_changed = before != after
 
-        apply_profile_bank_to_user(user, profile, data.get("upi_id") or "")
+        if not locked:
+            apply_profile_bank_to_user(user, profile, data.get("upi_id") or "")
         sync_identity_to_user(user, profile, data["aadhar_number"])
 
         touch_compliance_submit_user_state(user=user)

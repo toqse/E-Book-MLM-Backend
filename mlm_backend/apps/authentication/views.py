@@ -435,6 +435,8 @@ def _compliance_submitted_payload(
             "account_type": profile.account_type,
             "payout_preference": profile.payout_preference,
             "upi_id": user.upi_id or None,
+            "upi_qr_url": _abs_media_url(request, profile.upi_qr),
+            "bank_details_locked": bool(user.kyc_first_approved_at),
         },
         "nominee_details": {
             "nominee_name": profile.nominee_name,

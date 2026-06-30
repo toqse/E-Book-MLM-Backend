@@ -947,3 +947,131 @@ def test_compliance_submit_allows_same_user_resubmit(system_config, primary_eboo
     assert u.aadhaar_number == "123412341234"
     r2 = client.post("/api/v1/auth/compliance/submit/", payload, format="multipart")
     assert r2.status_code == 200, r2.content
+
+
+@pytest.mark.django_db
+def test_compliance_submit_without_pan_succeeds(system_config, primary_ebook):
+    cfg = get_system_config()
+    cfg.trigger_instant_kyc_submission = True
+    cfg.save(update_fields=["trigger_instant_kyc_submission"])
+    doc = _compliance_legal_doc()
+
+    u = _member_user("+919887766631")
+    _paid_order_for_kyc(u, primary_ebook)
+    client = APIClient()
+    client.force_authenticate(user=u)
+    _accept_compliance_agreements(client, u, doc)
+
+    payload = _compliance_submit_payload(
+        pan_number="",
+        name_on_pan="",
+        aadhar_number=unique_test_aadhaar(),
+    )
+    payload.pop("pan_document", None)
+
+    r = client.post("/api/v1/auth/compliance/submit/", payload, format="multipart")
+    assert r.status_code == 200, r.content
+    profile = u.compliance_profile
+    assert (profile.pan_number or "") == ""
+    assert profile.aadhar_number
+
+
+@pytest.mark.django_db
+def test_compliance_submit_pan_number_without_document_fails(system_config, primary_ebook):
+    cfg = get_system_config()
+    cfg.trigger_instant_kyc_submission = True
+    cfg.save(update_fields=["trigger_instant_kyc_submission"])
+    doc = _compliance_legal_doc()
+
+    u = _member_user("+919887766632")
+    _paid_order_for_kyc(u, primary_ebook)
+    client = APIClient()
+    client.force_authenticate(user=u)
+    _accept_compliance_agreements(client, u, doc)
+
+    payload = _compliance_submit_payload(
+        pan_number=unique_test_pan(),
+        name_on_pan="Test User",
+        aadhar_number=unique_test_aadhaar(seq=632),
+    )
+    payload.pop("pan_document", None)
+
+    r = client.post("/api/v1/auth/compliance/submit/", payload, format="multipart")
+    assert r.status_code == 400
+    assert "pan_document" in (r.json().get("message") or "").lower()
+
+
+@pytest.mark.django_db
+def test_compliance_submit_bank_locked_after_first_approval(system_config, primary_ebook):
+    cfg = get_system_config()
+    cfg.trigger_instant_kyc_submission = True
+    cfg.save(update_fields=["trigger_instant_kyc_submission"])
+    doc = _compliance_legal_doc()
+
+    u = _member_user("+919887766633")
+    _paid_order_for_kyc(u, primary_ebook)
+    client = APIClient()
+    client.force_authenticate(user=u)
+    _accept_compliance_agreements(client, u, doc)
+
+    payload = _compliance_submit_payload(aadhar_number=unique_test_aadhaar(seq=633))
+    assert client.post("/api/v1/auth/compliance/submit/", payload, format="multipart").status_code == 200
+
+    u.kyc_first_approved_at = timezone.now()
+    u.save(update_fields=["kyc_first_approved_at"])
+    profile = u.compliance_profile
+    original_acct = profile.account_number
+
+    changed = _compliance_submit_payload(
+        aadhar_number=profile.aadhar_number,
+        account_number="99999999999",
+        nominee_name="Updated Nominee",
+    )
+    r = client.post("/api/v1/auth/compliance/submit/", changed, format="multipart")
+    assert r.status_code == 400
+    assert "Bank details cannot be changed" in (r.json().get("message") or "")
+
+    profile.refresh_from_db()
+    assert profile.account_number == original_acct
+
+    same_bank = _compliance_submit_payload(
+        aadhar_number=profile.aadhar_number,
+        account_number=original_acct,
+        ifsc=profile.ifsc,
+        bank_name=profile.bank_name,
+        branch=profile.branch,
+        account_holder_name=profile.account_holder_name,
+        nominee_name="Updated Nominee",
+    )
+    r_ok = client.post("/api/v1/auth/compliance/submit/", same_bank, format="multipart")
+    assert r_ok.status_code == 200, r_ok.content
+    profile.refresh_from_db()
+    assert profile.account_number == original_acct
+    assert profile.nominee_name == "Updated Nominee"
+
+
+@pytest.mark.django_db
+def test_compliance_submit_upi_qr_saved_in_status(system_config, primary_ebook):
+    cfg = get_system_config()
+    cfg.trigger_instant_kyc_submission = True
+    cfg.save(update_fields=["trigger_instant_kyc_submission"])
+    doc = _compliance_legal_doc()
+
+    u = _member_user("+919887766634")
+    _paid_order_for_kyc(u, primary_ebook)
+    client = APIClient()
+    client.force_authenticate(user=u)
+    _accept_compliance_agreements(client, u, doc)
+
+    payload = _compliance_submit_payload(aadhar_number=unique_test_aadhaar(seq=634))
+    payload["upi_qr"] = SimpleUploadedFile(
+        "upi_qr.png", b"\x89PNG", content_type="image/png"
+    )
+    r = client.post("/api/v1/auth/compliance/submit/", payload, format="multipart")
+    assert r.status_code == 200, r.content
+
+    status_r = client.get("/api/v1/auth/kyc/status/")
+    assert status_r.status_code == 200
+    bank = status_r.json()["data"]["compliance_submission"]["bank_details"]
+    assert bank.get("upi_qr_url")
+    assert bank.get("bank_details_locked") is False

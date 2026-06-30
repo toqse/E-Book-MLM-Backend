@@ -209,6 +209,11 @@ class MemberComplianceProfile(models.Model):
         choices=[("BANK", "Bank"), ("UPI", "UPI")],
         default="UPI",
     )
+    upi_qr = models.FileField(
+        upload_to="kyc/upi_qr/%Y/%m/",
+        blank=True,
+        null=True,
+    )
 
     updated_at = models.DateTimeField(auto_now=True)
 

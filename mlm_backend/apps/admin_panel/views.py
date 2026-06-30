@@ -134,14 +134,9 @@ def _approve_compliance_by_user_ids(user_ids: list[int]):
             failed.append({"id": uid, "reason": "Member has no compliance profile to approve."})
 
     def _has_min_docs(p: MemberComplianceProfile) -> tuple[bool, str | None]:
-        pan_ok = bool((p.pan_number or "").strip()) and bool(getattr(p.pan_document, "name", "") or "")
         aad_ok = bool((p.aadhar_number or "").strip()) and bool(getattr(p.aadhar_front, "name", "") or "") and bool(
             getattr(p.aadhar_back, "name", "") or ""
         )
-        if not pan_ok and not aad_ok:
-            return False, "Missing PAN and Aadhaar minimum documents."
-        if not pan_ok:
-            return False, "Missing PAN number and/or PAN document."
         if not aad_ok:
             return False, "Missing Aadhaar number and/or Aadhaar front/back documents."
         return True, None
@@ -449,6 +444,7 @@ def admin_users_detail(request, pk: int):
                             "aadhar_document_url": _abs_media_url(request, p.aadhar_document)
                             if p
                             else None,
+                            "upi_qr_url": _abs_media_url(request, p.upi_qr) if p else None,
                         }
                         if p
                         else None,
@@ -737,6 +733,7 @@ def compliance_queue(request):
             row["pan_document_url"] = _abs_media_url(request, p.pan_document)
             row["aadhar_front_url"] = _abs_media_url(request, p.aadhar_front)
             row["aadhar_back_url"] = _abs_media_url(request, p.aadhar_back)
+            row["upi_qr_url"] = _abs_media_url(request, p.upi_qr)
             row["bank_on_user"] = {
                 "bank_account_number": u.bank_account_number,
                 "bank_ifsc": u.bank_ifsc,
@@ -1082,8 +1079,10 @@ def system_config_view(request):
                 "default_company_referral_code_override": (cfg.default_company_referral_code or "").strip()
                 or None,
                 "app_version": {
-                    "latest_app_version": cfg.latest_app_version or "",
-                    "force_update": bool(cfg.force_update),
+                    "ios_latest_app_version": cfg.ios_latest_app_version or "",
+                    "ios_force_update": bool(cfg.ios_force_update),
+                    "android_latest_app_version": cfg.android_latest_app_version or "",
+                    "android_force_update": bool(cfg.android_force_update),
                 },
             }
         )
@@ -1128,21 +1127,23 @@ def system_config_view(request):
         "nodal_officer_phone",
         "grievance_sla_hours",
         "default_company_referral_code",
-        "latest_app_version",
-        "force_update",
+        "ios_latest_app_version",
+        "ios_force_update",
+        "android_latest_app_version",
+        "android_force_update",
     ]:
         if field not in data:
             continue
         val = data[field]
-        if field == "latest_app_version":
+        if field in ("ios_latest_app_version", "android_latest_app_version"):
             if val in (None, ""):
-                cfg.latest_app_version = ""
+                setattr(cfg, field, "")
             elif isinstance(val, str):
                 s = val.strip()
                 if len(s) > 32:
                     errors[field] = "max_length_32"
                     continue
-                cfg.latest_app_version = s
+                setattr(cfg, field, s)
             else:
                 errors[field] = "must_be_string"
             continue
@@ -1174,7 +1175,8 @@ def system_config_view(request):
             "is_repurchase_commission_allowed",
             "auto_process_milestone_bonuses",
             "trigger_instant_kyc_submission",
-            "force_update",
+            "ios_force_update",
+            "android_force_update",
             "development_mode",
         ):
             setattr(
@@ -1229,8 +1231,10 @@ def public_app_version(request):
     cfg = get_system_config()
     return envelope_response(
         {
-            "latest_app_version": cfg.latest_app_version or "",
-            "force_update": bool(cfg.force_update),
+            "ios_latest_app_version": cfg.ios_latest_app_version or "",
+            "ios_force_update": bool(cfg.ios_force_update),
+            "android_latest_app_version": cfg.android_latest_app_version or "",
+            "android_force_update": bool(cfg.android_force_update),
         }
     )
 

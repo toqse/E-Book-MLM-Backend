@@ -113,6 +113,51 @@ def snapshot_profile_hashes(profile: MemberComplianceProfile) -> dict:
     }
 
 
+def profile_has_bank_data(profile: MemberComplianceProfile) -> bool:
+    return bool(
+        (profile.account_holder_name or "").strip()
+        or (profile.account_number or "").strip()
+        or (profile.ifsc or "").strip()
+    )
+
+
+def bank_details_locked(user: User, profile: MemberComplianceProfile | None) -> bool:
+    if not user.kyc_first_approved_at:
+        return False
+    if profile is None:
+        return False
+    return profile_has_bank_data(profile)
+
+
+def _norm_bank_field(value: str | None) -> str:
+    return (value or "").strip()
+
+
+def bank_submission_differs_from_profile(
+    profile: MemberComplianceProfile,
+    data: dict,
+    user: User,
+    *,
+    upi_qr_uploaded: bool,
+) -> bool:
+    comparisons = (
+        (_norm_bank_field(data.get("account_holder_name")), _norm_bank_field(profile.account_holder_name)),
+        (_norm_bank_field(data.get("account_number")), _norm_bank_field(profile.account_number)),
+        (_norm_bank_field(data.get("bank_name")), _norm_bank_field(profile.bank_name)),
+        (_norm_bank_field(data.get("ifsc")).upper(), _norm_bank_field(profile.ifsc).upper()),
+        (_norm_bank_field(data.get("branch")), _norm_bank_field(profile.branch)),
+        (_norm_bank_field(data.get("account_type")), _norm_bank_field(profile.account_type)),
+        (
+            _norm_bank_field(data.get("payout_preference") or "UPI"),
+            _norm_bank_field(profile.payout_preference or "UPI"),
+        ),
+        (_norm_bank_field(data.get("upi_id")), _norm_bank_field(user.upi_id)),
+    )
+    if any(incoming != stored for incoming, stored in comparisons):
+        return True
+    return bool(upi_qr_uploaded)
+
+
 def apply_profile_bank_to_user(user: User, profile: MemberComplianceProfile, upi_override: str = ""):
     user.payout_preference = profile.payout_preference
     user.bank_account_number = profile.account_number or ""

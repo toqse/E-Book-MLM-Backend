@@ -168,8 +168,12 @@ class ComplianceSubmitSerializer(serializers.Serializer):
     state = serializers.CharField(max_length=128)
     country = serializers.CharField(max_length=128)
 
-    pan_number = serializers.CharField(max_length=10)
-    name_on_pan = serializers.CharField(max_length=255)
+    pan_number = serializers.CharField(
+        max_length=10, required=False, allow_blank=True, default=""
+    )
+    name_on_pan = serializers.CharField(
+        max_length=255, required=False, allow_blank=True, default=""
+    )
     aadhar_number = serializers.CharField(max_length=14)
     name_on_aadhar = serializers.CharField(max_length=255)
 
@@ -197,7 +201,9 @@ class ComplianceSubmitSerializer(serializers.Serializer):
     )
 
     def validate_pan_number(self, value: str) -> str:
-        u = value.strip().upper()
+        u = (value or "").strip().upper()
+        if not u:
+            return ""
         if not PAN_RE.match(u):
             raise serializers.ValidationError("Invalid PAN format.")
         return u

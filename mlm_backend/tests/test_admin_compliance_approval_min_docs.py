@@ -67,3 +67,37 @@ def test_admin_compliance_approve_requires_min_docs(system_config):
     u.refresh_from_db()
     assert u.kyc_status == User.KYCStatus.VERIFIED
 
+
+@pytest.mark.django_db
+def test_admin_compliance_approve_aadhaar_only_succeeds(system_config):
+    admin_mid, admin_ref, admin_link = allocate_member_identity()
+    admin = User(
+        phone="+919000009998",
+        full_name="Admin",
+        member_id=admin_mid,
+        referral_code=admin_ref,
+        referral_link=admin_link,
+        is_staff=True,
+        role=User.Role.SUPPORT,
+    )
+    admin.set_unusable_password()
+    admin.save()
+
+    u = _member("+919000000222")
+    profile = MemberComplianceProfile.objects.create(user=u)
+    profile.aadhar_number = unique_test_aadhaar()
+    profile.aadhar_front = SimpleUploadedFile(
+        "aad_front.pdf", b"fake", content_type="application/pdf"
+    )
+    profile.aadhar_back = SimpleUploadedFile(
+        "aad_back.pdf", b"fake", content_type="application/pdf"
+    )
+    profile.save()
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    r = client.post(f"/api/v1/admin/users/{u.id}/compliance/approve/", {}, format="json")
+    assert r.status_code == 200, r.content
+    u.refresh_from_db()
+    assert u.kyc_status == User.KYCStatus.VERIFIED
+

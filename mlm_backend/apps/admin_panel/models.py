@@ -86,8 +86,10 @@ class SystemConfig(models.Model):
             "Empty means use the env value."
         ),
     )
-    latest_app_version = models.CharField(max_length=32, blank=True, default="")
-    force_update = models.BooleanField(default=False)
+    ios_latest_app_version = models.CharField(max_length=32, blank=True, default="")
+    ios_force_update = models.BooleanField(default=False)
+    android_latest_app_version = models.CharField(max_length=32, blank=True, default="")
+    android_force_update = models.BooleanField(default=False)
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
