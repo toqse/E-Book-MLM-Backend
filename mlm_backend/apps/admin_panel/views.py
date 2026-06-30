@@ -654,7 +654,13 @@ def admin_user_unsuspend(request, pk: int):
     if not u:
         return envelope_response(None, message="Not found", success=False, status=404)
     if u.account_status == User.AccountStatus.SUSPENDED:
-        u.account_status = User.AccountStatus.ACTIVE
+        from apps.users.kyc_eligibility import user_has_qualifying_paid_ebook_purchase
+
+        u.account_status = (
+            User.AccountStatus.ACTIVE
+            if user_has_qualifying_paid_ebook_purchase(u)
+            else User.AccountStatus.INACTIVE
+        )
         u.save(update_fields=["account_status"])
     return envelope_response({"ok": True})
 

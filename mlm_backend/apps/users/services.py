@@ -78,6 +78,21 @@ def is_account_capped(user) -> bool:
     return bool(user) and user.account_status == User.AccountStatus.CAPPED
 
 
+def maybe_activate_account_on_purchase(user: User) -> bool:
+    """
+    INACTIVE -> ACTIVE on first qualifying PAID ebook order (same rule as is_book_purchased).
+    Mutates user in memory; caller saves. No-op for SUSPENDED, CAPPED, DEACTIVATED, or ACTIVE.
+    """
+    if user.account_status != User.AccountStatus.INACTIVE:
+        return False
+    from apps.users.kyc_eligibility import user_has_qualifying_paid_ebook_purchase
+
+    if not user_has_qualifying_paid_ebook_purchase(user):
+        return False
+    user.account_status = User.AccountStatus.ACTIVE
+    return True
+
+
 def company_fallback_sponsor() -> User | None:
     """Primary admin account used for company-referral fallback and capped-sponsor reassignment."""
     return _company_fallback_sponsor()

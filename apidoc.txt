@@ -159,6 +159,7 @@ POST /api/v1/auth/verify-otp-register/
     "otp_code": "6 chars"
   }
   Creates user from data stored on the matching unused REGISTER OTP (full_name, optional email, sponsor).
+  New users are created with account_status INACTIVE (awaiting first PAID ebook purchase).
   Success data: {
     "user": { id, member_id, full_name, phone, email, referral_code, is_member, role },
     "tokens": { "access" },
@@ -2300,7 +2301,7 @@ GET /api/v1/admin/users/
     - page_size (default 20, max 100)
   Filtering (query params):
     - q: search across full_name, member_id, phone, email
-    - account_status: ACTIVE|SUSPENDED|CAPPED|DEACTIVATED
+    - account_status: INACTIVE|ACTIVE|SUSPENDED|CAPPED|DEACTIVATED
     - kyc_status: PENDING|VERIFIED|REJECTED
     - state: compliance profile state (case-insensitive exact)
     - band: wallet current band (int)
@@ -2336,7 +2337,7 @@ PATCH /api/v1/admin/users/<id>/
   Body: JSON; send any subset of:
     Status fields (User):
       - role: SUPER_ADMIN|FINANCE|SUPPORT|MEMBER
-      - account_status: ACTIVE|CAPPED|SUSPENDED|DEACTIVATED
+      - account_status: INACTIVE|ACTIVE|CAPPED|SUSPENDED|DEACTIVATED
       - kyc_status: PENDING|VERIFIED|REJECTED
     Personal fields (User):
       - full_name (string)
@@ -2374,7 +2375,7 @@ POST /api/v1/admin/users/<id>/suspend/
 
 POST /api/v1/admin/users/<id>/unsuspend/
   Auth: IsAdminRole.
-  Sets account_status ACTIVE (only when current status is SUSPENDED).
+  When current status is SUSPENDED: sets ACTIVE if user has a qualifying PAID ebook order, else INACTIVE.
   Success: { "ok": true }
 
 GET /api/v1/admin/users/kyc-queue/

@@ -16,6 +16,7 @@ from apps.courses.models import EBook, Enrollment
 from apps.mlm_tree.placement import open_placement_queue_if_needed
 from apps.sponsor_slots.services import SponsorSlotService
 from apps.users.models import User
+from apps.users.services import maybe_activate_account_on_purchase
 
 from apps.audit.services import write_audit
 from apps.commissions.engine import CommissionEngine
@@ -324,6 +325,7 @@ def finalize_zero_rupee_order(order: Order, user: User, ebook: EBook | None, slo
 
 @transaction.atomic
 def _grant_enrollment(order: Order, user: User, ebook: EBook | None):
+    enrolled = False
     if order.lines.exists():
         for line in order.lines.select_related("ebook").order_by("id"):
             Enrollment.objects.get_or_create(
@@ -332,26 +334,32 @@ def _grant_enrollment(order: Order, user: User, ebook: EBook | None):
                 order=order,
                 defaults={"is_retail": order.is_retail_purchase},
             )
-        user.is_member = True
-        user.save(update_fields=["is_member"])
+        enrolled = True
+    else:
+        eff = ebook if ebook is not None else order.ebook
+        if eff is None:
+            eff = EBook.objects.filter(
+                is_primary=True,
+                status=EBook.Status.PUBLISHED,
+            ).first()
+        if eff:
+            Enrollment.objects.get_or_create(
+                user=user,
+                ebook=eff,
+                order=order,
+                defaults={"is_retail": order.is_retail_purchase},
+            )
+            enrolled = True
+
+    if not enrolled:
         return
 
-    eff = ebook if ebook is not None else order.ebook
-    if eff is None:
-        eff = EBook.objects.filter(
-            is_primary=True,
-            status=EBook.Status.PUBLISHED,
-        ).first()
-    if not eff:
-        return
-    Enrollment.objects.get_or_create(
-        user=user,
-        ebook=eff,
-        order=order,
-        defaults={"is_retail": order.is_retail_purchase},
-    )
     user.is_member = True
-    user.save(update_fields=["is_member"])
+    activated = maybe_activate_account_on_purchase(user)
+    update_fields = ["is_member"]
+    if activated:
+        update_fields.append("account_status")
+    user.save(update_fields=update_fields)
 
 
 def _place_and_commission(order: Order, user: User):

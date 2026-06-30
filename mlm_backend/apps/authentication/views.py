@@ -311,6 +311,7 @@ def verify_otp_register(request: Request):
         referral_code=referral_code,
         referral_link=referral_link,
         sponsor=sponsor,
+        account_status=User.AccountStatus.INACTIVE,
     )
     user.set_unusable_password()
     user.save()

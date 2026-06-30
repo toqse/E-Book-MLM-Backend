@@ -72,6 +72,7 @@ def test_register_full_payload_and_company_referral():
     assert u.full_name == "New User"
     assert u.email == REGISTER_EMAIL
     assert u.sponsor is not None
+    assert u.account_status == User.AccountStatus.INACTIVE
 
 
 @pytest.mark.django_db
@@ -421,7 +422,7 @@ def test_me_includes_personal_and_member_info_blocks():
     assert data["display"]["profile_initial"] == "M"
     assert data["display"]["avatar_url"] is None
 
-    assert data["account_status"]["account_status"] == User.AccountStatus.ACTIVE
+    assert data["account_status"]["account_status"] == User.AccountStatus.INACTIVE
     assert data["account_status"]["kyc_status"] == User.KYCStatus.PENDING
     assert data["account_status"]["pan_submitted"] is False
     assert data["account_status"]["withdrawals_blocked"] is True

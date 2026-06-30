@@ -17,6 +17,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         MEMBER = "MEMBER", "Member"
 
     class AccountStatus(models.TextChoices):
+        INACTIVE = "INACTIVE", "Inactive"
         ACTIVE = "ACTIVE", "Active"
         CAPPED = "CAPPED", "Capped"
         SUSPENDED = "SUSPENDED", "Suspended"
@@ -62,7 +63,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     account_status = models.CharField(
         max_length=20,
         choices=AccountStatus.choices,
-        default=AccountStatus.ACTIVE,
+        default=AccountStatus.INACTIVE,
     )
 
     bank_account_number = models.CharField(max_length=64, null=True, blank=True)
