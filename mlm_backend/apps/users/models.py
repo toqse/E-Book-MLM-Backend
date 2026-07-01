@@ -81,6 +81,8 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     otp_locked_until = models.DateTimeField(null=True, blank=True)
     direct_referral_count = models.PositiveIntegerField(default=0)
+    signup_referral_code = models.CharField(max_length=32, blank=True, default="")
+    joined_via_company_referral = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

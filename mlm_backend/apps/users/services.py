@@ -43,6 +43,11 @@ def _is_reserved_referral_code(code: str) -> bool:
     return bool(code and code.strip().upper() == effective_company_referral_code().upper())
 
 
+def is_company_referral_signup_code(code: str) -> bool:
+    """True when the signup referral code matches the active company default."""
+    return _is_reserved_referral_code(code)
+
+
 def _random_referral_code() -> str:
     code = secrets.token_urlsafe(6).upper().replace("-", "").replace("_", "")[:8]
     while len(code) < 8:

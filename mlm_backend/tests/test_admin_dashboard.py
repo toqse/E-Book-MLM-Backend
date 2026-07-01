@@ -69,6 +69,11 @@ def test_admin_dashboard_shape_and_top_earners_order(system_config):
     Wallet.objects.create(user=m_lo, total_earned=Decimal("100.00"), current_band=1)
     Wallet.objects.create(user=m_hi, total_earned=Decimal("5000.00"), current_band=3)
 
+    m_lo.direct_referral_count = 2
+    m_lo.save(update_fields=["direct_referral_count"])
+    m_hi.direct_referral_count = 5
+    m_hi.save(update_fields=["direct_referral_count"])
+
     WithdrawalRequest.objects.create(
         user=m_hi,
         band=1,
@@ -145,6 +150,12 @@ def test_admin_dashboard_shape_and_top_earners_order(system_config):
     assert te[0]["member_id"] == m_hi.member_id
     assert te[0]["earnings"] == "5000.00"
     assert te[-1]["member_id"] == m_lo.member_id
+
+    ts = data.get("top_sponsors")
+    assert isinstance(ts, list)
+    assert len(ts) >= 2
+    assert ts[0]["member_id"] == m_hi.member_id
+    assert ts[0]["direct_referrals"] == 5
 
     assert "total_members" in data
     assert "new_orders_today" in data

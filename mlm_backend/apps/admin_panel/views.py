@@ -247,6 +247,9 @@ def admin_users_list(request):
     band = request.query_params.get("band")
     band_int = _parse_positive_int(band, 0, min_v=0, max_v=1000) if band else None
     has_cap_reached = _parse_bool(request.query_params.get("has_cap_reached"))
+    joined_via_company_referral = _parse_bool(
+        request.query_params.get("joined_via_company_referral")
+    )
 
     cfg = get_system_config()
     cap = cfg.earning_cap
@@ -282,9 +285,12 @@ def admin_users_list(request):
         "kyc_pending": base_qs.filter(kyc_status=User.KYCStatus.PENDING).count(),
         "capped": base_qs.filter(account_status=User.AccountStatus.CAPPED).count(),
         "suspended": base_qs.filter(account_status=User.AccountStatus.SUSPENDED).count(),
+        "company_referral": base_qs.filter(joined_via_company_referral=True).count(),
     }
 
     qs = base_qs
+    if joined_via_company_referral is not None:
+        qs = qs.filter(joined_via_company_referral=joined_via_company_referral)
     if account_status:
         qs = qs.filter(account_status=account_status)
     if kyc_status:
@@ -322,6 +328,8 @@ def admin_users_list(request):
                 },
                 "earnings": str(earned),
                 "refs": u.direct_referral_count,
+                "joined_via_company_referral": u.joined_via_company_referral,
+                "signup_referral_code": u.signup_referral_code or None,
             }
         )
 

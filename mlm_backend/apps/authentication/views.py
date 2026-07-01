@@ -33,6 +33,7 @@ from apps.users.services import (
     effective_company_referral_code,
     environment_company_referral_code,
     is_account_capped,
+    is_company_referral_signup_code,
     resolve_sponsor_by_code,
 )
 from apps.wallet.services.member_money import build_band_ladder, get_wallet_row
@@ -303,6 +304,7 @@ def verify_otp_register(request: Request):
         return envelope_response(None, message="User already exists", success=False, status=400)
 
     member_id, referral_code, referral_link = allocate_member_identity()
+    signup_code = (rec.registration_referral_code or "").strip()
     user = User(
         phone=phone,
         email=email,
@@ -311,6 +313,8 @@ def verify_otp_register(request: Request):
         referral_code=referral_code,
         referral_link=referral_link,
         sponsor=sponsor,
+        signup_referral_code=signup_code,
+        joined_via_company_referral=is_company_referral_signup_code(signup_code),
         account_status=User.AccountStatus.INACTIVE,
     )
     user.set_unusable_password()

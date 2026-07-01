@@ -383,6 +383,26 @@ def _top_earners(limit: int) -> list[dict[str, Any]]:
     return out
 
 
+def _top_sponsors(limit: int) -> list[dict[str, Any]]:
+    qs = (
+        User.objects.filter(role=User.Role.MEMBER)
+        .select_related("wallet")
+        .order_by("-direct_referral_count", "id")[:limit]
+    )
+    out: list[dict[str, Any]] = []
+    for u in qs:
+        w = getattr(u, "wallet", None)
+        out.append(
+            {
+                "member_id": u.member_id,
+                "full_name": u.full_name,
+                "band": getattr(w, "current_band", None) if w else None,
+                "direct_referrals": u.direct_referral_count,
+            }
+        )
+    return out
+
+
 def build_admin_dashboard_payload(query_params: dict[str, Any] | None) -> dict[str, Any]:
     qp = query_params or {}
     now = timezone.now()
@@ -396,6 +416,7 @@ def build_admin_dashboard_payload(query_params: dict[str, Any] | None) -> dict[s
     activity_limit = _parse_limit(qp.get("activity_limit"), 10, min_v=1, max_v=50)
     joiners_limit = _parse_limit(qp.get("recent_joiners_limit"), 10, min_v=1, max_v=50)
     earners_limit = _parse_limit(qp.get("top_earners_limit"), 10, min_v=1, max_v=50)
+    sponsors_limit = _parse_limit(qp.get("top_sponsors_limit"), 5, min_v=1, max_v=50)
 
     pending_wr_count = WithdrawalRequest.objects.filter(
         status=WithdrawalRequest.Status.PENDING
@@ -413,6 +434,7 @@ def build_admin_dashboard_payload(query_params: dict[str, Any] | None) -> dict[s
         "sponsor_slot_activity": _sponsor_slot_activity(activity_limit),
         "recent_joiners": _recent_joiners(joiners_limit),
         "top_earners": _top_earners(earners_limit),
+        "top_sponsors": _top_sponsors(sponsors_limit),
         "total_members": User.objects.filter(role=User.Role.MEMBER).count(),
         "new_orders_today": Order.objects.filter(
             status=Order.Status.PAID,
