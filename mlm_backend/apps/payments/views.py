@@ -181,9 +181,18 @@ def webhook(request):
     body = request.body
     sig = request.headers.get("X-Razorpay-Signature", "")
     if not verify_webhook_signature(body, sig):
+        if not sig:
+            logger.warning("razorpay_webhook rejected: missing X-Razorpay-Signature header")
+        else:
+            logger.warning(
+                "razorpay_webhook rejected: bad signature "
+                "(webhook secret must match RAZORPAY_KEY_SECRET or admin razorpay_key_secret)"
+            )
         return envelope_response(None, message="Bad signature", success=False, status=400)
     payload = json.loads(body.decode("utf-8"))
-    return envelope_response({"received": True, "event": payload.get("event")})
+    event = payload.get("event")
+    logger.info("razorpay_webhook received event=%s", event)
+    return envelope_response({"received": True, "event": event})
 
 
 def _open_refund_ebook_title(rr: RefundRequest) -> str | None:
