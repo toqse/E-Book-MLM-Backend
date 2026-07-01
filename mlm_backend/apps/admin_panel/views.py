@@ -81,6 +81,55 @@ def _clean_opt_str(val, *, lower: bool = False) -> str | None:
     return s.lower() if lower else s
 
 
+def _normalize_compliance_gender(raw) -> str | None:
+    """Map UI labels (Male, …) to MemberComplianceProfile single-char codes."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return ""
+    upper = s.upper()
+    if upper in ("M", "F", "O", "U"):
+        return upper
+    mapping = {
+        "m": "M",
+        "male": "M",
+        "f": "F",
+        "female": "F",
+        "o": "O",
+        "other": "O",
+        "u": "U",
+        "undisclosed": "U",
+        "prefer_not_to_say": "U",
+        "prefer not to say": "U",
+    }
+    return mapping.get(s.lower())
+
+
+def _parse_compliance_date(raw):
+    """Accept ISO (YYYY-MM-DD) or DD/MM/YYYY / DD-MM-YYYY for profile date fields."""
+    if raw in (None, ""):
+        return None
+    from datetime import datetime
+
+    s = str(raw).strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _compliance_gender_display(profile: MemberComplianceProfile | None) -> str | None:
+    if not profile or not profile.gender:
+        return None
+    try:
+        return profile.get_gender_display()
+    except Exception:
+        return profile.gender or None
+
+
 def _invoice_pdf_url(request, inv: GSTInvoice) -> str | None:
     """Best-effort absolute URL; never raises."""
     legacy = (getattr(inv, "pdf_url", "") or "").strip() or None
@@ -411,7 +460,7 @@ def admin_users_detail(request, pk: int):
                 "compliance_kyc_details": (
                     {
                         "date_of_birth": _fmt_ddmmyyyy(p.date_of_birth) if p else None,
-                        "gender": p.gender if p else None,
+                        "gender": _compliance_gender_display(p) if p else None,
                         "full_address": p.full_address if p else None,
                         "city": p.city if p else None,
                         "pin_code": p.pin_code if p else None,
@@ -588,14 +637,38 @@ def admin_users_detail(request, pk: int):
     profile = None
     if wants_profile:
         profile, _ = MemberComplianceProfile.objects.get_or_create(user=u)
-        # Note: date fields are accepted as ISO (YYYY-MM-DD); we keep it simple and let Django coerce
-        # via assignment where possible, otherwise keep existing values.
         for k in compliance_fields:
             if k not in data:
                 continue
             v = data.get(k)
-            if k in ("date_of_birth", "nominee_date_of_birth") and v in (None, ""):
-                setattr(profile, k, None)
+            if k in ("date_of_birth", "nominee_date_of_birth"):
+                if v in (None, ""):
+                    setattr(profile, k, None)
+                else:
+                    parsed = _parse_compliance_date(v)
+                    if parsed is None:
+                        return envelope_response(
+                            None,
+                            message="Invalid date format.",
+                            success=False,
+                            errors={k: "Use YYYY-MM-DD or DD/MM/YYYY."},
+                            status=400,
+                        )
+                    setattr(profile, k, parsed)
+                continue
+            if k == "gender":
+                normalized_gender = _normalize_compliance_gender(v)
+                if normalized_gender is None:
+                    return envelope_response(
+                        None,
+                        message="Invalid gender.",
+                        success=False,
+                        errors={
+                            "gender": "Must be Male, Female, Other, Prefer not to say (or M/F/O/U)."
+                        },
+                        status=400,
+                    )
+                setattr(profile, k, normalized_gender)
                 continue
             if isinstance(v, str):
                 v2 = v.strip()
@@ -606,6 +679,13 @@ def admin_users_detail(request, pk: int):
                 setattr(profile, k, v2)
             else:
                 setattr(profile, k, v)
+
+    # When admin marks KYC verified via user edit, stamp first-approval if missing.
+    if data.get("kyc_status") == User.KYCStatus.VERIFIED and not u.kyc_first_approved_at:
+        now = timezone.now()
+        u.kyc_first_approved_at = now
+        if not u.kyc_reviewed_at:
+            u.kyc_reviewed_at = now
 
     effective_pan = None
     if profile is not None and (profile.pan_number or "").strip():

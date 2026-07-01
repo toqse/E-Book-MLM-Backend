@@ -2,6 +2,7 @@ from django.conf import settings
 from django.contrib import admin
 from django.urls import path, re_path
 from django.views.static import serve
+from apps.admin_panel import profile_kyc_views as admin_profile_kyc_views
 from apps.admin_panel import views as adminv
 from apps.agreements import views as agreement_views
 from apps.authentication import views as auth_views
@@ -215,6 +216,8 @@ urlpatterns = [
     path("api/v1/admin/gst-report/", pay_views.admin_gst_report),
     # Admin panel
     path("api/v1/admin/dashboard/", adminv.dashboard),
+    path("api/v1/admin/profile/kyc/send-otp/", admin_profile_kyc_views.admin_profile_kyc_send_otp),
+    path("api/v1/admin/profile/kyc/submit/", admin_profile_kyc_views.admin_profile_kyc_submit),
     path("api/v1/admin/users/", adminv.admin_users_list),
     path("api/v1/admin/users/<int:pk>/", adminv.admin_users_detail),
     path("api/v1/admin/users/<int:pk>/suspend/", adminv.admin_user_suspend),

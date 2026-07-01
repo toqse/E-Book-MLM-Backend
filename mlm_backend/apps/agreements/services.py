@@ -1,6 +1,7 @@
 import uuid
 from typing import Optional
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.agreements.identity_uniqueness import normalize_aadhaar, normalize_pan
@@ -170,3 +171,39 @@ def apply_profile_bank_to_user(user: User, profile: MemberComplianceProfile, upi
 def sync_identity_to_user(user: User, profile: MemberComplianceProfile, raw_aadhaar_digits: str):
     user.pan_number = normalize_pan(profile.pan_number) or None
     user.aadhaar_number = normalize_aadhaar(raw_aadhaar_digits) or None
+
+
+def finalize_super_admin_kyc_auto_approve(*, user: User, is_reapproval: bool) -> None:
+    """
+    After SUPER_ADMIN self-service KYC submit (OTP verified): mark VERIFIED immediately.
+    First approval sets kyc_first_approved_at so future commissions credit; re-approval
+    may release held commissions for previously approved users only.
+    """
+    now = timezone.now()
+    user.kyc_status = User.KYCStatus.VERIFIED
+    user.kyc_submitted_at = now
+    user.kyc_reviewed_at = now
+    if not user.kyc_first_approved_at:
+        user.kyc_first_approved_at = now
+    user.kyc_rejection_reason = ""
+    user.compliance_submission_version = (user.compliance_submission_version or 0) + 1
+    user.save(
+        update_fields=[
+            "kyc_status",
+            "kyc_submitted_at",
+            "kyc_reviewed_at",
+            "kyc_first_approved_at",
+            "kyc_rejection_reason",
+            "compliance_submission_version",
+            "updated_at",
+        ]
+    )
+    if is_reapproval:
+        user_id = user.pk
+
+        def _release():
+            from apps.commissions.held_release_service import release_held_commissions_for_user
+
+            release_held_commissions_for_user(user_id=user_id, actor=None)
+
+        transaction.on_commit(_release)

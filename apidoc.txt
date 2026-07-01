@@ -1541,6 +1541,37 @@ staff admin JWT (no separate commission or credit endpoints):
 Staff process their own pending requests via Finance → Payouts (/api/v1/admin/withdrawals*).
 
 
+MODULE: Admin — Profile KYC (SUPER_ADMIN self-service)
+--------------------------------------------------------------------------------
+POST /api/v1/admin/profile/kyc/send-otp/
+  Auth: Bearer (SUPER_ADMIN only; self — no user_id in URL).
+  Sends OTP to the authenticated admin's phone or email (same identifier rules as admin login).
+  Purpose: ADMIN_KYC; payload binds user_id + admin_kyc_submit declaration.
+  Throttle: otp_send.
+  Errors:
+    - 403 if not SUPER_ADMIN, or phone/email missing on profile
+    - 429 rate limited
+  Success data: { "expires_in_seconds": <int>, "otp": "<code>" }  (otp only when EXPOSE_OTP_IN_RESPONSE)
+
+POST /api/v1/admin/profile/kyc/submit/
+  Auth: Bearer (SUPER_ADMIN only; self).
+  Content-Type: multipart/form-data.
+  Body: ComplianceSubmitSerializer fields + otp_code (required).
+  Files (first submit): pan_document, aadhar_front, aadhar_back required when PAN provided / always for Aadhaar sides.
+  On resubmit after profile exists, existing stored files satisfy requirements if not re-uploaded.
+  Verifies ADMIN_KYC OTP bound to request.user.id.
+  Does NOT enter KYC queue — immediately sets kyc_status=VERIFIED, kyc_first_approved_at (first time),
+  kyc_submitted_at, kyc_reviewed_at. Re-approval triggers release_held_commissions_for_user on commit.
+  Throttle: otp_verify.
+  Success data: {
+    "kyc_status": "VERIFIED",
+    "kyc_first_approved_at": "<iso8601>",
+    "compliance_submission_version": <int>
+  }
+  Errors: 400 validation / OTP / duplicate PAN-Aadhaar; 403 non-SUPER_ADMIN.
+  Status read: GET /api/v1/auth/kyc/status/ (no new read endpoint).
+
+
 MODULE: Sponsor slots
 --------------------------------------------------------------------------------
 GET /api/v1/user/sponsor-slots/

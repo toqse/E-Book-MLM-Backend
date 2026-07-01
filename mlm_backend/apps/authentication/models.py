@@ -8,6 +8,7 @@ class OTPRecord(models.Model):
         LOGIN = "LOGIN", "Login"
         KYC = "KYC", "KYC"
         ADMIN_LOGIN = "ADMIN_LOGIN", "Admin Login"
+        ADMIN_KYC = "ADMIN_KYC", "Admin KYC"
         AGREEMENT = "AGREEMENT", "Agreement"
 
     phone = models.CharField(max_length=20, null=True, blank=True)
