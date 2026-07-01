@@ -256,7 +256,7 @@ def admin_users_list(request):
 
     base_qs = (
         User.objects.all()
-        .select_related("compliance_profile", "wallet")
+        .select_related("compliance_profile", "wallet", "sponsor")
         .order_by("-id")
     )
 
@@ -330,6 +330,14 @@ def admin_users_list(request):
                 "refs": u.direct_referral_count,
                 "joined_via_company_referral": u.joined_via_company_referral,
                 "signup_referral_code": u.signup_referral_code or None,
+                "referrer": (
+                    {
+                        "member_id": u.sponsor.member_id,
+                        "full_name": u.sponsor.full_name,
+                    }
+                    if u.sponsor_id
+                    else None
+                ),
             }
         )
 

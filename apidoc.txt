@@ -2366,7 +2366,8 @@ GET /api/v1/admin/users/
         "earnings",
         "refs",
         "joined_via_company_referral",
-        "signup_referral_code"
+        "signup_referral_code",
+        "referrer": { "member_id", "full_name" } | null
       }, ...
     ],
     "count": <int>,

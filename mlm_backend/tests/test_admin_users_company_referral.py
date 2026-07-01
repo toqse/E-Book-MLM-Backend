@@ -43,6 +43,7 @@ def test_admin_users_company_referral_filter_and_tab_count(system_config):
         name="Company Signup",
         signup_referral_code="Admin",
         joined_via_company_referral=True,
+        sponsor=admin,
     )
     _member(
         "+919922222222",
@@ -66,3 +67,7 @@ def test_admin_users_company_referral_filter_and_tab_count(system_config):
     assert filtered["results"][0]["member_id"] == company_user.member_id
     assert filtered["results"][0]["joined_via_company_referral"] is True
     assert filtered["results"][0]["signup_referral_code"] == "Admin"
+    assert filtered["results"][0]["referrer"] == {
+        "member_id": admin.member_id,
+        "full_name": admin.full_name,
+    }
