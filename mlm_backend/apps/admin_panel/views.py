@@ -392,6 +392,13 @@ def admin_users_detail(request, pk: int):
                     "kyc_rejection_reason": u.kyc_rejection_reason or None,
                 },
                 "direct_referral_count": u.direct_referral_count,
+                "payout_on_user": {
+                    "payout_preference": (u.payout_preference or "UPI").upper(),
+                    "bank_account_number": (u.bank_account_number or "").strip() or None,
+                    "bank_ifsc": (u.bank_ifsc or "").strip().upper() or None,
+                    "bank_name": (u.bank_name or "").strip() or None,
+                    "upi_id": (u.upi_id or "").strip() or None,
+                },
                 "personal_details": {
                     "full_name": u.full_name,
                     "email": u.email,

@@ -1528,6 +1528,19 @@ GET /api/v1/admin/withdrawals/export/
     bank_name (filled only for BANK), utr_number, created_at, approved_at, paid_at.
 
 
+MODULE: Admin — My Wallet (frontend; staff self-service)
+--------------------------------------------------------------------------------
+The admin panel "My Wallet" page (/admin/wallet) uses the same member wallet APIs with the
+staff admin JWT (no separate commission or credit endpoints):
+  - GET /api/v1/user/wallet/ — balance summary
+  - GET /api/v1/user/payouts/ — enriched wallet + bands (KYC gate)
+  - GET /api/v1/user/earnings/?include=ledger — commission history (sticky KYC gate)
+  - GET /api/v1/user/wallet/withdrawals/ — own withdrawal history
+  - POST /api/v1/user/wallet/withdraw/ — request payout (same rules as members)
+  - PATCH /api/v1/admin/users/<self_id>/ — save Bank/UPI on User (payout_on_user on GET)
+Staff process their own pending requests via Finance → Payouts (/api/v1/admin/withdrawals*).
+
+
 MODULE: Sponsor slots
 --------------------------------------------------------------------------------
 GET /api/v1/user/sponsor-slots/
@@ -2328,6 +2341,8 @@ GET /api/v1/admin/users/
 GET /api/v1/admin/users/<id>/
   Auth: IsAdminRole.
   Success: user profile + compliance snapshot + wallet summary + cap_progress.
+  payout_on_user: { payout_preference, bank_account_number, bank_ifsc, bank_name, upi_id }
+    (User-level fields used by withdrawal validation; unmasked for admin panel).
   (earnings.wallet includes: current_band, total_earned, cash_balance,
    total_withdrawn: { total, already_paid_out, held_for_review },
    total_tds_deducted, updated_at)
