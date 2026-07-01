@@ -485,6 +485,134 @@ def verify_webhook_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(digest, signature or "")
 
 
+def _payment_entity_from_webhook_payload(payload: dict) -> dict | None:
+    try:
+        entity = payload.get("payload", {}).get("payment", {}).get("entity")
+        if isinstance(entity, dict):
+            return entity
+    except AttributeError:
+        pass
+    return None
+
+
+def _expected_amount_paise(order: Order) -> int:
+    return int((order.amount_paid * Decimal("100")).to_integral_value())
+
+
+def process_razorpay_webhook_payload(payload: dict) -> dict:
+    """
+    Handle Razorpay webhook events. ``payment.captured`` finalizes CREATED orders via
+    ``finalize_order_as_paid`` (same path as POST /payments/verify/). Idempotent when
+    already PAID. Other events are acknowledged only.
+    """
+    event = (payload.get("event") or "").strip()
+    result: dict = {
+        "event": event or None,
+        "action": "acknowledged",
+        "order_id": None,
+        "order_number": None,
+        "reason": None,
+    }
+
+    if event != "payment.captured":
+        if event:
+            logger.info("razorpay_webhook acknowledged event=%s (no fulfillment action)", event)
+        return result
+
+    entity = _payment_entity_from_webhook_payload(payload)
+    if not entity:
+        logger.warning("razorpay_webhook payment.captured missing payment entity")
+        return {**result, "action": "skipped", "reason": "missing_payment_entity"}
+
+    rz_order_id = (entity.get("order_id") or "").strip()
+    payment_id = (entity.get("id") or "").strip()
+    status = (entity.get("status") or "").strip().lower()
+    amount_raw = entity.get("amount")
+
+    if not rz_order_id or not payment_id:
+        logger.warning("razorpay_webhook payment.captured missing order_id or payment id")
+        return {**result, "action": "skipped", "reason": "missing_order_or_payment_id"}
+
+    if status != "captured":
+        logger.warning(
+            "razorpay_webhook payment.captured skipped status=%s payment_id=%s",
+            status,
+            payment_id,
+        )
+        return {**result, "action": "skipped", "reason": f"status_not_captured:{status}"}
+
+    order = Order.objects.filter(razorpay_order_id=rz_order_id).first()
+    if not order:
+        logger.warning(
+            "razorpay_webhook payment.captured no order for razorpay_order_id=%s",
+            rz_order_id,
+        )
+        return {**result, "action": "skipped", "reason": "order_not_found"}
+
+    result["order_id"] = order.id
+    result["order_number"] = order.order_number
+
+    if order.status == Order.Status.PAID:
+        logger.info(
+            "razorpay_webhook payment.captured already_paid order_id=%s payment_id=%s",
+            order.id,
+            payment_id,
+        )
+        return {**result, "action": "already_paid"}
+
+    if order.status != Order.Status.CREATED:
+        logger.warning(
+            "razorpay_webhook payment.captured invalid order status=%s order_id=%s",
+            order.status,
+            order.id,
+        )
+        return {**result, "action": "skipped", "reason": f"invalid_order_status:{order.status}"}
+
+    try:
+        amount_paise = int(amount_raw)
+    except (TypeError, ValueError):
+        logger.warning("razorpay_webhook payment.captured invalid amount payment_id=%s", payment_id)
+        return {**result, "action": "skipped", "reason": "invalid_amount"}
+
+    expected_paise = _expected_amount_paise(order)
+    if amount_paise != expected_paise:
+        logger.warning(
+            "razorpay_webhook payment.captured amount_mismatch order_id=%s expected=%s got=%s",
+            order.id,
+            expected_paise,
+            amount_paise,
+        )
+        return {**result, "action": "skipped", "reason": "amount_mismatch"}
+
+    try:
+        finalize_order_as_paid(order, payment_id=payment_id)
+    except ValueError as exc:
+        logger.warning(
+            "razorpay_webhook payment.captured finalize_failed order_id=%s error=%s",
+            order.id,
+            exc,
+        )
+        return {**result, "action": "skipped", "reason": str(exc)}
+
+    order.refresh_from_db()
+    write_audit(
+        "payment.webhook_captured",
+        target_type="Order",
+        target_id=str(order.id),
+        payload={
+            "order_number": order.order_number,
+            "razorpay_payment_id": payment_id,
+            "razorpay_order_id": rz_order_id,
+        },
+    )
+    logger.info(
+        "razorpay_webhook payment.captured finalized order_id=%s payment_id=%s",
+        order.id,
+        payment_id,
+    )
+    return {**result, "action": "finalized"}
+
+
 def payment_method_for_refund(order: Order) -> str:
     rid = (order.razorpay_payment_id or "").strip()
     if rid.startswith("MANUAL-"):

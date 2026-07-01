@@ -1983,9 +1983,24 @@ POST /api/v1/payments/webhook/
       1) SystemConfig.razorpay_key_secret (admin config)
       2) settings.RAZORPAY_KEY_SECRET (env fallback)
   Body: Razorpay JSON payload (raw bytes used for signature).
-  Success data: { "received": true, "event": "<from payload>" }
-  Errors: 400 — bad signature.
-  Note: handler currently acknowledges receipt; client flow still relies on POST .../payments/verify/ after pay.
+  Success data: {
+    "received": true,
+    "event": "<from payload>",
+    "action": "finalized" | "already_paid" | "skipped" | "acknowledged",
+    "order_id": <int|null> — set when a matching Order was found for payment.captured,
+    "order_number": "<string|null>",
+    "reason": "<string|null> — set when action is skipped (e.g. amount_mismatch, order_not_found)
+  }
+  payment.captured handling:
+    • Finds Order by payload payment.entity.order_id == Order.razorpay_order_id.
+    • Requires payment.entity.status == "captured" and amount (paise) == Order.amount_paid * 100.
+    • Calls same finalize_order_as_paid() as POST /api/v1/payments/verify/ (enrollment, GST invoice,
+      placement queue, commission dispatch). Idempotent when order already PAID.
+    • Writes audit action payment.webhook_captured on successful finalize.
+  Other events (payment.failed, refund.*, etc.): acknowledged only (logged); no order/refund DB changes.
+  Errors: 400 — bad signature or invalid JSON body.
+  Note: Client checkout should still call POST .../payments/verify/ when possible; webhook is backup
+    when verify is missed (e.g. user navigates away after Razorpay success).
 
 GET /api/v1/user/orders/
   Auth: Bearer.

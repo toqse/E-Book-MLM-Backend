@@ -31,6 +31,7 @@ from .services import (
     remaining_refundable_for_order,
     remaining_refundable_for_order_line,
     resolve_gateway_payment_method,
+    process_razorpay_webhook_payload,
     submit_member_refund_request,
     submit_member_refund_requests_for_lines,
     verify_payment,
@@ -189,10 +190,29 @@ def webhook(request):
                 "(webhook secret must match RAZORPAY_KEY_SECRET or admin razorpay_key_secret)"
             )
         return envelope_response(None, message="Bad signature", success=False, status=400)
-    payload = json.loads(body.decode("utf-8"))
-    event = payload.get("event")
-    logger.info("razorpay_webhook received event=%s", event)
-    return envelope_response({"received": True, "event": event})
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.warning("razorpay_webhook rejected: invalid JSON body — %s", exc)
+        return envelope_response(None, message="Invalid payload", success=False, status=400)
+
+    outcome = process_razorpay_webhook_payload(payload)
+    event = outcome.get("event")
+    action = outcome.get("action")
+    if action == "finalized":
+        logger.info("razorpay_webhook received event=%s action=finalized order_id=%s", event, outcome.get("order_id"))
+    elif action == "already_paid":
+        logger.info("razorpay_webhook received event=%s action=already_paid order_id=%s", event, outcome.get("order_id"))
+    elif action == "skipped":
+        logger.warning(
+            "razorpay_webhook received event=%s action=skipped reason=%s",
+            event,
+            outcome.get("reason"),
+        )
+    else:
+        logger.info("razorpay_webhook received event=%s action=%s", event, action)
+
+    return envelope_response({"received": True, **outcome})
 
 
 def _open_refund_ebook_title(rr: RefundRequest) -> str | None:
