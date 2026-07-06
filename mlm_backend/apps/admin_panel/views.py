@@ -1186,6 +1186,8 @@ def system_config_view(request):
                     "ios_force_update": bool(cfg.ios_force_update),
                     "android_latest_app_version": cfg.android_latest_app_version or "",
                     "android_force_update": bool(cfg.android_force_update),
+                    "play_store_url": cfg.play_store_url or "",
+                    "app_store_url": cfg.app_store_url or "",
                 },
             }
         )
@@ -1234,6 +1236,8 @@ def system_config_view(request):
         "ios_force_update",
         "android_latest_app_version",
         "android_force_update",
+        "play_store_url",
+        "app_store_url",
     ]:
         if field not in data:
             continue
@@ -1245,6 +1249,18 @@ def system_config_view(request):
                 s = val.strip()
                 if len(s) > 32:
                     errors[field] = "max_length_32"
+                    continue
+                setattr(cfg, field, s)
+            else:
+                errors[field] = "must_be_string"
+            continue
+        if field in ("play_store_url", "app_store_url"):
+            if val in (None, ""):
+                setattr(cfg, field, "")
+            elif isinstance(val, str):
+                s = val.strip()
+                if len(s) > 500:
+                    errors[field] = "max_length_500"
                     continue
                 setattr(cfg, field, s)
             else:
@@ -1338,6 +1354,8 @@ def public_app_version(request):
             "ios_force_update": bool(cfg.ios_force_update),
             "android_latest_app_version": cfg.android_latest_app_version or "",
             "android_force_update": bool(cfg.android_force_update),
+            "play_store_url": cfg.play_store_url or "",
+            "app_store_url": cfg.app_store_url or "",
         }
     )
 

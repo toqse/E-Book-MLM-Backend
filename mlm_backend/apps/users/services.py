@@ -78,6 +78,16 @@ def allocate_member_identity() -> tuple[str, str, str]:
     return member_id, referral_code, referral_link
 
 
+def build_member_referral_links(referral_code: str) -> dict[str, str]:
+    base = getattr(settings, "FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
+    code = (referral_code or "").strip().upper()
+    return {
+        "website": f"{base}/join?ref={code}",
+        "play_store": f"{base}/play-store?ref={code}",
+        "app_store": f"{base}/app-store?ref={code}",
+    }
+
+
 def is_account_capped(user) -> bool:
     """True when the member has reached the earning cap and is marked CAPPED."""
     return bool(user) and user.account_status == User.AccountStatus.CAPPED

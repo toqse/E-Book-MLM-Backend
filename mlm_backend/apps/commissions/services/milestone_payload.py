@@ -11,6 +11,7 @@ from apps.admin_panel.utils import get_system_config
 from apps.commissions.milestone_tiers import get_milestones
 from apps.commissions.models import MilestoneRecord
 from apps.users.models import User
+from apps.users.services import build_member_referral_links
 from apps.wallet.models import Wallet
 
 ZERO = Decimal("0")
@@ -156,12 +157,15 @@ def build_user_milestones_dashboard(user: User) -> dict[str, Any]:
         }
         history.append(row)
 
+    links = build_member_referral_links(user.referral_code or "")
     return {
         "user": {
             "member_id": user.member_id,
             "full_name": user.full_name,
             "referral_code": user.referral_code,
             "referral_link": user.referral_link,
+            "play_store_referral_link": links["play_store"],
+            "app_store_referral_link": links["app_store"],
         },
         "qualifying_referrals": {
             "count": count,

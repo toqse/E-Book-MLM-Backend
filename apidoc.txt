@@ -207,6 +207,8 @@ GET/PATCH /api/v1/auth/me/
       kyc_eligible_at (ISO datetime or null — earliest refund-window end when still blocked in after_refund mode),
       kyc_invitation_sent_at (ISO datetime or null; null in instant mode),
       tds_rate_percent (null until KYC approved), referral_link (null until KYC approved),
+      play_store_referral_link (null until KYC approved),
+      app_store_referral_link (null until KYC approved),
       referral_link_active (false until KYC approved)
     - feature_access: team_network, earnings, withdrawals, milestones, sponsor_slots, referral_program,
       compliance_submit (booleans). MLM sections and referral_program are true only when kyc_status is VERIFIED
@@ -313,7 +315,42 @@ POST /api/v1/auth/validate-referral/
   Auth: None.
   Body: { "referral_code": "CODE" } or { "code": "CODE" }
   Success data: { "sponsor_name": "<full_name>" }
-  Errors: 404 invalid code.
+  Errors: 404 invalid code or capped sponsor.
+
+POST /api/v1/auth/store-referral-lead/
+  Auth: None. Throttle: referral_lead (10/min per IP).
+  Purpose: Pre-registration bridge for Play Store / App Store referral landing pages.
+    Stores phone + referral code before redirecting the invitee to the app store.
+    Does NOT assign sponsor or affect commissions — sponsor is still resolved at register/send-otp.
+  Body: {
+    "phone": "+919876543210",   // E.164 with country code
+    "referral_code": "ABC12XYZ",
+    "platform": "android" | "ios"   // also accepts play_store, app_store, apple
+  }
+  Success data: { "ok": true }
+  Errors: 400 — invalid referral code, capped sponsor, phone already registered, invalid platform.
+
+GET /api/v1/auth/referral-by-phone/
+  Auth: None. Throttle: referral_lookup (30/min per IP).
+  Purpose: Look up a referral code previously stored via store-referral-lead (mobile app or web register).
+  Query: phone=+919876543210 (E.164)
+  Success data: {
+    "referral_code": "ABC12XYZ" | null,
+    "referrer_name": "Ravi Kumar" | null,
+    "referrer_id": "JUST200-000123" | null,
+    "phone_registered": <boolean>
+  }
+  - referral_code set when a non-expired StoreReferralLead exists for the phone.
+  - referrer_name / referrer_id resolved from the stored referral code (member's full name and member_id); null when no lead or the code no longer resolves.
+  - referral_code null and phone_registered false when no lead or lead expired.
+  - referral_code null and phone_registered true when phone already belongs to a User (web UI should prompt Login).
+  Mobile integration (separate app repo):
+    1) On signup phone entry, GET this endpoint.
+    2) If referral_code present, autofill UI and pass to POST /api/v1/auth/register/send-otp/.
+    3) If null and phone_registered false, fetch GET /api/v1/auth/company-referral-code/ and use default company code.
+    4) If phone_registered true, redirect to login flow.
+    5) Existing register/send-otp + verify-otp-register flow unchanged (sponsor + commissions).
+  Pending leads expire after 30 days. Lead row is deleted after successful verify-otp-register.
 
 
 MODULE: Agreements (/api/v1/agreements/, member)
@@ -514,6 +551,8 @@ GET /api/v1/user/referral/
   Success data: {
     "referral_code": "...",
     "referral_link": "...",
+    "play_store_referral_link": "{FRONTEND_BASE_URL}/play-store?ref={code}",
+    "app_store_referral_link": "{FRONTEND_BASE_URL}/app-store?ref={code}",
     "qr_url": "<same as referral_link in current implementation>"
   }
 
@@ -1277,7 +1316,7 @@ GET /api/v1/user/commissions/milestones/
   Auth: Bearer.
   Success data (envelope `data`): full milestones dashboard for the Milestones UI plus legacy-compatible `history` rows.
   Top-level keys:
-    - user: { member_id, full_name, referral_code, referral_link }
+    - user: { member_id, full_name, referral_code, referral_link, play_store_referral_link, app_store_referral_link }
     - qualifying_referrals: { count (direct_referral_count), definition (string; engine qualification rules) }
     - config_snapshot: { earning_cap, product_base_price, tds_194r_rate_percent, tds_cash_trigger } — decimal strings
     - summary:
@@ -2521,10 +2560,13 @@ GET/PATCH /api/v1/admin/config/
           "ios_latest_app_version": "<string>",
           "ios_force_update": <boolean>,
           "android_latest_app_version": "<string>",
-          "android_force_update": <boolean>
+          "android_force_update": <boolean>,
+          "play_store_url": "<string>",
+          "app_store_url": "<string>"
         }
       - PATCH accepts: ios_latest_app_version, android_latest_app_version (string, max 32 after trim; empty clears),
-        ios_force_update, android_force_update (boolean; true, "true", "1", "yes" treated as true).
+        ios_force_update, android_force_update (boolean; true, "true", "1", "yes" treated as true),
+        play_store_url, app_store_url (string URL, max 500 after trim; empty clears).
   PATCH body: any subset of the above; includes refund_request_sla_hours (non-negative int, default 48 for open refund SLA dashboard). refund_window_days (buyer refund / placement cool-off eligibility) and cooling_off_days (wallet credit cooling for withdrawals) are independent non-negative ints. trigger_instant_kyc_submission accepts boolean. sets updated_by.
   Success PATCH: { "ok": true }
 
@@ -2534,17 +2576,22 @@ GET /api/v1/app-version/
     "ios_latest_app_version": "<string>",
     "ios_force_update": <boolean>,
     "android_latest_app_version": "<string>",
-    "android_force_update": <boolean>
+    "android_force_update": <boolean>,
+    "play_store_url": "<string>",
+    "app_store_url": "<string>"
   }
   Example: {
     "ios_latest_app_version": "1.4.6",
     "ios_force_update": false,
     "android_latest_app_version": "1.4.7",
-    "android_force_update": true
+    "android_force_update": true,
+    "play_store_url": "https://play.google.com/store/apps/details?id=...",
+    "app_store_url": "https://apps.apple.com/app/id..."
   }
   Mobile clients read platform-specific keys: iOS uses ios_latest_app_version and ios_force_update;
   Android uses android_latest_app_version and android_force_update. When the platform force_update
   flag is true, block app usage until the user updates via the App Store or Play Store.
+  Web referral landing pages (/play-store, /app-store) read play_store_url and app_store_url for redirect.
 
 
 MODULE: Admin — Milestone bonuses (/api/v1/admin/milestones*)

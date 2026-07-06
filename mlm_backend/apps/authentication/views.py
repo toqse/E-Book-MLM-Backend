@@ -30,6 +30,7 @@ from apps.users.models import AccountDeletionRequest, User
 from apps.users import team_services
 from apps.users.services import (
     allocate_member_identity,
+    build_member_referral_links,
     effective_company_referral_code,
     environment_company_referral_code,
     is_account_capped,
@@ -319,6 +320,9 @@ def verify_otp_register(request: Request):
     )
     user.set_unusable_password()
     user.save()
+    from apps.authentication.store_referral import consume_store_referral_lead
+
+    consume_store_referral_lead(phone)
     write_audit("user.registered", actor=user, target_type="User", target_id=user.id)
     return envelope_response(
         {
@@ -504,6 +508,8 @@ def _me_payload(user: User):
             user.kyc_invitation_sent_at.isoformat() if user.kyc_invitation_sent_at else None
         ),
         "referral_link": None,
+        "play_store_referral_link": None,
+        "app_store_referral_link": None,
         "referral_link_active": False,
     }
     data["feature_access"] = {
@@ -555,7 +561,10 @@ def _me_payload(user: User):
             tds_rate_reason = "PAN not available"
 
         data["account_status"]["tds_rate_percent"] = tds_rate_percent
-        data["account_status"]["referral_link"] = user.referral_link or None
+        links = build_member_referral_links(user.referral_code or "")
+        data["account_status"]["referral_link"] = user.referral_link or links["website"]
+        data["account_status"]["play_store_referral_link"] = links["play_store"]
+        data["account_status"]["app_store_referral_link"] = links["app_store"]
         data["account_status"]["referral_link_active"] = bool(
             user.is_active and user.account_status == User.AccountStatus.ACTIVE
         )
@@ -617,6 +626,8 @@ def _me_payload(user: User):
     if user.account_status == User.AccountStatus.CAPPED:
         data["referral_code"] = None
         data["account_status"]["referral_link"] = None
+        data["account_status"]["play_store_referral_link"] = None
+        data["account_status"]["app_store_referral_link"] = None
         data["account_status"]["referral_link_active"] = False
         data["profile_message"] = (
             "Your account has reached the earning cap and is now inactive."
@@ -861,6 +872,36 @@ def company_referral_code_public(request: Request):
 
 @api_view(["POST"])
 @permission_classes([permissions.AllowAny])
+def store_referral_lead(request: Request):
+    from .serializers import StoreReferralLeadSerializer
+    from .store_referral import upsert_store_referral_lead
+
+    ser = StoreReferralLeadSerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+    ok, err = upsert_store_referral_lead(
+        phone=ser.validated_data["phone"],
+        referral_code=ser.validated_data["referral_code"],
+        platform=ser.validated_data["platform"],
+    )
+    if not ok:
+        return envelope_response(None, message=err or "Invalid request", success=False, status=400)
+    return envelope_response({"ok": True})
+
+
+@api_view(["GET"])
+@permission_classes([permissions.AllowAny])
+def referral_by_phone(request: Request):
+    from .serializers import ReferralByPhoneQuerySerializer
+    from .store_referral import lookup_referral_by_phone
+
+    ser = ReferralByPhoneQuerySerializer(data=request.query_params)
+    ser.is_valid(raise_exception=True)
+    result = lookup_referral_by_phone(ser.validated_data["phone"])
+    return envelope_response(result)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.AllowAny])
 def validate_referral(request: Request):
     code = request.data.get("referral_code") or request.data.get("code")
     s = resolve_sponsor_by_code(code or "")
@@ -999,6 +1040,8 @@ def admin_verify_otp(request: Request):
 
 
 # Scoped DRF throttling (defense-in-depth; OTP send also uses DB limiter in otp.py).
+store_referral_lead.view_class.throttle_scope = "referral_lead"
+referral_by_phone.view_class.throttle_scope = "referral_lookup"
 send_otp.view_class.throttle_scope = "otp_send"
 send_register_otp.view_class.throttle_scope = "otp_send"
 verify_otp_register.view_class.throttle_scope = "otp_verify"
