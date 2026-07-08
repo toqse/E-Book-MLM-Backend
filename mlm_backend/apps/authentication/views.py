@@ -324,6 +324,10 @@ def verify_otp_register(request: Request):
 
     consume_store_referral_lead(phone)
     write_audit("user.registered", actor=user, target_type="User", target_id=user.id)
+    from apps.notifications.lifecycle import schedule_msg91_lifecycle
+    from apps.notifications.tasks import send_welcome_registration_task
+
+    schedule_msg91_lifecycle(send_welcome_registration_task, user.pk)
     return envelope_response(
         {
             "user": _user_payload(user),

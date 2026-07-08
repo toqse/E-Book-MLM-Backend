@@ -223,6 +223,11 @@ def _approve_compliance_by_user_ids(user_ids: list[int]):
             transaction.on_commit(
                 lambda user_id=uid: release_held_commissions_for_user(user_id=user_id, actor=None)
             )
+        from apps.notifications.lifecycle import schedule_msg91_lifecycle
+        from apps.notifications.tasks import send_kyc_approved_task
+
+        for uid in ok_ids:
+            schedule_msg91_lifecycle(send_kyc_approved_task, uid)
     return ok_ids, failed, now.isoformat()
 
 
@@ -954,6 +959,10 @@ def compliance_reject(request, pk: int):
     u.save(
         update_fields=["kyc_status", "kyc_reviewed_at", "kyc_rejection_reason", "updated_at"]
     )
+    from apps.notifications.lifecycle import schedule_msg91_lifecycle
+    from apps.notifications.tasks import send_kyc_rejected_task
+
+    schedule_msg91_lifecycle(send_kyc_rejected_task, u.pk, reason)
     return envelope_response({"kyc_status": u.kyc_status})
 
 

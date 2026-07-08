@@ -131,6 +131,10 @@ class CommissionEngine:
 
         sponsor.direct_referral_count = (sponsor.direct_referral_count or 0) + 1
         sponsor.save(update_fields=["direct_referral_count"])
+        from apps.notifications.lifecycle import schedule_msg91_lifecycle
+        from apps.notifications.tasks import send_referral_joined_task
+
+        schedule_msg91_lifecycle(send_referral_joined_task, sponsor.pk, buyer.pk)
         CommissionEngine._maybe_milestone(sponsor, cfg)
 
         # Binary uplines: 3 passive credits excluding the sponsor.
@@ -282,6 +286,14 @@ class CommissionEngine:
                 status="CREDITED",
                 slot_band_held=True,
             )
+            if ref_suffix == "":
+                from apps.commissions.milestone_notify import schedule_milestone_achieved_notification
+
+                schedule_milestone_achieved_notification(
+                    user=sponsor,
+                    threshold=threshold,
+                    bonus_amount=r.gross_amount,
+                )
         else:
             tds = calculate_and_apply_194h_tds(user=sponsor, gross_amount=piece)
             wallet.total_earned += tds.gross_amount
@@ -322,6 +334,14 @@ class CommissionEngine:
                 status="CREDITED",
                 slot_band_held=False,
             )
+            if ref_suffix == "":
+                from apps.commissions.milestone_notify import schedule_milestone_achieved_notification
+
+                schedule_milestone_achieved_notification(
+                    user=sponsor,
+                    threshold=threshold,
+                    bonus_amount=tds.gross_amount,
+                )
 
     @staticmethod
     def _credit_user(
@@ -362,8 +382,9 @@ class CommissionEngine:
                 recipient.id,
                 ctype,
             )
-            recipient.account_status = User.AccountStatus.CAPPED
-            recipient.save(update_fields=["account_status"])
+            from apps.commissions.cap_notify import maybe_schedule_earning_cap_notification
+
+            maybe_schedule_earning_cap_notification(user=recipient, wallet=wallet, cap=cap)
             CommissionLedger.objects.create(
                 recipient=recipient,
                 source_user=source,
@@ -405,8 +426,9 @@ class CommissionEngine:
             )
             on_total_earned_updated(wallet)
         if wallet.total_earned >= cap:
-            recipient.account_status = User.AccountStatus.CAPPED
-            recipient.save(update_fields=["account_status"])
+            from apps.commissions.cap_notify import maybe_schedule_earning_cap_notification
+
+            maybe_schedule_earning_cap_notification(user=recipient, wallet=wallet, cap=cap)
 
     @staticmethod
     def _maybe_milestone(sponsor: User, cfg):
@@ -427,6 +449,14 @@ class CommissionEngine:
                     net_bonus=Decimal("0"),
                     status="PENDING",
                 )
+                from apps.commissions.milestone_notify import schedule_milestone_achieved_notification
+
+                schedule_milestone_achieved_notification(
+                    user=sponsor,
+                    threshold=threshold,
+                    bonus_amount=bonus,
+                    cfg=cfg,
+                )
                 return
             if not User.objects.filter(pk=sponsor.pk, kyc_first_approved_at__isnull=False).exists():
                 MilestoneRecord.objects.create(
@@ -436,6 +466,14 @@ class CommissionEngine:
                     tds_deducted=Decimal("0"),
                     net_bonus=Decimal("0"),
                     status="HELD",
+                )
+                from apps.commissions.milestone_notify import schedule_milestone_achieved_notification
+
+                schedule_milestone_achieved_notification(
+                    user=sponsor,
+                    threshold=threshold,
+                    bonus_amount=bonus,
+                    cfg=cfg,
                 )
                 return
             wallet, _ = Wallet.objects.select_for_update().get_or_create(user=sponsor)

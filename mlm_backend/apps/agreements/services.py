@@ -207,3 +207,8 @@ def finalize_super_admin_kyc_auto_approve(*, user: User, is_reapproval: bool) ->
             release_held_commissions_for_user(user_id=user_id, actor=None)
 
         transaction.on_commit(_release)
+
+    from apps.notifications.lifecycle import schedule_msg91_lifecycle
+    from apps.notifications.tasks import send_kyc_approved_task
+
+    schedule_msg91_lifecycle(send_kyc_approved_task, user.pk)

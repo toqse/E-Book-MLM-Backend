@@ -487,6 +487,11 @@ def compliance_submit(request: Request):
 
         touch_compliance_submit_user_state(user=user)
 
+        from apps.notifications.lifecycle import schedule_msg91_lifecycle
+        from apps.notifications.tasks import send_kyc_submitted_task
+
+        schedule_msg91_lifecycle(send_kyc_submitted_task, user.pk)
+
     write_audit(
         "compliance.submitted",
         actor=user,

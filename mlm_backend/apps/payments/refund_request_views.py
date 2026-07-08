@@ -311,6 +311,10 @@ def admin_refund_approve(request, pk: int):
                     "updated_at",
                 ]
             )
+            from apps.notifications.lifecycle import schedule_msg91_lifecycle
+            from apps.notifications.tasks import send_refund_approved_task
+
+            schedule_msg91_lifecycle(send_refund_approved_task, rr_locked.pk)
     except Exception:
         if rz_refund_id:
             write_audit(
@@ -374,6 +378,10 @@ def admin_refund_reject(request, pk: int):
                 "updated_at",
             ]
         )
+        from apps.notifications.lifecycle import schedule_msg91_lifecycle
+        from apps.notifications.tasks import send_refund_rejected_task
+
+        schedule_msg91_lifecycle(send_refund_rejected_task, rr.pk, reason)
     return envelope_response({"id": rr.id, "status": rr.status})
 
 
