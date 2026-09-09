@@ -40,3 +40,22 @@ class OTPRecord(models.Model):
             models.Index(fields=["phone", "purpose", "created_at"]),
             models.Index(fields=["email", "purpose", "created_at"]),
         ]
+
+
+class StoreReferralLead(models.Model):
+    class Platform(models.TextChoices):
+        ANDROID = "ANDROID", "Android"
+        IOS = "IOS", "iOS"
+
+    phone = models.CharField(max_length=20, unique=True)
+    referral_code = models.CharField(max_length=32)
+    platform = models.CharField(max_length=16, choices=Platform.choices)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "auth_store_referral_lead"
+        indexes = [
+            models.Index(fields=["expires_at"]),
+        ]

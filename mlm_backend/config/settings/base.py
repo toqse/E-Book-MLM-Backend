@@ -153,6 +153,8 @@ REST_FRAMEWORK = {
         "otp_send": "10/min",
         "otp_verify": "20/min",
         "auth_login": "15/min",
+        "referral_lead": "10/min",
+        "referral_lookup": "30/min",
     },
     "EXCEPTION_HANDLER": "apps.common.exceptions.envelope_exception_handler",
     # Ensure consistent date rendering across API responses (DRF DateField).

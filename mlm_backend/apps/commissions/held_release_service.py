@@ -186,8 +186,9 @@ def release_held_commissions_for_user(
             )
 
         if wallet.total_earned >= cap:
-            recipient.account_status = User.AccountStatus.CAPPED
-            recipient.save(update_fields=["account_status"])
+            from apps.commissions.cap_notify import maybe_schedule_earning_cap_notification
+
+            maybe_schedule_earning_cap_notification(user=recipient, wallet=wallet, cap=cap)
 
         on_total_earned_updated(wallet)
         credited_ids.append(entry.id)

@@ -26,6 +26,7 @@ from apps.wallet.services.member_money import (
 
 from . import team_services
 from .models import User
+from .services import build_member_referral_links
 
 
 def _iso(dt: datetime) -> str:
@@ -79,10 +80,13 @@ def _parse_int(q: str | None, default: int, *, min_v: int = 1, max_v: int | None
 @permission_classes([IsAuthenticated])
 def referral_me(request: Request):
     u = request.user
+    links = build_member_referral_links(u.referral_code or "")
     return envelope_response(
         {
             "referral_code": u.referral_code,
             "referral_link": u.referral_link,
+            "play_store_referral_link": links["play_store"],
+            "app_store_referral_link": links["app_store"],
             "qr_url": u.referral_link,
         }
     )

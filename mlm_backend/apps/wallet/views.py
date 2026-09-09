@@ -373,6 +373,11 @@ def wallet_withdraw(request):
             },
         )
 
+        from apps.notifications.lifecycle import schedule_msg91_lifecycle
+        from apps.notifications.tasks import send_withdrawal_submitted_task
+
+        schedule_msg91_lifecycle(send_withdrawal_submitted_task, wr.pk)
+
     return envelope_response(
         {
             "id": wr.id,
@@ -699,6 +704,10 @@ def admin_withdrawal_approve(request, pk: int):
     wr.approved_at = timezone.now()
     wr.approved_by = request.user
     wr.save(update_fields=["status", "approved_at", "approved_by", "updated_at"])
+    from apps.notifications.lifecycle import schedule_msg91_lifecycle
+    from apps.notifications.tasks import send_withdrawal_approved_task
+
+    schedule_msg91_lifecycle(send_withdrawal_approved_task, wr.pk)
     return envelope_response(
         {
             "id": wr.id,
@@ -754,6 +763,10 @@ def admin_withdrawal_reject(request, pk: int):
         wr.status = WithdrawalRequest.Status.REJECTED
         wr.reject_reason = reason
         wr.save(update_fields=["status", "reject_reason", "updated_at"])
+        from apps.notifications.lifecycle import schedule_msg91_lifecycle
+        from apps.notifications.tasks import send_withdrawal_rejected_task
+
+        schedule_msg91_lifecycle(send_withdrawal_rejected_task, wr.pk, reason)
     return envelope_response({"id": wr.id, "status": wr.status})
 
 

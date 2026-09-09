@@ -35,3 +35,19 @@ def get_milestones(cfg=None) -> list[tuple[int, Decimal, Decimal]]:
 
 # Backward-compatible alias for older imports.
 MILESTONES = DEFAULT_MILESTONES
+
+
+def milestone_tier_index(threshold: int, cfg=None) -> int:
+    """1-based tier index for a referral threshold."""
+    for idx, (th, _pct, _bonus) in enumerate(get_milestones(cfg), start=1):
+        if int(th) == int(threshold):
+            return idx
+    return 0
+
+
+def milestone_display_name(threshold: int, *, tier_index: int | None = None, cfg=None) -> str:
+    """Human-readable milestone label for MSG91 templates (e.g. T2 Milestone)."""
+    idx = tier_index if tier_index else milestone_tier_index(threshold, cfg)
+    if idx > 0:
+        return f"T{idx} Milestone"
+    return f"{int(threshold)} Referrals Milestone"

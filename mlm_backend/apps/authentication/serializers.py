@@ -177,3 +177,34 @@ class ProfileUpdateSerializer(serializers.Serializer):
 
     def validate_country(self, value: str) -> str:
         return value.strip()
+
+
+class StoreReferralLeadSerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=22)
+    referral_code = serializers.CharField(max_length=32)
+    platform = serializers.CharField(max_length=16)
+
+    def validate_phone(self, value):
+        try:
+            return normalize_phone_registration(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate(self, attrs):
+        attrs["referral_code"] = (attrs.get("referral_code") or "").strip()
+        if not attrs["referral_code"]:
+            raise serializers.ValidationError({"referral_code": "Referral code is required."})
+        attrs["platform"] = (attrs.get("platform") or "").strip()
+        if not attrs["platform"]:
+            raise serializers.ValidationError({"platform": "Platform is required."})
+        return attrs
+
+
+class ReferralByPhoneQuerySerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=22)
+
+    def validate_phone(self, value):
+        try:
+            return normalize_phone_registration(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc

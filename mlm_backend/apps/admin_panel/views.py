@@ -223,6 +223,11 @@ def _approve_compliance_by_user_ids(user_ids: list[int]):
             transaction.on_commit(
                 lambda user_id=uid: release_held_commissions_for_user(user_id=user_id, actor=None)
             )
+        from apps.notifications.lifecycle import schedule_msg91_lifecycle
+        from apps.notifications.tasks import send_kyc_approved_task
+
+        for uid in ok_ids:
+            schedule_msg91_lifecycle(send_kyc_approved_task, uid)
     return ok_ids, failed, now.isoformat()
 
 
@@ -954,6 +959,10 @@ def compliance_reject(request, pk: int):
     u.save(
         update_fields=["kyc_status", "kyc_reviewed_at", "kyc_rejection_reason", "updated_at"]
     )
+    from apps.notifications.lifecycle import schedule_msg91_lifecycle
+    from apps.notifications.tasks import send_kyc_rejected_task
+
+    schedule_msg91_lifecycle(send_kyc_rejected_task, u.pk, reason)
     return envelope_response({"kyc_status": u.kyc_status})
 
 
@@ -1186,6 +1195,8 @@ def system_config_view(request):
                     "ios_force_update": bool(cfg.ios_force_update),
                     "android_latest_app_version": cfg.android_latest_app_version or "",
                     "android_force_update": bool(cfg.android_force_update),
+                    "play_store_url": cfg.play_store_url or "",
+                    "app_store_url": cfg.app_store_url or "",
                 },
             }
         )
@@ -1234,6 +1245,8 @@ def system_config_view(request):
         "ios_force_update",
         "android_latest_app_version",
         "android_force_update",
+        "play_store_url",
+        "app_store_url",
     ]:
         if field not in data:
             continue
@@ -1245,6 +1258,18 @@ def system_config_view(request):
                 s = val.strip()
                 if len(s) > 32:
                     errors[field] = "max_length_32"
+                    continue
+                setattr(cfg, field, s)
+            else:
+                errors[field] = "must_be_string"
+            continue
+        if field in ("play_store_url", "app_store_url"):
+            if val in (None, ""):
+                setattr(cfg, field, "")
+            elif isinstance(val, str):
+                s = val.strip()
+                if len(s) > 500:
+                    errors[field] = "max_length_500"
                     continue
                 setattr(cfg, field, s)
             else:
@@ -1338,6 +1363,8 @@ def public_app_version(request):
             "ios_force_update": bool(cfg.ios_force_update),
             "android_latest_app_version": cfg.android_latest_app_version or "",
             "android_force_update": bool(cfg.android_force_update),
+            "play_store_url": cfg.play_store_url or "",
+            "app_store_url": cfg.app_store_url or "",
         }
     )
 

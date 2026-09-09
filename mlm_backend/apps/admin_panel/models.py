@@ -90,6 +90,8 @@ class SystemConfig(models.Model):
     ios_force_update = models.BooleanField(default=False)
     android_latest_app_version = models.CharField(max_length=32, blank=True, default="")
     android_force_update = models.BooleanField(default=False)
+    play_store_url = models.URLField(max_length=500, blank=True, default="")
+    app_store_url = models.URLField(max_length=500, blank=True, default="")
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,

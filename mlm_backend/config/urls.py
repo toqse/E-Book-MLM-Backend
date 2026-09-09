@@ -52,6 +52,8 @@ urlpatterns = [
         name="agreement_acceptance_proof_download",
     ),
     path("api/v1/auth/company-referral-code/", auth_views.company_referral_code_public),
+    path("api/v1/auth/store-referral-lead/", auth_views.store_referral_lead),
+    path("api/v1/auth/referral-by-phone/", auth_views.referral_by_phone),
     path("api/v1/app-version/", adminv.public_app_version),
     path("api/v1/auth/validate-referral/", auth_views.validate_referral),
     # Admin auth
