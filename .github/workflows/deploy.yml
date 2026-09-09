@@ -16,10 +16,25 @@ jobs:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_KEY }}
+          # Fail the job on the first command error (e.g. git pull blocked by local edits).
+          script_stop: true
           script: |
-            cd ~/E-Book-MLM-Backend/mlm_backend
+            set -e
+            cd ~/E-Book-MLM-Backend
 
+            echo "Fetching and updating to origin/master..."
+            git fetch origin
             git pull origin master
+
+            LOCAL_SHA=$(git rev-parse HEAD)
+            REMOTE_SHA=$(git rev-parse origin/master)
+            echo "Deploying commit: $(git rev-parse --short HEAD) — $(git log -1 --pretty=%s)"
+            if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+              echo "ERROR: checkout ($LOCAL_SHA) does not match origin/master ($REMOTE_SHA). Aborting deploy."
+              exit 1
+            fi
+
+            cd ~/E-Book-MLM-Backend/mlm_backend
 
             docker compose -f docker/docker-compose.yml down
 
