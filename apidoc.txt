@@ -116,7 +116,7 @@ Every subsection lists: METHOD URL | Auth | Request | Success data (inside envel
 unless noted) | Common errors.
 
 
-MODULE: Authentication (/api/v1/auth/)
+MODULE: Authentication (/api/v1/auth/)...
 --------------------------------------------------------------------------------
 POST /api/v1/auth/send-otp/
   Auth: None.
