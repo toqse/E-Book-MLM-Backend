@@ -78,8 +78,9 @@ def test_milestone_achieved_on_threshold(mock_post, system_config):
     ]
     body = rejected[0].args[1]
     variables = body["data"]["sendTo"][0]["variables"]
-    assert variables["body_2"]["value"] == "T1 Milestone"
-    assert variables["reward_amount"]["value"] == "300.00"
+    assert variables["milestone_achieved_3:reward_amount"]["value"] == "300.00"
+    assert variables["milestone_achieved_utility:body_reward_amount"]["value"] == "300.00"
+    assert "body_2" not in variables
     assert NotificationLog.objects.filter(
         user=sponsor, template_key="milestone_achieved", channel="MSG91"
     ).exists()
@@ -214,7 +215,8 @@ def test_withdrawal_rejected(mock_post, system_config):
     assert "withdraw-rejected" in slugs
     rejected_calls = [c for c in mock_post.call_args_list if c.args[0] == "withdraw-rejected"]
     variables = rejected_calls[0].args[1]["data"]["sendTo"][0]["variables"]
-    assert variables["rejection_reason"]["value"] == "name mismatch"
+    assert variables["withdrawal_rejected_2:rejection_reason"]["value"] == "name mismatch"
+    assert variables["withdrawal_rejected:body_rejection_reason"]["value"] == "name mismatch"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -308,7 +310,8 @@ def test_refund_approved_task(mock_post, system_config):
     mock_post.assert_called_once()
     assert mock_post.call_args[0][0] == "refund-approved"
     variables = mock_post.call_args[0][1]["data"]["sendTo"][0]["variables"]
-    assert variables["refund_amount"]["value"] == "300.00"
+    assert variables["refund_approved_2:refund_amount"]["value"] == "300.00"
+    assert variables["refund_approved:body_refund_amount"]["value"] == "300.00"
 
 
 @pytest.mark.django_db
