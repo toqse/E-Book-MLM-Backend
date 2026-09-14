@@ -1,4 +1,9 @@
-"""MSG91 campaign API client for OTP, invoice, and KYC invitation delivery."""
+"""MSG91 campaign API client for OTP, invoice, KYC invitation, and lifecycle delivery.
+
+Variable keys use MSG91 namespaced template IDs so email and WhatsApp channels
+in each campaign receive the correct fields (e.g. invoice_template_10:amount,
+purchase_confirmed:body_amount).
+"""
 
 from __future__ import annotations
 
@@ -59,11 +64,12 @@ def _body_text_var(*, parameter_name: str, value: str) -> dict[str, str]:
 
 
 def _otp_variables(*, otp: str, company_name: str) -> dict[str, Any]:
+    # Email template: template_22_05_2026_12_05_3 | WhatsApp: otp_verification
     return {
-        "company_name": {"value": company_name},
-        "otp": {"value": otp},
-        "body_1": _text_var(otp),
-        "button_1": {"type": "text", "subtype": "url", "value": otp},
+        "template_22_05_2026_12_05_3:company_name": {"value": company_name},
+        "template_22_05_2026_12_05_3:otp": {"value": otp},
+        "otp_verification:body_1": _text_var(otp),
+        "otp_verification:button_1": {"type": "text", "subtype": "url", "value": otp},
     }
 
 
@@ -178,18 +184,26 @@ def send_invoice_message(
         _logger.warning("MSG91 invoice skipped: no phone or email for name=%s", name)
         return False
     company = _company_name()
+    # Email: invoice_template_10 | WhatsApp: purchase_confirmed (no WA invoice URL)
     variables: dict[str, Any] = {
-        "customer_name": {"value": name},
-        "invoice_number": {"value": invoice_number},
-        "invoice_date": {"value": invoice_date},
-        "amount": {"value": amount},
-        "invoice_download_link": {"value": invoice_link},
-        "company_name": {"value": company},
-        "body_amount": _body_text_var(parameter_name="amount", value=amount),
-        "body_customer_name": _body_text_var(parameter_name="customer_name", value=name),
-        "body_invoice_url": _body_text_var(parameter_name="invoice_url", value=invoice_link),
-        "body_invoice_number": _body_text_var(parameter_name="invoice_number", value=invoice_number),
-        "body_invoice_date": _body_text_var(parameter_name="invoice_date", value=invoice_date),
+        "invoice_template_10:customer_name": {"value": name},
+        "invoice_template_10:invoice_number": {"value": invoice_number},
+        "invoice_template_10:invoice_date": {"value": invoice_date},
+        "invoice_template_10:amount": {"value": amount},
+        "invoice_template_10:invoice_download_link": {"value": invoice_link},
+        "invoice_template_10:company_name": {"value": company},
+        "purchase_confirmed:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=name
+        ),
+        "purchase_confirmed:body_invoice_number": _body_text_var(
+            parameter_name="invoice_number", value=invoice_number
+        ),
+        "purchase_confirmed:body_invoice_date": _body_text_var(
+            parameter_name="invoice_date", value=invoice_date
+        ),
+        "purchase_confirmed:body_amount": _body_text_var(
+            parameter_name="amount", value=amount
+        ),
     }
     body = _campaign_body(
         name=name,
@@ -211,11 +225,13 @@ def send_invitation_message(
         _logger.warning("MSG91 invitation skipped: no phone or email for name=%s", name)
         return False
     company = _company_name()
+    # Email: invitation_55 | WhatsApp: distributor_invitation
     variables: dict[str, Any] = {
-        "customer_name": {"value": name},
-        "company_name": {"value": company},
-        "body_customer_name": _body_text_var(parameter_name="customer_name", value=name),
-        "body_company_name": _body_text_var(parameter_name="company_name", value=company),
+        "invitation_55:customer_name": {"value": name},
+        "invitation_55:company_name": {"value": company},
+        "distributor_invitation:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=name
+        ),
     }
     body = _campaign_body(
         name=name,
@@ -242,10 +258,13 @@ def send_welcome_registration_message(
         return False
     company = _company_name()
     display_name = name or "Member"
+    # Email: registration_success_ | WhatsApp: registration_success
     variables: dict[str, Any] = {
-        "member_name": {"value": display_name},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
+        "registration_success_:member_name": {"value": display_name},
+        "registration_success_:company_name": {"value": company},
+        "registration_success:body_member_name": _body_text_var(
+            parameter_name="member_name", value=display_name
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -269,12 +288,17 @@ def send_kyc_submitted_message(
         return False
     company = _company_name()
     display_name = name or "Member"
+    # Email: kyc_submitted_4 | WhatsApp: kyc_submitted
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "submitted_date": {"value": submitted_date},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(submitted_date),
+        "kyc_submitted_4:customer_name": {"value": display_name},
+        "kyc_submitted_4:submitted_date": {"value": submitted_date},
+        "kyc_submitted_4:company_name": {"value": company},
+        "kyc_submitted:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "kyc_submitted:body_submitted_date": _body_text_var(
+            parameter_name="submitted_date", value=submitted_date
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -297,10 +321,13 @@ def send_kyc_approved_message(
         return False
     company = _company_name()
     display_name = name or "Member"
+    # Email: kyc_approved_10 | WhatsApp: kyc_approved
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
+        "kyc_approved_10:customer_name": {"value": display_name},
+        "kyc_approved_10:company_name": {"value": company},
+        "kyc_approved:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -325,12 +352,17 @@ def send_kyc_rejected_message(
     company = _company_name()
     display_name = name or "Member"
     reason = (rejection_reason or "").strip() or "Not specified"
+    # Email: kyc_rejected_10 | WhatsApp: kyc_rejected
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "rejection_reason": {"value": reason},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(reason),
+        "kyc_rejected_10:customer_name": {"value": display_name},
+        "kyc_rejected_10:rejection_reason": {"value": reason},
+        "kyc_rejected_10:company_name": {"value": company},
+        "kyc_rejected:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "kyc_rejected:body_rejection_reason": _body_text_var(
+            parameter_name="rejection_reason", value=reason
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -365,12 +397,17 @@ def send_referral_joined_message(
     company = _company_name()
     display_name = name or "Member"
     ref_name = referral_name or "Member"
+    # Email + WhatsApp: referral_joined
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "referral_name": {"value": ref_name},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(ref_name),
+        "referral_joined:customer_name": {"value": display_name},
+        "referral_joined:referral_name": {"value": ref_name},
+        "referral_joined:company_name": {"value": company},
+        "referral_joined:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "referral_joined:body_referral_name": _body_text_var(
+            parameter_name="referral_name", value=ref_name
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -395,15 +432,20 @@ def send_milestone_achieved_message(
         return False
     company = _company_name()
     display_name = name or "Member"
-    label = milestone_label or "Milestone"
     amount = reward_amount or "0"
+    _ = milestone_label  # retained for callers; new MSG91 template omits label
+    # Email: milestone_achieved_3 | WhatsApp: milestone_achieved_utility
+    # New MSG91 template does not include milestone_label.
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "reward_amount": {"value": amount},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(label),
-        "body_3": _text_var(amount),
+        "milestone_achieved_3:customer_name": {"value": display_name},
+        "milestone_achieved_3:reward_amount": {"value": amount},
+        "milestone_achieved_3:company_name": {"value": company},
+        "milestone_achieved_utility:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "milestone_achieved_utility:body_reward_amount": _body_text_var(
+            parameter_name="reward_amount", value=amount
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -428,12 +470,17 @@ def send_earning_cap_achieved_message(
     company = _company_name()
     display_name = name or "Member"
     total = total_earnings or "0"
+    # Email + WhatsApp: earning_cap_achieved
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "total_earnings": {"value": total},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(total),
+        "earning_cap_achieved:customer_name": {"value": display_name},
+        "earning_cap_achieved:total_earnings": {"value": total},
+        "earning_cap_achieved:company_name": {"value": company},
+        "earning_cap_achieved:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "earning_cap_achieved:body_total_earnings": _body_text_var(
+            parameter_name="total_earnings", value=total
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -460,14 +507,21 @@ def send_withdrawal_submitted_message(
     display_name = name or "Member"
     amt = amount or "0"
     date_str = request_date or ""
+    # Email + WhatsApp: withdrawal_submitted
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "amount": {"value": amt},
-        "request_date": {"value": date_str},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(amt),
-        "body_3": _text_var(date_str),
+        "withdrawal_submitted:customer_name": {"value": display_name},
+        "withdrawal_submitted:amount": {"value": amt},
+        "withdrawal_submitted:request_date": {"value": date_str},
+        "withdrawal_submitted:company_name": {"value": company},
+        "withdrawal_submitted:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "withdrawal_submitted:body_amount": _body_text_var(
+            parameter_name="amount", value=amt
+        ),
+        "withdrawal_submitted:body_request_date": _body_text_var(
+            parameter_name="request_date", value=date_str
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -492,12 +546,17 @@ def send_withdrawal_approved_message(
     company = _company_name()
     display_name = name or "Member"
     amt = amount or "0"
+    # Email: withdrawal_approved_3 | WhatsApp: withdrawal_approved
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "amount": {"value": amt},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(amt),
+        "withdrawal_approved_3:customer_name": {"value": display_name},
+        "withdrawal_approved_3:amount": {"value": amt},
+        "withdrawal_approved_3:company_name": {"value": company},
+        "withdrawal_approved:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "withdrawal_approved:body_amount": _body_text_var(
+            parameter_name="amount", value=amt
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -522,12 +581,17 @@ def send_withdrawal_rejected_message(
     company = _company_name()
     display_name = name or "Member"
     reason = (rejection_reason or "").strip() or "Not specified"
+    # Email: withdrawal_rejected_2 | WhatsApp: withdrawal_rejected
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "rejection_reason": {"value": reason},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(reason),
+        "withdrawal_rejected_2:customer_name": {"value": display_name},
+        "withdrawal_rejected_2:rejection_reason": {"value": reason},
+        "withdrawal_rejected_2:company_name": {"value": company},
+        "withdrawal_rejected:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "withdrawal_rejected:body_rejection_reason": _body_text_var(
+            parameter_name="rejection_reason", value=reason
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -552,12 +616,17 @@ def send_refund_approved_message(
     company = _company_name()
     display_name = name or "Member"
     amt = refund_amount or "0"
+    # Email: refund_approved_2 | WhatsApp: refund_approved
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "refund_amount": {"value": amt},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(amt),
+        "refund_approved_2:customer_name": {"value": display_name},
+        "refund_approved_2:refund_amount": {"value": amt},
+        "refund_approved_2:company_name": {"value": company},
+        "refund_approved:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "refund_approved:body_refund_amount": _body_text_var(
+            parameter_name="refund_amount", value=amt
+        ),
     }
     body = _campaign_body(
         name=display_name,
@@ -582,12 +651,17 @@ def send_refund_rejected_message(
     company = _company_name()
     display_name = name or "Member"
     reason = (rejection_reason or "").strip() or "Not specified"
+    # Email + WhatsApp: refund_rejected
     variables: dict[str, Any] = {
-        "customer_name": {"value": display_name},
-        "rejection_reason": {"value": reason},
-        "company_name": {"value": company},
-        "body_1": _text_var(display_name),
-        "body_2": _text_var(reason),
+        "refund_rejected:customer_name": {"value": display_name},
+        "refund_rejected:rejection_reason": {"value": reason},
+        "refund_rejected:company_name": {"value": company},
+        "refund_rejected:body_customer_name": _body_text_var(
+            parameter_name="customer_name", value=display_name
+        ),
+        "refund_rejected:body_rejection_reason": _body_text_var(
+            parameter_name="rejection_reason", value=reason
+        ),
     }
     body = _campaign_body(
         name=display_name,

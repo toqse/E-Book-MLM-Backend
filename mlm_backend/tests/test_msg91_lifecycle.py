@@ -266,7 +266,8 @@ def test_kyc_rejected_on_admin_compliance_reject(mock_post, system_config):
     rejected_calls = [call for call in mock_post.call_args_list if call.args[0] == "kyc-rejected"]
     body = rejected_calls[0].args[1]
     variables = body["data"]["sendTo"][0]["variables"]
-    assert variables["rejection_reason"]["value"] == "mismatch name"
+    assert variables["kyc_rejected_10:rejection_reason"]["value"] == "mismatch name"
+    assert variables["kyc_rejected:body_rejection_reason"]["value"] == "mismatch name"
     assert NotificationLog.objects.filter(
         user=user, template_key="kyc_rejected", channel="MSG91"
     ).exists()
