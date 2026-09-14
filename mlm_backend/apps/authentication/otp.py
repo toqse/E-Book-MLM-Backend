@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from apps.admin_panel.utils import is_development_mode
 
-from .models import OTPRecord
+from .models import DemoOtpAllowlist, OTPRecord
 
 _logger = logging.getLogger(__name__)
 
@@ -30,6 +30,26 @@ def normalize_otp_code(raw) -> str | None:
     if not digits or len(digits) > 6:
         return None
     return digits.zfill(6)
+
+
+def get_active_demo_otp_entry(*, phone=None, email=None) -> DemoOtpAllowlist | None:
+    """Return an active allowlist row matching phone or email (request identity)."""
+    qs = DemoOtpAllowlist.objects.filter(is_active=True)
+    if phone:
+        pn = phone.strip() if isinstance(phone, str) else phone
+        entry = qs.filter(phone=pn).first()
+        if entry:
+            return entry
+    if email:
+        em = email.strip().lower() if isinstance(email, str) else email
+        return qs.filter(email=em).first()
+    return None
+
+
+def is_demo_otp_code(entry: DemoOtpAllowlist | None, code_n: str | None) -> bool:
+    if not entry or not code_n:
+        return False
+    return normalize_otp_code(entry.demo_otp_code) == code_n
 
 
 def _otp_send_max() -> int:
@@ -158,6 +178,16 @@ def verify_otp(phone=None, email=None, code=None, purpose=OTPRecord.Purpose.LOGI
         id_qs = id_qs.filter(email=email.strip().lower())
     else:
         return None, "phone_or_email_required"
+
+    demo_entry = get_active_demo_otp_entry(phone=phone, email=email)
+    if is_demo_otp_code(demo_entry, code_n):
+        latest = id_qs.order_by("-created_at").first()
+        if latest:
+            if latest.attempts >= 5:
+                return None, "Too Many Attempts, Try Again Later"
+            latest.is_used = True
+            latest.save(update_fields=["is_used"])
+            return latest, None
 
     rec = id_qs.filter(otp_code=code_n).order_by("-created_at").first()
     if rec:

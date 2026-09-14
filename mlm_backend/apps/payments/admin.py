@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import CreditNote, GSTInvoice, Order, RefundRequest
+from .models import CreditNote, GSTInvoice, Order, OrderLine, RefundRequest
 
 
 @admin.register(Order)
@@ -100,6 +100,21 @@ class OrderAdmin(admin.ModelAdmin):
             },
         ),
     )
+
+
+@admin.register(OrderLine)
+class OrderLineAdmin(admin.ModelAdmin):
+    list_display = ("id", "order", "ebook", "unit_base_price", "created_at")
+    list_filter = ("created_at",)
+    search_fields = (
+        "order__order_number",
+        "ebook__title",
+        "ebook__slug",
+        "order__user__member_id",
+    )
+    autocomplete_fields = ("order", "ebook")
+    readonly_fields = ("created_at",)
+    ordering = ("-id",)
 
 
 @admin.register(RefundRequest)

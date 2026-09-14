@@ -6,8 +6,9 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from apps.admin_panel.models import SystemConfig
 from apps.agreements.models import MemberComplianceProfile
-from apps.authentication.models import OTPRecord
+from apps.authentication.models import DemoOtpAllowlist, OTPRecord
 from apps.authentication.otp import normalize_otp_code, verify_otp
 from apps.courses.models import EBook
 from apps.payments.models import Order
@@ -526,3 +527,180 @@ def test_me_patch_rejects_duplicate_email():
     resp = client.patch("/api/v1/auth/me/", {"email": taken.email}, format="json")
     assert resp.status_code == 400, resp.content
     assert "email" in (resp.json().get("errors") or {})
+
+
+DEMO_OTP_PHONE = "+919555555501"
+DEMO_OTP_EMAIL = "demo.otp.audit@test.dev"
+DEMO_OTP_CODE = "654321"
+
+
+def _ensure_dev_mode_off():
+    cfg, _ = SystemConfig.objects.get_or_create(pk=1)
+    cfg.development_mode = False
+    cfg.save(update_fields=["development_mode"])
+
+
+@pytest.mark.django_db
+def test_demo_otp_allowlist_login_with_development_mode_off():
+    _ensure_dev_mode_off()
+    DemoOtpAllowlist.objects.create(
+        phone=DEMO_OTP_PHONE,
+        email=DEMO_OTP_EMAIL,
+        demo_otp_code=DEMO_OTP_CODE,
+        is_active=True,
+        note="Razorpay audit",
+    )
+    User.objects.create_user(
+        login_identifier=DEMO_OTP_PHONE,
+        password="pw",
+        phone=DEMO_OTP_PHONE,
+        email=DEMO_OTP_EMAIL,
+        full_name="Demo OTP User",
+        member_id="MBR000501",
+        referral_code="MBR501",
+        referral_link="http://localhost:3000/join?ref=MBR501",
+        role=User.Role.MEMBER,
+        is_staff=False,
+    )
+    exp = timezone.now() + timedelta(minutes=10)
+    OTPRecord.objects.create(
+        phone=DEMO_OTP_PHONE,
+        email=None,
+        otp_code="111111",
+        purpose=OTPRecord.Purpose.LOGIN,
+        expires_at=exp,
+    )
+    client = APIClient()
+    verify = client.post(
+        "/api/v1/auth/verify-otp-login/",
+        {"phone": DEMO_OTP_PHONE, "otp_code": DEMO_OTP_CODE},
+        format="json",
+    )
+    assert verify.status_code == 200, verify.content
+    assert verify.json()["data"]["tokens"]["access"]
+    assert OTPRecord.objects.filter(phone=DEMO_OTP_PHONE, is_used=True).exists()
+
+
+@pytest.mark.django_db
+def test_demo_otp_allowlist_register_with_development_mode_off():
+    _ensure_dev_mode_off()
+    DemoOtpAllowlist.objects.create(
+        phone=DEMO_OTP_PHONE,
+        email=DEMO_OTP_EMAIL,
+        demo_otp_code=DEMO_OTP_CODE,
+        is_active=True,
+    )
+    sponsor = User.objects.create_superuser(
+        "company-demo-otp@test.dev",
+        "pw",
+        full_name="Platform Admin",
+        email="company-demo-otp@test.dev",
+    )
+    exp = timezone.now() + timedelta(minutes=10)
+    OTPRecord.objects.create(
+        phone=DEMO_OTP_PHONE,
+        email=None,
+        otp_code="111111",
+        purpose=OTPRecord.Purpose.REGISTER,
+        expires_at=exp,
+        registration_full_name="Audit User",
+        registration_email=DEMO_OTP_EMAIL,
+        registration_referral_code="Admin",
+        registration_sponsor=sponsor,
+    )
+
+    client = APIClient()
+    finish = client.post(
+        "/api/v1/auth/verify-otp-register/",
+        {"phone": DEMO_OTP_PHONE, "otp_code": DEMO_OTP_CODE},
+        format="json",
+    )
+    assert finish.status_code == 200, finish.content
+    u = User.objects.get(phone=DEMO_OTP_PHONE)
+    assert u.email == DEMO_OTP_EMAIL
+    assert u.full_name == "Audit User"
+    assert u.sponsor_id == sponsor.id
+
+@pytest.mark.django_db
+def test_demo_otp_rejected_for_non_allowlisted_identity():
+    _ensure_dev_mode_off()
+    DemoOtpAllowlist.objects.create(
+        phone=DEMO_OTP_PHONE,
+        email=DEMO_OTP_EMAIL,
+        demo_otp_code=DEMO_OTP_CODE,
+        is_active=True,
+    )
+    other_phone = "+919555555502"
+    exp = timezone.now() + timedelta(minutes=10)
+    OTPRecord.objects.create(
+        phone=other_phone,
+        email=None,
+        otp_code="111111",
+        purpose=OTPRecord.Purpose.LOGIN,
+        expires_at=exp,
+    )
+    rec, err = verify_otp(
+        phone=other_phone,
+        email=None,
+        code=DEMO_OTP_CODE,
+        purpose=OTPRecord.Purpose.LOGIN,
+    )
+    assert rec is None
+    assert err == "Invalid Otp"
+
+
+@pytest.mark.django_db
+def test_demo_otp_rejected_when_allowlist_inactive():
+    _ensure_dev_mode_off()
+    DemoOtpAllowlist.objects.create(
+        phone=DEMO_OTP_PHONE,
+        email=DEMO_OTP_EMAIL,
+        demo_otp_code=DEMO_OTP_CODE,
+        is_active=False,
+    )
+    exp = timezone.now() + timedelta(minutes=10)
+    OTPRecord.objects.create(
+        phone=DEMO_OTP_PHONE,
+        email=None,
+        otp_code="111111",
+        purpose=OTPRecord.Purpose.LOGIN,
+        expires_at=exp,
+    )
+    rec, err = verify_otp(
+        phone=DEMO_OTP_PHONE,
+        email=None,
+        code=DEMO_OTP_CODE,
+        purpose=OTPRecord.Purpose.LOGIN,
+    )
+    assert rec is None
+    assert err == "Invalid Otp"
+
+
+@pytest.mark.django_db
+def test_demo_otp_wrong_code_increments_attempts():
+    _ensure_dev_mode_off()
+    DemoOtpAllowlist.objects.create(
+        phone=DEMO_OTP_PHONE,
+        email=DEMO_OTP_EMAIL,
+        demo_otp_code=DEMO_OTP_CODE,
+        is_active=True,
+    )
+    exp = timezone.now() + timedelta(minutes=10)
+    row = OTPRecord.objects.create(
+        phone=DEMO_OTP_PHONE,
+        email=None,
+        otp_code="111111",
+        purpose=OTPRecord.Purpose.LOGIN,
+        expires_at=exp,
+    )
+    rec, err = verify_otp(
+        phone=DEMO_OTP_PHONE,
+        email=None,
+        code="000000",
+        purpose=OTPRecord.Purpose.LOGIN,
+    )
+    assert rec is None
+    assert err == "Invalid Otp"
+    row.refresh_from_db()
+    assert row.attempts == 1
+    assert row.is_used is False

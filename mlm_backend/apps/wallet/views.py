@@ -689,25 +689,24 @@ def admin_withdrawals_pending(request):
 @api_view(["POST"])
 @permission_classes([IsFinanceAdmin])
 def admin_withdrawal_approve(request, pk: int):
+    from apps.wallet.services.withdrawal_admin import (
+        WithdrawalActionError,
+        approve_withdrawal,
+    )
+
     wr = WithdrawalRequest.objects.select_related("user").filter(pk=pk).first()
     if not wr:
         return envelope_response(None, message="Not found", success=False, status=404)
-    if wr.status != WithdrawalRequest.Status.PENDING:
+    try:
+        approve_withdrawal(wr, actor=request.user)
+    except WithdrawalActionError as exc:
         return envelope_response(
             None,
-            message="Withdrawal is not pending.",
+            message=exc.message,
             success=False,
-            errors={"detail": "invalid_state", "status": wr.status},
+            errors={"detail": exc.code, "status": wr.status},
             status=400,
         )
-    wr.status = WithdrawalRequest.Status.APPROVED
-    wr.approved_at = timezone.now()
-    wr.approved_by = request.user
-    wr.save(update_fields=["status", "approved_at", "approved_by", "updated_at"])
-    from apps.notifications.lifecycle import schedule_msg91_lifecycle
-    from apps.notifications.tasks import send_withdrawal_approved_task
-
-    schedule_msg91_lifecycle(send_withdrawal_approved_task, wr.pk)
     return envelope_response(
         {
             "id": wr.id,
@@ -720,68 +719,37 @@ def admin_withdrawal_approve(request, pk: int):
 @api_view(["POST"])
 @permission_classes([IsFinanceAdmin])
 def admin_withdrawal_reject(request, pk: int):
+    from apps.wallet.services.withdrawal_admin import (
+        WithdrawalActionError,
+        reject_withdrawal,
+    )
+
     wr = WithdrawalRequest.objects.select_related("user").filter(pk=pk).first()
     if not wr:
         return envelope_response(None, message="Not found", success=False, status=404)
-    if wr.status not in (WithdrawalRequest.Status.PENDING, WithdrawalRequest.Status.APPROVED):
+    reason = (request.data.get("reason") or "").strip()
+    try:
+        reject_withdrawal(wr, reason=reason)
+    except WithdrawalActionError as exc:
         return envelope_response(
             None,
-            message="Withdrawal cannot be rejected in this state.",
+            message=exc.message,
             success=False,
-            errors={"detail": "invalid_state", "status": wr.status},
+            errors={"detail": exc.code, "status": wr.status},
             status=400,
         )
-    reason = (request.data.get("reason") or "").strip()
-    with transaction.atomic():
-        wallet, _ = Wallet.objects.select_for_update().get_or_create(user=wr.user)
-        wallet.cash_balance = _q2(wallet.cash_balance + wr.amount_requested)
-        wallet.total_withdrawn = _q2(wallet.total_withdrawn - wr.net_payable)
-        wallet.total_tds_deducted = _q2(wallet.total_tds_deducted - wr.tds_amount)
-        wallet.band_cash_withdrawn_fy = _q2(wallet.band_cash_withdrawn_fy - wr.amount_requested)
-        wallet.save(
-            update_fields=[
-                "cash_balance",
-                "total_withdrawn",
-                "total_tds_deducted",
-                "band_cash_withdrawn_fy",
-                "updated_at",
-            ]
-        )
-        WalletTransaction.objects.create(
-            user=wr.user,
-            tx_type=WalletTransaction.TxType.ADJUSTMENT,
-            amount=wr.amount_requested,
-            balance_after=wallet.cash_balance,
-            reference=f"withdrawal_reject:{wr.id}",
-            meta={
-                "withdrawal_id": wr.id,
-                "band": wr.band,
-                "tds_amount_reversed": str(wr.tds_amount),
-                "net_reversed": str(wr.net_payable),
-            },
-        )
-        wr.status = WithdrawalRequest.Status.REJECTED
-        wr.reject_reason = reason
-        wr.save(update_fields=["status", "reject_reason", "updated_at"])
-        from apps.notifications.lifecycle import schedule_msg91_lifecycle
-        from apps.notifications.tasks import send_withdrawal_rejected_task
-
-        schedule_msg91_lifecycle(send_withdrawal_rejected_task, wr.pk, reason)
     return envelope_response({"id": wr.id, "status": wr.status})
 
 
 @api_view(["POST"])
 @permission_classes([IsFinanceAdmin])
 def admin_withdrawal_mark_paid(request: Request, pk: int):
+    from apps.wallet.services.withdrawal_admin import (
+        WithdrawalActionError,
+        mark_withdrawal_paid,
+    )
+
     utr = (request.data.get("utr_number") or "").strip()
-    if not utr:
-        return envelope_response(
-            None,
-            message="utr_number is required.",
-            success=False,
-            errors={"detail": "missing_utr"},
-            status=400,
-        )
     paid_at_raw = (request.data.get("paid_at") or "").strip()
     paid_at = None
     if paid_at_raw:
@@ -800,19 +768,22 @@ def admin_withdrawal_mark_paid(request: Request, pk: int):
     wr = WithdrawalRequest.objects.filter(pk=pk).first()
     if not wr:
         return envelope_response(None, message="Not found", success=False, status=404)
-    if wr.status not in (WithdrawalRequest.Status.APPROVED, WithdrawalRequest.Status.PROCESSING):
+    try:
+        mark_withdrawal_paid(
+            wr, actor=request.user, utr_number=utr, paid_at=paid_at
+        )
+    except WithdrawalActionError as exc:
+        status_code = 400
+        errors = {"detail": exc.code}
+        if exc.code == "invalid_state":
+            errors["status"] = wr.status
         return envelope_response(
             None,
-            message="Withdrawal cannot be marked paid in this state.",
+            message=exc.message,
             success=False,
-            errors={"detail": "invalid_state", "status": wr.status},
-            status=400,
+            errors=errors,
+            status=status_code,
         )
-    wr.status = WithdrawalRequest.Status.PAID
-    wr.utr_number = utr
-    wr.paid_at = paid_at or timezone.now()
-    wr.paid_by = request.user
-    wr.save(update_fields=["status", "utr_number", "paid_at", "paid_by", "updated_at"])
     return envelope_response(
         {
             "id": wr.id,

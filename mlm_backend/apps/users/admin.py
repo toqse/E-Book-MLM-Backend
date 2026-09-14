@@ -3,7 +3,7 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from apps.agreements.models import MemberComplianceProfile
 
-from .models import User
+from .models import AccountDeletionRequest, User
 
 
 class MemberComplianceProfileInline(admin.StackedInline):
@@ -201,3 +201,29 @@ class UserAdmin(DjangoUserAdmin):
             },
         ),
     )
+
+
+@admin.register(AccountDeletionRequest)
+class AccountDeletionRequestAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "snapshot_member_id",
+        "snapshot_full_name",
+        "snapshot_phone",
+        "snapshot_email",
+        "status",
+        "user",
+        "created_at",
+        "completed_at",
+    )
+    list_filter = ("status", "created_at")
+    search_fields = (
+        "snapshot_member_id",
+        "snapshot_full_name",
+        "snapshot_phone",
+        "snapshot_email",
+        "reason",
+    )
+    autocomplete_fields = ("user", "completed_by")
+    readonly_fields = ("created_at",)
+    ordering = ("-id",)

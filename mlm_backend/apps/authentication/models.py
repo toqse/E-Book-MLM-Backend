@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -40,6 +41,69 @@ class OTPRecord(models.Model):
             models.Index(fields=["phone", "purpose", "created_at"]),
             models.Index(fields=["email", "purpose", "created_at"]),
         ]
+
+
+class DemoOtpAllowlist(models.Model):
+    """Fixed Demo OTP for allowlisted phone/email (e.g. Razorpay audit), even when development_mode is off."""
+
+    phone = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        unique=True,
+        help_text="E.164 with country code, e.g. +919876543210",
+    )
+    email = models.EmailField(null=True, blank=True, unique=True)
+    demo_otp_code = models.CharField(
+        max_length=6,
+        help_text="Fixed 6-digit OTP accepted for this phone/email on all OTP verify flows.",
+    )
+    is_active = models.BooleanField(default=True)
+    note = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "auth_demo_otp_allowlist"
+        verbose_name = "Demo OTP allowlist"
+        verbose_name_plural = "Demo OTP allowlist"
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(phone__isnull=False) & ~models.Q(phone="")
+                )
+                | (models.Q(email__isnull=False) & ~models.Q(email="")),
+                name="auth_demo_otp_phone_or_email",
+            ),
+        ]
+
+    def clean(self):
+        from apps.common.phone_utils import normalize_phone_registration
+
+        phone = (self.phone or "").strip() or None
+        email = (self.email or "").strip().lower() or None
+        if not phone and not email:
+            raise ValidationError("Provide at least a phone or an email.")
+        if phone:
+            try:
+                phone = normalize_phone_registration(phone)
+            except ValueError as exc:
+                raise ValidationError({"phone": str(exc)}) from exc
+        code = "".join(c for c in str(self.demo_otp_code or "").strip() if c.isdigit())
+        if len(code) != 6:
+            raise ValidationError({"demo_otp_code": "Demo OTP must be exactly 6 digits."})
+        self.phone = phone
+        self.email = email
+        self.demo_otp_code = code
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        ident = self.phone or self.email or "?"
+        status = "active" if self.is_active else "inactive"
+        return f"{ident} ({status})"
 
 
 class StoreReferralLead(models.Model):
